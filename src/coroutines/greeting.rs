@@ -29,7 +29,9 @@ pub enum GetSmtpGreetingError {
 
 /// Output emitted when the coroutine terminates its progression.
 pub enum GetSmtpGreetingResult {
-    Io { io: StreamIo },
+    Io {
+        io: StreamIo,
+    },
     Ok {
         context: SmtpContext,
         greeting: Greeting<'static>,
@@ -91,31 +93,29 @@ impl GetSmtpGreeting {
                     self.state = GreetingState::Deserialize;
                     continue;
                 }
-                GreetingState::Deserialize => {
-                    match self.codec.decode(&self.buffer) {
-                        Ok((_, greeting)) => {
-                            let mut context = self.context.take().unwrap();
-                            context.state = State::Greeted;
+                GreetingState::Deserialize => match self.codec.decode(&self.buffer) {
+                    Ok((_, greeting)) => {
+                        let mut context = self.context.take().unwrap();
+                        context.state = State::Greeted;
 
-                            return GetSmtpGreetingResult::Ok {
-                                context,
-                                greeting: greeting.into_static(),
-                            };
-                        }
-                        Err(GreetingDecodeError::Incomplete) => {
-                            self.state = GreetingState::Read(ReadStream::new());
-                            continue;
-                        }
-                        Err(GreetingDecodeError::Failed) => {
-                            let discarded_bytes =
-                                Secret::new(std::mem::take(&mut self.buffer).into_boxed_slice());
-                            return GetSmtpGreetingResult::Err {
-                                context: self.context.take().unwrap(),
-                                err: GetSmtpGreetingError::DecodingFailure { discarded_bytes },
-                            };
-                        }
+                        return GetSmtpGreetingResult::Ok {
+                            context,
+                            greeting: greeting.into_static(),
+                        };
                     }
-                }
+                    Err(GreetingDecodeError::Incomplete) => {
+                        self.state = GreetingState::Read(ReadStream::new());
+                        continue;
+                    }
+                    Err(GreetingDecodeError::Failed) => {
+                        let discarded_bytes =
+                            Secret::new(std::mem::take(&mut self.buffer).into_boxed_slice());
+                        return GetSmtpGreetingResult::Err {
+                            context: self.context.take().unwrap(),
+                            err: GetSmtpGreetingError::DecodingFailure { discarded_bytes },
+                        };
+                    }
+                },
             }
         }
     }

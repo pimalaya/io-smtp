@@ -12,13 +12,8 @@ use smtp_codec::{
     decode::{Decoder, EhloResponseDecodeError},
     encode::Encoder,
     smtp_types::{
-        command::Command,
-        core::EhloDomain,
-        response::EhloResponse,
-        secret::Secret,
-        state::State,
-        utils::escape_byte_string,
-        IntoStatic,
+        command::Command, core::EhloDomain, secret::Secret, state::State,
+        utils::escape_byte_string, IntoStatic,
     },
     CommandCodec, EhloResponseCodec,
 };
@@ -43,10 +38,11 @@ pub enum SmtpEhloError {
 
 /// Output emitted when the coroutine terminates its progression.
 pub enum SmtpEhloResult {
-    Io { io: StreamIo },
+    Io {
+        io: StreamIo,
+    },
     Ok {
         context: SmtpContext,
-        response: EhloResponse<'static>,
     },
     Err {
         context: SmtpContext,
@@ -135,30 +131,28 @@ impl SmtpEhlo {
                     self.state = EhloState::Deserialize;
                     continue;
                 }
-                EhloState::Deserialize => {
-                    match self.codec.decode(&self.buffer) {
-                        Ok((_, response)) => {
-                            let response = response.into_static();
-                            let mut context = self.context.take().unwrap();
-                            context.state = State::Ready;
-                            context.capabilities = response.capabilities.clone();
+                EhloState::Deserialize => match self.codec.decode(&self.buffer) {
+                    Ok((_, response)) => {
+                        let response = response.into_static();
+                        let mut context = self.context.take().unwrap();
+                        context.state = State::Ready;
+                        context.capability = response.capabilities.into_iter().collect();
 
-                            return SmtpEhloResult::Ok { context, response };
-                        }
-                        Err(EhloResponseDecodeError::Incomplete) => {
-                            self.state = EhloState::Read(ReadStream::new());
-                            continue;
-                        }
-                        Err(EhloResponseDecodeError::Failed) => {
-                            let discarded_bytes =
-                                Secret::new(std::mem::take(&mut self.buffer).into_boxed_slice());
-                            return SmtpEhloResult::Err {
-                                context: self.context.take().unwrap(),
-                                err: SmtpEhloError::DecodingFailure { discarded_bytes },
-                            };
-                        }
+                        return SmtpEhloResult::Ok { context };
                     }
-                }
+                    Err(EhloResponseDecodeError::Incomplete) => {
+                        self.state = EhloState::Read(ReadStream::new());
+                        continue;
+                    }
+                    Err(EhloResponseDecodeError::Failed) => {
+                        let discarded_bytes =
+                            Secret::new(std::mem::take(&mut self.buffer).into_boxed_slice());
+                        return SmtpEhloResult::Err {
+                            context: self.context.take().unwrap(),
+                            err: SmtpEhloError::DecodingFailure { discarded_bytes },
+                        };
+                    }
+                },
             }
         }
     }

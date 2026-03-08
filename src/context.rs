@@ -1,5 +1,7 @@
 //! SMTP session context.
 
+use std::collections::HashSet;
+
 use smtp_codec::smtp_types::{response::Capability, state::State};
 
 /// SMTP session context.
@@ -11,7 +13,7 @@ pub struct SmtpContext {
     /// Current session state.
     pub state: State,
     /// Server capabilities from EHLO response.
-    pub capabilities: Vec<Capability<'static>>,
+    pub capability: HashSet<Capability<'static>>,
     /// Whether the session is authenticated.
     pub authenticated: bool,
 }
@@ -27,7 +29,7 @@ impl Default for SmtpContext {
     fn default() -> Self {
         Self {
             state: State::Connect,
-            capabilities: Vec::new(),
+            capability: HashSet::new(),
             authenticated: false,
         }
     }

@@ -1,6 +1,6 @@
 use std::{env, net::TcpStream, sync::Arc};
 
-use io_smtp::{context::SmtpContext, coroutines::greeting::*};
+use io_smtp::{context::SmtpContext, coroutines::greeting_with_capability::*};
 use io_stream::runtimes::std::handle;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use rustls_platform_verifier::ConfigVerifierExt;
@@ -22,17 +22,18 @@ fn main() {
     let conn = ClientConnection::new(Arc::new(config), server_name).unwrap();
     let mut stream = StreamOwned::new(conn, stream);
 
-    let mut coroutine = GetSmtpGreeting::new(context);
+    let mut coroutine = GetSmtpGreetingWithCapability::new(context);
     let mut arg = None;
 
-    let (context, greeting) = loop {
+    let context = loop {
         match coroutine.resume(arg.take()) {
-            GetSmtpGreetingResult::Ok { context, greeting } => break (context, greeting),
-            GetSmtpGreetingResult::Io { io } => arg = Some(handle(&mut stream, io).unwrap()),
-            GetSmtpGreetingResult::Err { err, .. } => panic!("{err}"),
+            GetSmtpGreetingWithCapabilityResult::Ok { context } => break context,
+            GetSmtpGreetingWithCapabilityResult::Io { io } => {
+                arg = Some(handle(&mut stream, io).unwrap())
+            }
+            GetSmtpGreetingWithCapabilityResult::Err { err, .. } => panic!("{err}"),
         }
     };
 
-    println!("greeting: {greeting:#?}");
     println!("context: {context:#?}");
 }

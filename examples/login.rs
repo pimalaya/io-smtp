@@ -49,15 +49,13 @@ fn main() {
     let mut coroutine = SmtpEhlo::new(context, client_domain.into());
     let mut arg = None;
 
-    let (context, ehlo_response) = loop {
+    let context = loop {
         match coroutine.resume(arg.take()) {
-            SmtpEhloResult::Ok { context, response } => break (context, response),
             SmtpEhloResult::Io { io } => arg = Some(handle(&mut stream, io).unwrap()),
+            SmtpEhloResult::Ok { context } => break context,
             SmtpEhloResult::Err { err, .. } => panic!("{err}"),
         }
     };
-
-    println!("EHLO response: {ehlo_response:#?}");
 
     // AUTH PLAIN
     let password = SecretString::from(pass);
