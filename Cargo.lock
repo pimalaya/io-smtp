@@ -408,9 +408,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.182"
+version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
+checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
 name = "log"
@@ -753,8 +753,8 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "smtp-codec"
-version = "0.3.0"
-source = "git+https://github.com/pimalaya/smtp-codec#1b7b20053b67edfaa081206eacdaea0484a678be"
+version = "0.2.0"
+source = "git+https://github.com/pimalaya/smtp-codec#baeb185ad0a63d43c48b05f7f7a4d9e81b291332"
 dependencies = [
  "abnf-core",
  "base64",
@@ -765,8 +765,8 @@ dependencies = [
 
 [[package]]
 name = "smtp-types"
-version = "0.3.0"
-source = "git+https://github.com/pimalaya/smtp-codec#1b7b20053b67edfaa081206eacdaea0484a678be"
+version = "0.2.0"
+source = "git+https://github.com/pimalaya/smtp-codec#baeb185ad0a63d43c48b05f7f7a4d9e81b291332"
 dependencies = [
  "base64",
  "bounded-static",

@@ -33,7 +33,7 @@ pbkdf2 = { version = "0.12", optional = true }
 rand = { version = "0.8", optional = true }
 secrecy = "0.10"
 sha2 = { version = "0.10", optional = true }
-smtp-codec = { version = "0.3.0", features = ["starttls", "ext_auth", "quirk_crlf_relaxed"] }
+smtp-codec = { version = "0.2.0", features = ["starttls", "ext_auth", "quirk_crlf_relaxed"] }
 thiserror = "2"
 
 [patch.crates-io]
