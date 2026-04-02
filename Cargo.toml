@@ -12,10 +12,8 @@ documentation = "https://github.com/pimalaya/io-smtp"
 repository = "https://github.com/pimalaya/io-smtp"
 
 [features]
-default = ["starttls", "ext_auth", "scram"]
-starttls = ["smtp-codec/starttls"]
-ext_auth = ["smtp-codec/ext_auth"]
-scram = ["dep:base64", "dep:hmac", "dep:pbkdf2", "dep:rand", "dep:sha2"]
+default = ["scram"]
+scram = ["dep:hmac", "dep:pbkdf2", "dep:rand", "dep:sha2"]
 
 [dev-dependencies]
 env_logger = "0.11"
@@ -24,17 +22,15 @@ rustls = "0.23"
 rustls-platform-verifier = "0.6"
 
 [dependencies]
-base64 = { version = "0.22", optional = true }
-hmac = { version = "0.12", optional = true }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+bounded-static = { version = "0.8", default-features = false, features = ["alloc"] }
+bounded-static-derive = { version = "0.8", default-features = false }
+chumsky = { version = "1.0.0-alpha.7", default-features = false, features = ["std"] }
+hmac = { version = "0.13", optional = true }
 io-stream = { version = "0.0.2", default-features = false }
 log = "0.4"
-memchr = "2.8"
 pbkdf2 = { version = "0.12", optional = true }
-rand = { version = "0.8", optional = true }
+rand = { version = "0.10", optional = true }
 secrecy = "0.10"
-sha2 = { version = "0.10", optional = true }
-smtp-codec = { version = "0.2.0", features = ["starttls", "ext_auth", "quirk_crlf_relaxed"] }
+sha2 = { version = "0.11", optional = true }
 thiserror = "2"
-
-[patch.crates-io]
-smtp-codec.git = "https://github.com/pimalaya/smtp-codec"

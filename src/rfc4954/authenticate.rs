@@ -5,15 +5,13 @@ use std::collections::VecDeque;
 use io_stream::io::StreamIo;
 use log::debug;
 use secrecy::SecretString;
-use smtp_codec::smtp_types::core::EhloDomain;
 use thiserror::Error;
 
-use crate::{
-    context::SmtpContext,
-    coroutines::{
-        authenticate_login_with_capability::*,
-        authenticate_plain_with_capability::*,
-    },
+use crate::rfc5321::types::ehlo_domain::EhloDomain;
+
+use super::{
+    login::{SmtpAuthenticateLogin, SmtpAuthenticateLoginError, SmtpAuthenticateLoginResult},
+    plain::{SmtpAuthenticatePlain, SmtpAuthenticatePlainError, SmtpAuthenticatePlainResult},
 };
 
 /// Errors that can occur during the coroutine progression.
@@ -23,9 +21,9 @@ pub enum SmtpAuthenticateError {
     MissingCandidate,
 
     #[error(transparent)]
-    Plain(#[from] SmtpAuthenticatePlainWithCapabilityError),
+    Plain(#[from] SmtpAuthenticatePlainError),
     #[error(transparent)]
-    Login(#[from] SmtpAuthenticateLoginWithCapabilityError),
+    Login(#[from] SmtpAuthenticateLoginError),
 
     #[error(transparent)]
     Attempted(#[from] Box<Self>),
@@ -35,11 +33,8 @@ pub enum SmtpAuthenticateError {
 #[derive(Debug)]
 pub enum SmtpAuthenticateResult {
     Io { io: StreamIo },
-    Ok { context: SmtpContext },
-    Err {
-        context: SmtpContext,
-        err: SmtpAuthenticateError,
-    },
+    Ok,
+    Err { err: SmtpAuthenticateError },
 }
 
 pub enum SmtpAuthenticateCandidate {
@@ -56,9 +51,9 @@ pub enum SmtpAuthenticateCandidate {
 }
 
 enum State {
-    Unauthenticated(Option<SmtpContext>),
-    Plain(SmtpAuthenticatePlainWithCapability),
-    Login(SmtpAuthenticateLoginWithCapability),
+    Unauthenticated,
+    Plain(SmtpAuthenticatePlain),
+    Login(SmtpAuthenticateLogin),
 }
 
 /// I/O-free coroutine to authenticate an SMTP session.
@@ -70,13 +65,9 @@ pub struct SmtpAuthenticate {
 
 impl SmtpAuthenticate {
     /// Creates a new coroutine.
-    pub fn new(
-        context: SmtpContext,
-        candidates: impl IntoIterator<Item = SmtpAuthenticateCandidate>,
-    ) -> Self {
+    pub fn new(candidates: impl IntoIterator<Item = SmtpAuthenticateCandidate>) -> Self {
         let mut candidates: VecDeque<_> = candidates.into_iter().collect();
-        let candidate = candidates.pop_front();
-        let state = Self::build_state_from_candidate(context, candidate);
+        let state = Self::build_state_from_candidate(candidates.pop_front());
 
         Self {
             state,
@@ -85,14 +76,11 @@ impl SmtpAuthenticate {
         }
     }
 
-    fn build_state_from_candidate(
-        context: SmtpContext,
-        candidate: Option<SmtpAuthenticateCandidate>,
-    ) -> State {
+    fn build_state_from_candidate(candidate: Option<SmtpAuthenticateCandidate>) -> State {
         match candidate {
             None => {
                 debug!("no more SASL method available");
-                State::Unauthenticated(Some(context))
+                State::Unauthenticated
             }
             Some(SmtpAuthenticateCandidate::Plain {
                 login,
@@ -100,9 +88,7 @@ impl SmtpAuthenticate {
                 domain,
             }) => {
                 debug!("try SMTP PLAIN SASL method");
-                State::Plain(SmtpAuthenticatePlainWithCapability::new(
-                    context, &login, &password, domain,
-                ))
+                State::Plain(SmtpAuthenticatePlain::new(&login, &password, domain))
             }
             Some(SmtpAuthenticateCandidate::Login {
                 login,
@@ -110,9 +96,7 @@ impl SmtpAuthenticate {
                 domain,
             }) => {
                 debug!("try SMTP LOGIN SASL method");
-                State::Login(SmtpAuthenticateLoginWithCapability::new(
-                    context, &login, &password, domain,
-                ))
+                State::Login(SmtpAuthenticateLogin::new(&login, &password, domain))
             }
         }
     }
@@ -122,48 +106,45 @@ impl SmtpAuthenticate {
         loop {
             match &mut self.state {
                 State::Plain(coroutine) => match coroutine.resume(arg.take()) {
-                    SmtpAuthenticatePlainWithCapabilityResult::Io { io } => {
+                    SmtpAuthenticatePlainResult::Io { io } => {
                         break SmtpAuthenticateResult::Io { io };
                     }
-                    SmtpAuthenticatePlainWithCapabilityResult::Ok { context } => {
-                        break SmtpAuthenticateResult::Ok { context };
+                    SmtpAuthenticatePlainResult::Ok => {
+                        break SmtpAuthenticateResult::Ok;
                     }
-                    SmtpAuthenticatePlainWithCapabilityResult::Err { context, err } => {
+                    SmtpAuthenticatePlainResult::Err { err } => {
                         let err = SmtpAuthenticateError::Plain(err);
                         let err = SmtpAuthenticateError::Attempted(err.into());
                         self.err.replace(err);
 
                         let candidate = self.candidates.pop_front();
-                        self.state = Self::build_state_from_candidate(context, candidate);
+                        self.state = Self::build_state_from_candidate(candidate);
                         continue;
                     }
                 },
                 State::Login(coroutine) => match coroutine.resume(arg.take()) {
-                    SmtpAuthenticateLoginWithCapabilityResult::Io { io } => {
+                    SmtpAuthenticateLoginResult::Io { io } => {
                         break SmtpAuthenticateResult::Io { io };
                     }
-                    SmtpAuthenticateLoginWithCapabilityResult::Ok { context } => {
-                        break SmtpAuthenticateResult::Ok { context };
+                    SmtpAuthenticateLoginResult::Ok => {
+                        break SmtpAuthenticateResult::Ok;
                     }
-                    SmtpAuthenticateLoginWithCapabilityResult::Err { context, err } => {
+                    SmtpAuthenticateLoginResult::Err { err } => {
                         let err = SmtpAuthenticateError::Login(err);
                         let err = SmtpAuthenticateError::Attempted(err.into());
                         self.err.replace(err);
 
                         let candidate = self.candidates.pop_front();
-                        self.state = Self::build_state_from_candidate(context, candidate);
+                        self.state = Self::build_state_from_candidate(candidate);
                         continue;
                     }
                 },
-                State::Unauthenticated(context) => {
-                    let context = context.take().unwrap();
+                State::Unauthenticated => {
                     break match self.err.take() {
                         Some(err) => SmtpAuthenticateResult::Err {
-                            context,
                             err: SmtpAuthenticateError::Attempted(err.into()),
                         },
                         None => SmtpAuthenticateResult::Err {
-                            context,
                             err: SmtpAuthenticateError::MissingCandidate,
                         },
                     };

@@ -1,9 +1,9 @@
 {
-  description = "Rust library to manage IMAP clients";
+  description = "Set of I/O-free Rust coroutines to manage SMTP streams";
 
   inputs = {
     nixpkgs = {
-      url = "github:nixos/nixpkgs/nixos-25.11";
+      url = "github:nixos/nixpkgs/staging-next";
     };
     fenix = {
       url = "github:nix-community/fenix/monthly";
