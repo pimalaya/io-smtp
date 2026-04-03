@@ -124,8 +124,8 @@ pub(crate) mod parsers {
     /// ```abnf
     /// auth-type      = ATOM
     /// ```
-    pub(crate) fn auth_mechanism<'a>(
-    ) -> impl Parser<'a, &'a [u8], AuthMechanism<'a>, Extra<'a>> + Clone {
+    pub(crate) fn auth_mechanism<'a>()
+    -> impl Parser<'a, &'a [u8], AuthMechanism<'a>, Extra<'a>> + Clone {
         atom_parser().map(AuthMechanism::from)
     }
 }

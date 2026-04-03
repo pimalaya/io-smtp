@@ -1,8 +1,8 @@
 //! I/O-free coroutine to send SMTP QUIT command.
 
-use io_stream::{
-    coroutines::{read::ReadStreamError, write::WriteStreamError},
-    io::StreamIo,
+use io_socket::{
+    coroutines::{read::ReadSocketError, write::WriteSocketError},
+    io::{SocketInput, SocketOutput},
 };
 use log::trace;
 use thiserror::Error;
@@ -19,11 +19,11 @@ pub enum SmtpQuitError {
     #[error("QUIT rejected: {code} {message}")]
     Rejected { code: u16, message: String },
     #[error("Write QUIT command error")]
-    Write(#[from] WriteStreamError),
+    Write(#[from] WriteSocketError),
     #[error("Write QUIT command error (unexpected EOF)")]
     WriteEof,
     #[error("Read QUIT response error")]
-    Read(#[from] ReadStreamError),
+    Read(#[from] ReadSocketError),
     #[error("Read QUIT response error (unexpected EOF)")]
     ReadEof,
     #[error("Parse SMTP response error: {0}")]
@@ -32,7 +32,7 @@ pub enum SmtpQuitError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpQuitResult {
-    Io { io: StreamIo },
+    Io { input: SocketInput },
     Ok,
     Err { err: SmtpQuitError },
 }
@@ -55,29 +55,29 @@ impl SmtpQuit {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<StreamIo>) -> SmtpQuitResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpQuitResult {
         loop {
             match self.io.resume(arg.take()) {
-                SmtpBytesSendResult::Io { io } => return SmtpQuitResult::Io { io },
+                SmtpBytesSendResult::Io { input } => return SmtpQuitResult::Io { input },
                 SmtpBytesSendResult::WriteErr { err } => {
                     return SmtpQuitResult::Err {
                         err: SmtpQuitError::Write(err),
-                    }
+                    };
                 }
                 SmtpBytesSendResult::WriteEof => {
                     return SmtpQuitResult::Err {
                         err: SmtpQuitError::WriteEof,
-                    }
+                    };
                 }
                 SmtpBytesSendResult::ReadErr { err } => {
                     return SmtpQuitResult::Err {
                         err: SmtpQuitError::Read(err),
-                    }
+                    };
                 }
                 SmtpBytesSendResult::ReadEof => {
                     return SmtpQuitResult::Err {
                         err: SmtpQuitError::ReadEof,
-                    }
+                    };
                 }
                 SmtpBytesSendResult::Ok { bytes } => {
                     trace!("read SMTP bytes: {}", escape_byte_string(&bytes));

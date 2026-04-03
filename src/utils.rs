@@ -331,7 +331,7 @@ pub mod parsers {
     mod tests {
         use chumsky::prelude::*;
 
-        use super::{format_rich_errors, tag_no_case, Extra};
+        use super::{Extra, format_rich_errors, tag_no_case};
 
         fn parse_errors<'src, P, O>(parser: P, input: &'src [u8]) -> String
         where

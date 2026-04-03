@@ -3,9 +3,9 @@
 use std::collections::HashSet;
 
 use bounded_static::IntoBoundedStatic;
-use io_stream::{
-    coroutines::{read::ReadStreamError, write::WriteStreamError},
-    io::StreamIo,
+use io_socket::{
+    coroutines::{read::ReadSocketError, write::WriteSocketError},
+    io::{SocketInput, SocketOutput},
 };
 use log::trace;
 use thiserror::Error;
@@ -23,13 +23,13 @@ use crate::{
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
 pub enum SmtpEhloError {
-    #[error("Write EHLO command to SMTP stream error")]
-    Write(#[from] WriteStreamError),
-    #[error("Write EHLO command to SMTP stream error (unexpected EOF)")]
+    #[error("Write EHLO command to SMTP socket error")]
+    Write(#[from] WriteSocketError),
+    #[error("Write EHLO command to SMTP socket error (unexpected EOF)")]
     WriteEof,
-    #[error("Read EHLO response from SMTP stream error")]
-    Read(#[from] ReadStreamError),
-    #[error("Read EHLO response from SMTP stream error (unexpected EOF)")]
+    #[error("Read EHLO response from SMTP socket error")]
+    Read(#[from] ReadSocketError),
+    #[error("Read EHLO response from SMTP socket error (unexpected EOF)")]
     ReadEof,
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
@@ -38,7 +38,7 @@ pub enum SmtpEhloError {
 /// Output emitted when the coroutine terminates its progression.
 pub enum SmtpEhloResult {
     Io {
-        io: StreamIo,
+        input: SocketInput,
     },
     Ok {
         capabilities: HashSet<Capability<'static>>,
@@ -67,10 +67,10 @@ impl SmtpEhlo {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<StreamIo>) -> SmtpEhloResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpEhloResult {
         loop {
             match self.io.resume(arg.take()) {
-                SmtpBytesSendResult::Io { io } => return SmtpEhloResult::Io { io },
+                SmtpBytesSendResult::Io { input } => return SmtpEhloResult::Io { input },
                 SmtpBytesSendResult::WriteErr { err } => {
                     return SmtpEhloResult::Err {
                         err: SmtpEhloError::Write(err),

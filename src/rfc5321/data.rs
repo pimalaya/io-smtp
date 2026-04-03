@@ -1,9 +1,9 @@
 //! I/O-free coroutine to send SMTP DATA command and message body.
 
 use bounded_static::IntoBoundedStatic;
-use io_stream::{
-    coroutines::{read::ReadStreamError, write::WriteStreamError},
-    io::StreamIo,
+use io_socket::{
+    coroutines::{read::ReadSocketError, write::WriteSocketError},
+    io::{SocketInput, SocketOutput},
 };
 use log::trace;
 use thiserror::Error;
@@ -18,15 +18,15 @@ use crate::{
 #[derive(Debug, Error)]
 pub enum SmtpDataError {
     #[error("Write DATA command error")]
-    WriteCommand(#[source] WriteStreamError),
+    WriteCommand(#[source] WriteSocketError),
     #[error("Write DATA command error (unexpected EOF)")]
     WriteCommandEof,
     #[error("Write message body error")]
-    WriteBody(#[source] WriteStreamError),
+    WriteBody(#[source] WriteSocketError),
     #[error("Write message body error (unexpected EOF)")]
     WriteBodyEof,
     #[error("Read response error")]
-    Read(#[from] ReadStreamError),
+    Read(#[from] ReadSocketError),
     #[error("Read response error (unexpected EOF)")]
     ReadEof,
     #[error("Parse SMTP response error: {0}")]
@@ -37,7 +37,7 @@ pub enum SmtpDataError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpDataResult {
-    Io { io: StreamIo },
+    Io { input: SocketInput },
     Ok,
     Err { err: SmtpDataError },
 }
@@ -109,11 +109,11 @@ impl SmtpData {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<StreamIo>) -> SmtpDataResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpDataResult {
         loop {
             match &mut self.state {
                 DataState::Command(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { io } => return SmtpDataResult::Io { io },
+                    SmtpBytesSendResult::Io { input } => return SmtpDataResult::Io { input },
                     SmtpBytesSendResult::WriteErr { err } => {
                         return SmtpDataResult::Err {
                             err: SmtpDataError::WriteCommand(err),
@@ -181,7 +181,7 @@ impl SmtpData {
                     }
                 },
                 DataState::Body(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { io } => return SmtpDataResult::Io { io },
+                    SmtpBytesSendResult::Io { input } => return SmtpDataResult::Io { input },
                     SmtpBytesSendResult::WriteErr { err } => {
                         return SmtpDataResult::Err {
                             err: SmtpDataError::WriteBody(err),

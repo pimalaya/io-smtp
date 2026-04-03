@@ -1,11 +1,14 @@
 use std::{env, net::TcpStream, sync::Arc};
 
 use io_smtp::{
-    context::SmtpContext,
-    coroutines::{authenticate_plain::*, ehlo::*, greeting::*},
-    types::core::Domain,
+    rfc4954::authenticate::{SmtpAuthenticate, SmtpAuthenticateCandidate, SmtpAuthenticateResult},
+    rfc5321::{
+        ehlo::{SmtpEhlo, SmtpEhloResult},
+        greeting::{GetSmtpGreeting, GetSmtpGreetingResult},
+        types::{domain::Domain, ehlo_domain::EhloDomain},
+    },
 };
-use io_stream::runtimes::std::handle;
+use io_socket::runtimes::std_stream::handle;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use rustls_platform_verifier::ConfigVerifierExt;
 use secrecy::SecretString;
@@ -14,62 +17,66 @@ fn main() {
     env_logger::init();
 
     let host = env::var("HOST").expect("HOST env var");
-    let port = env::var("PORT")
+    let port: u16 = env::var("PORT")
         .expect("PORT env var")
         .parse()
         .expect("PORT u16");
-
     let user = env::var("USER").expect("USER env var");
     let pass = env::var("PASS").expect("PASS env var");
 
-    let context = SmtpContext::new();
-
-    let stream = TcpStream::connect((host.as_str(), port)).unwrap();
-    let server_name = host.try_into().unwrap();
+    let tcp = TcpStream::connect((host.as_str(), port)).unwrap();
+    let server_name = rustls::pki_types::ServerName::try_from(host.clone()).unwrap();
     let config = ClientConfig::with_platform_verifier().unwrap();
     let conn = ClientConnection::new(Arc::new(config), server_name).unwrap();
-    let mut stream = StreamOwned::new(conn, stream);
+    let mut stream = StreamOwned::new(conn, tcp);
 
-    // Read greeting
-    let mut coroutine = GetSmtpGreeting::new(context);
+    // Read greeting.
+    let mut coroutine = GetSmtpGreeting::new();
     let mut arg = None;
 
-    let (context, greeting) = loop {
+    let greeting = loop {
         match coroutine.resume(arg.take()) {
-            GetSmtpGreetingResult::Ok { context, greeting } => break (context, greeting),
-            GetSmtpGreetingResult::Io { io } => arg = Some(handle(&mut stream, io).unwrap()),
-            GetSmtpGreetingResult::Err { err, .. } => panic!("{err}"),
+            GetSmtpGreetingResult::Ok { greeting } => break greeting,
+            GetSmtpGreetingResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            GetSmtpGreetingResult::Err { err } => panic!("{err}"),
         }
     };
 
     println!("greeting: {greeting:#?}");
 
-    // Send EHLO
-    let client_domain = Domain::try_from("localhost").unwrap();
-    let mut coroutine = SmtpEhlo::new(context, client_domain.into());
+    // Send EHLO.
+    let domain: EhloDomain<'_> = Domain::parse(b"localhost").unwrap().into();
+    let mut coroutine = SmtpEhlo::new(domain);
     let mut arg = None;
 
-    let context = loop {
+    let capabilities = loop {
         match coroutine.resume(arg.take()) {
-            SmtpEhloResult::Io { io } => arg = Some(handle(&mut stream, io).unwrap()),
-            SmtpEhloResult::Ok { context } => break context,
-            SmtpEhloResult::Err { err, .. } => panic!("{err}"),
+            SmtpEhloResult::Ok { capabilities } => break capabilities,
+            SmtpEhloResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            SmtpEhloResult::Err { err } => panic!("{err}"),
         }
     };
 
-    // AUTH PLAIN
+    println!("capabilities: {capabilities:#?}");
+
+    // AUTH PLAIN.
     let password = SecretString::from(pass);
-    let mut coroutine = SmtpAuthenticatePlain::new(context, &user, &password);
+    let domain: EhloDomain<'static> = Domain::parse(b"localhost").unwrap().into();
+    let candidates = [SmtpAuthenticateCandidate::Plain {
+        login: user,
+        password,
+        domain,
+    }];
+    let mut coroutine = SmtpAuthenticate::new(candidates);
     let mut arg = None;
 
-    let context = loop {
+    loop {
         match coroutine.resume(arg.take()) {
-            SmtpAuthenticatePlainResult::Ok { context } => break context,
-            SmtpAuthenticatePlainResult::Io { io } => arg = Some(handle(&mut stream, io).unwrap()),
-            SmtpAuthenticatePlainResult::Err { err, .. } => panic!("{err}"),
+            SmtpAuthenticateResult::Ok => break,
+            SmtpAuthenticateResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            SmtpAuthenticateResult::Err { err } => panic!("{err}"),
         }
-    };
+    }
 
     println!("AUTH PLAIN successful!");
-    println!("context: {context:#?}");
 }

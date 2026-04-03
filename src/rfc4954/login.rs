@@ -1,9 +1,9 @@
 //! I/O-free coroutine to authenticate using SMTP AUTH LOGIN then refresh
 //! capabilities via EHLO.
 
-use io_stream::{
-    coroutines::{read::ReadStreamError, write::WriteStreamError},
-    io::StreamIo,
+use io_socket::{
+    coroutines::{read::ReadSocketError, write::WriteSocketError},
+    io::{SocketInput, SocketOutput},
 };
 use log::trace;
 use secrecy::{ExposeSecret, SecretString};
@@ -27,11 +27,11 @@ use crate::{
 #[derive(Debug, Error)]
 pub enum SmtpAuthenticateLoginError {
     #[error("Write AUTH LOGIN command error")]
-    Write(#[from] WriteStreamError),
+    Write(#[from] WriteSocketError),
     #[error("Write AUTH LOGIN command error (unexpected EOF)")]
     WriteEof,
     #[error("Read AUTH LOGIN response error")]
-    Read(#[from] ReadStreamError),
+    Read(#[from] ReadSocketError),
     #[error("Read AUTH LOGIN response error (unexpected EOF)")]
     ReadEof,
     #[error("Parse SMTP response error: {0}")]
@@ -44,7 +44,7 @@ pub enum SmtpAuthenticateLoginError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpAuthenticateLoginResult {
-    Io { io: StreamIo },
+    Io { input: SocketInput },
     Ok,
     Err { err: SmtpAuthenticateLoginError },
 }
@@ -90,13 +90,13 @@ impl SmtpAuthenticateLogin {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<StreamIo>) -> SmtpAuthenticateLoginResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpAuthenticateLoginResult {
         loop {
             match &mut self.state {
                 // Step 1: Send AUTH LOGIN command, read 334 response
                 State::Auth(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { io } => {
-                        return SmtpAuthenticateLoginResult::Io { io };
+                    SmtpBytesSendResult::Io { input } => {
+                        return SmtpAuthenticateLoginResult::Io { input };
                     }
                     SmtpBytesSendResult::WriteErr { err } => {
                         return SmtpAuthenticateLoginResult::Err {
@@ -161,8 +161,8 @@ impl SmtpAuthenticateLogin {
 
                 // Step 2: Send base64(username), read 334 response
                 State::Username(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { io } => {
-                        return SmtpAuthenticateLoginResult::Io { io };
+                    SmtpBytesSendResult::Io { input } => {
+                        return SmtpAuthenticateLoginResult::Io { input };
                     }
                     SmtpBytesSendResult::WriteErr { err } => {
                         return SmtpAuthenticateLoginResult::Err {
@@ -227,8 +227,8 @@ impl SmtpAuthenticateLogin {
 
                 // Step 3: Send base64(password), read 235 response
                 State::Password(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { io } => {
-                        return SmtpAuthenticateLoginResult::Io { io };
+                    SmtpBytesSendResult::Io { input } => {
+                        return SmtpAuthenticateLoginResult::Io { input };
                     }
                     SmtpBytesSendResult::WriteErr { err } => {
                         return SmtpAuthenticateLoginResult::Err {
@@ -292,8 +292,8 @@ impl SmtpAuthenticateLogin {
 
                 // Step 4: Refresh capabilities via EHLO
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpEhloResult::Io { io } => {
-                        return SmtpAuthenticateLoginResult::Io { io };
+                    SmtpEhloResult::Io { input } => {
+                        return SmtpAuthenticateLoginResult::Io { input };
                     }
                     SmtpEhloResult::Ok { .. } => {
                         return SmtpAuthenticateLoginResult::Ok;

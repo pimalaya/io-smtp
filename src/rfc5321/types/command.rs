@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, io::Write};
 
-use base64::{engine::general_purpose::STANDARD as base64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as base64};
 use secrecy::{ExposeSecret, SecretBox};
 
 use crate::rfc4954::types::auth_mechanism::AuthMechanism;

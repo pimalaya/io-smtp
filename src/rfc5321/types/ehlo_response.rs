@@ -143,7 +143,7 @@ pub(crate) mod parsers {
         atom::parsers::atom as atom_parser, domain::parsers::domain as domain_parser,
         text::parsers::text as text_parser,
     };
-    use crate::utils::parsers::{crlf, sp, tag_no_case, Extra};
+    use crate::utils::parsers::{Extra, crlf, sp, tag_no_case};
 
     use super::{Capability, EhloResponse};
 

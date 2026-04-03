@@ -71,10 +71,10 @@ pub(crate) mod parsers {
 
     use crate::rfc5321::types::{
         reply_code::parsers::reply_code as reply_code_parser,
-        text::{parsers::text as text_parser, Text},
+        text::{Text, parsers::text as text_parser},
         vec1::Vec1,
     };
-    use crate::utils::parsers::{crlf, sp, Extra};
+    use crate::utils::parsers::{Extra, crlf, sp};
 
     use super::Response;
 

@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use io_stream::io::StreamIo;
+use io_socket::io::{SocketInput, SocketOutput};
 use log::debug;
 use secrecy::SecretString;
 use thiserror::Error;
@@ -32,7 +32,7 @@ pub enum SmtpAuthenticateError {
 /// Output emitted when the coroutine terminates its progression.
 #[derive(Debug)]
 pub enum SmtpAuthenticateResult {
-    Io { io: StreamIo },
+    Io { input: SocketInput },
     Ok,
     Err { err: SmtpAuthenticateError },
 }
@@ -102,12 +102,12 @@ impl SmtpAuthenticate {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<StreamIo>) -> SmtpAuthenticateResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpAuthenticateResult {
         loop {
             match &mut self.state {
                 State::Plain(coroutine) => match coroutine.resume(arg.take()) {
-                    SmtpAuthenticatePlainResult::Io { io } => {
-                        break SmtpAuthenticateResult::Io { io };
+                    SmtpAuthenticatePlainResult::Io { input } => {
+                        break SmtpAuthenticateResult::Io { input };
                     }
                     SmtpAuthenticatePlainResult::Ok => {
                         break SmtpAuthenticateResult::Ok;
@@ -123,8 +123,8 @@ impl SmtpAuthenticate {
                     }
                 },
                 State::Login(coroutine) => match coroutine.resume(arg.take()) {
-                    SmtpAuthenticateLoginResult::Io { io } => {
-                        break SmtpAuthenticateResult::Io { io };
+                    SmtpAuthenticateLoginResult::Io { input } => {
+                        break SmtpAuthenticateResult::Io { input };
                     }
                     SmtpAuthenticateLoginResult::Ok => {
                         break SmtpAuthenticateResult::Ok;

@@ -1,9 +1,9 @@
 //! I/O-free coroutine to authenticate using SMTP AUTH PLAIN then refresh
 //! capabilities via EHLO.
 
-use io_stream::{
-    coroutines::{read::ReadStreamError, write::WriteStreamError},
-    io::StreamIo,
+use io_socket::{
+    coroutines::{read::ReadSocketError, write::WriteSocketError},
+    io::{SocketInput, SocketOutput},
 };
 use log::trace;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
@@ -27,11 +27,11 @@ use crate::{
 #[derive(Debug, Error)]
 pub enum SmtpAuthenticatePlainError {
     #[error("Write AUTH PLAIN command error")]
-    Write(#[from] WriteStreamError),
+    Write(#[from] WriteSocketError),
     #[error("Write AUTH PLAIN command error (unexpected EOF)")]
     WriteEof,
     #[error("Read AUTH PLAIN response error")]
-    Read(#[from] ReadStreamError),
+    Read(#[from] ReadSocketError),
     #[error("Read AUTH PLAIN response error (unexpected EOF)")]
     ReadEof,
     #[error("Parse SMTP response error: {0}")]
@@ -44,7 +44,7 @@ pub enum SmtpAuthenticatePlainError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpAuthenticatePlainResult {
-    Io { io: StreamIo },
+    Io { input: SocketInput },
     Ok,
     Err { err: SmtpAuthenticatePlainError },
 }
@@ -93,12 +93,12 @@ impl SmtpAuthenticatePlain {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<StreamIo>) -> SmtpAuthenticatePlainResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpAuthenticatePlainResult {
         loop {
             match &mut self.state {
                 State::Auth(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { io } => {
-                        return SmtpAuthenticatePlainResult::Io { io };
+                    SmtpBytesSendResult::Io { input } => {
+                        return SmtpAuthenticatePlainResult::Io { input };
                     }
                     SmtpBytesSendResult::WriteErr { err } => {
                         return SmtpAuthenticatePlainResult::Err {
@@ -161,8 +161,8 @@ impl SmtpAuthenticatePlain {
                     }
                 },
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpEhloResult::Io { io } => {
-                        return SmtpAuthenticatePlainResult::Io { io };
+                    SmtpEhloResult::Io { input } => {
+                        return SmtpAuthenticatePlainResult::Io { input };
                     }
                     SmtpEhloResult::Ok { .. } => {
                         return SmtpAuthenticatePlainResult::Ok;

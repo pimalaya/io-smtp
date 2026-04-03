@@ -1,6 +1,6 @@
 //! Module dedicated to the SMTP authenticate data.
 
-use base64::{engine::general_purpose::STANDARD as base64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as base64};
 use secrecy::{ExposeSecret, SecretBox};
 use thiserror::Error;
 

@@ -8,11 +8,10 @@
 
 let
   inherit (pkgs)
-    krb5
     pkg-config
-    llvmPackages
-    glibc
+    cargo-deny
     ;
+
   shell = pimalaya.mkShell {
     inherit
       nixpkgs
@@ -24,14 +23,11 @@ let
 
 in
 shell.overrideAttrs (prev: {
-  LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
-  BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${glibc.dev}/include";
-
   nativeBuildInputs = (prev.nativeBuildInputs or [ ]) ++ [
     pkg-config
   ];
 
   buildInputs = (prev.buildInputs or [ ]) ++ [
-    krb5
+    cargo-deny
   ];
 })

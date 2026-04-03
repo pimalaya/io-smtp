@@ -1,10 +1,11 @@
 [package]
 name = "io-smtp"
-description = "Set of I/O-free Rust coroutines to manage SMTP streams"
+description = "Set of I/O-free Rust coroutines to manage SMTP sockets"
 version = "0.0.1"
 authors = ["Clément DOUIN <pimalaya.org@posteo.net>"]
-edition = "2021"
-license = "MIT"
+edition = "2024"
+rust-version = "1.87"
+license = "MIT OR Apache-2.0"
 categories = ["email"]
 keywords = ["email", "smtp", "client"]
 homepage = "https://pimalaya.org"
@@ -17,7 +18,7 @@ scram = ["dep:hmac", "dep:pbkdf2", "dep:rand", "dep:sha2"]
 
 [dev-dependencies]
 env_logger = "0.11"
-io-stream = { version = "0.0.2", default-features = false, features = ["std"] }
+io-socket = { version = "0.0.1", default-features = false, features = ["std-stream"] }
 rustls = "0.23"
 rustls-platform-verifier = "0.6"
 
@@ -27,10 +28,13 @@ bounded-static = { version = "0.8", default-features = false, features = ["alloc
 bounded-static-derive = { version = "0.8", default-features = false }
 chumsky = { version = "1.0.0-alpha.7", default-features = false, features = ["std"] }
 hmac = { version = "0.13", optional = true }
-io-stream = { version = "0.0.2", default-features = false }
+io-socket = { version = "0.0.1", default-features = false }
 log = "0.4"
 pbkdf2 = { version = "0.12", optional = true }
 rand = { version = "0.10", optional = true }
 secrecy = "0.10"
 sha2 = { version = "0.11", optional = true }
 thiserror = "2"
+
+[patch.crates-io]
+io-socket.git = "https://github.com/pimalaya/io-socket"

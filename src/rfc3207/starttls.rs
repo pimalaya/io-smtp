@@ -1,8 +1,8 @@
 //! I/O-free coroutine to perform SMTP STARTTLS negotiation.
 
-use io_stream::{
-    coroutines::{read::ReadStreamError, write::WriteStreamError},
-    io::StreamIo,
+use io_socket::{
+    coroutines::{read::ReadSocketError, write::WriteSocketError},
+    io::{SocketInput, SocketOutput},
 };
 use log::trace;
 use thiserror::Error;
@@ -16,13 +16,13 @@ use crate::{
 /// Errors that can occur during the coroutine progression.
 #[derive(Clone, Debug, Error)]
 pub enum SmtpStartTlsError {
-    #[error("Write STARTTLS command to SMTP stream error")]
-    WriteStartTls(#[source] WriteStreamError),
-    #[error("Write STARTTLS command to SMTP stream error (unexpected EOF)")]
+    #[error("Write STARTTLS command to SMTP socket error")]
+    WriteStartTls(#[source] WriteSocketError),
+    #[error("Write STARTTLS command to SMTP socket error (unexpected EOF)")]
     WriteStartTlsEof,
-    #[error("Read STARTTLS response from SMTP stream error")]
-    ReadStartTls(#[source] ReadStreamError),
-    #[error("Read STARTTLS response from SMTP stream error (unexpected EOF)")]
+    #[error("Read STARTTLS response from SMTP socket error")]
+    ReadStartTls(#[source] ReadSocketError),
+    #[error("Read STARTTLS response from SMTP socket error (unexpected EOF)")]
     ReadStartTlsEof,
     #[error("STARTTLS rejected by server: {0}")]
     Rejected(String),
@@ -31,7 +31,7 @@ pub enum SmtpStartTlsError {
 /// Output emitted when the coroutine terminates its progression.
 #[derive(Debug)]
 pub enum SmtpStartTlsResult {
-    Io { io: StreamIo },
+    Io { input: SocketInput },
     Ok,
     Err { err: SmtpStartTlsError },
 }
@@ -55,10 +55,10 @@ impl SmtpStartTls {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<StreamIo>) -> SmtpStartTlsResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpStartTlsResult {
         loop {
             match self.io.resume(arg.take()) {
-                SmtpBytesSendResult::Io { io } => return SmtpStartTlsResult::Io { io },
+                SmtpBytesSendResult::Io { input } => return SmtpStartTlsResult::Io { input },
                 SmtpBytesSendResult::WriteErr { err } => {
                     return SmtpStartTlsResult::Err {
                         err: SmtpStartTlsError::WriteStartTls(err),

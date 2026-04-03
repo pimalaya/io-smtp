@@ -1,7 +1,10 @@
 //! I/O-free coroutine to read the greeting from an SMTP server.
 
 use bounded_static::IntoBoundedStatic;
-use io_stream::{coroutines::read::ReadStreamError, io::StreamIo};
+use io_socket::{
+    coroutines::read::ReadSocketError,
+    io::{SocketInput, SocketOutput},
+};
 use log::trace;
 use thiserror::Error;
 
@@ -14,9 +17,9 @@ use crate::{
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
 pub enum GetSmtpGreetingError {
-    #[error("Read greeting from SMTP stream error")]
-    Read(#[from] ReadStreamError),
-    #[error("Read greeting from SMTP stream error (unexpected EOF)")]
+    #[error("Read greeting from SMTP socket error")]
+    Read(#[from] ReadSocketError),
+    #[error("Read greeting from SMTP socket error (unexpected EOF)")]
     ReadEof,
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
@@ -24,7 +27,7 @@ pub enum GetSmtpGreetingError {
 
 /// Output emitted when the coroutine terminates its progression.
 pub enum GetSmtpGreetingResult {
-    Io { io: StreamIo },
+    Io { input: SocketInput },
     Ok { greeting: Greeting<'static> },
     Err { err: GetSmtpGreetingError },
 }
@@ -45,21 +48,23 @@ impl GetSmtpGreeting {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<StreamIo>) -> GetSmtpGreetingResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> GetSmtpGreetingResult {
         loop {
             match self.io.resume(arg.take()) {
-                SmtpBytesSendResult::Io { io } => return GetSmtpGreetingResult::Io { io },
+                SmtpBytesSendResult::Io { input } => {
+                    return GetSmtpGreetingResult::Io { input };
+                }
                 SmtpBytesSendResult::WriteErr { .. } => unreachable!(),
                 SmtpBytesSendResult::WriteEof => unreachable!(),
                 SmtpBytesSendResult::ReadErr { err } => {
                     return GetSmtpGreetingResult::Err {
                         err: GetSmtpGreetingError::Read(err),
-                    }
+                    };
                 }
                 SmtpBytesSendResult::ReadEof => {
                     return GetSmtpGreetingResult::Err {
                         err: GetSmtpGreetingError::ReadEof,
-                    }
+                    };
                 }
                 SmtpBytesSendResult::Ok { bytes } => {
                     trace!("read SMTP bytes: {}", escape_byte_string(&bytes));

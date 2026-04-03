@@ -1,9 +1,9 @@
 //! I/O-free coroutine to send SMTP RSET command.
 
 use bounded_static::IntoBoundedStatic;
-use io_stream::{
-    coroutines::{read::ReadStreamError, write::WriteStreamError},
-    io::StreamIo,
+use io_socket::{
+    coroutines::{read::ReadSocketError, write::WriteSocketError},
+    io::{SocketInput, SocketOutput},
 };
 use log::trace;
 use thiserror::Error;
@@ -20,11 +20,11 @@ pub enum SmtpRsetError {
     #[error("RSET rejected: {code} {message}")]
     Rejected { code: u16, message: String },
     #[error("Write RSET command error")]
-    Write(#[from] WriteStreamError),
+    Write(#[from] WriteSocketError),
     #[error("Write RSET command error (unexpected EOF)")]
     WriteEof,
     #[error("Read RSET response error")]
-    Read(#[from] ReadStreamError),
+    Read(#[from] ReadSocketError),
     #[error("Read RSET response error (unexpected EOF)")]
     ReadEof,
     #[error("Parse SMTP response error: {0}")]
@@ -33,7 +33,7 @@ pub enum SmtpRsetError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpRsetResult {
-    Io { io: StreamIo },
+    Io { input: SocketInput },
     Ok,
     Err { err: SmtpRsetError },
 }
@@ -58,29 +58,29 @@ impl SmtpRset {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<StreamIo>) -> SmtpRsetResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpRsetResult {
         loop {
             match self.io.resume(arg.take()) {
-                SmtpBytesSendResult::Io { io } => return SmtpRsetResult::Io { io },
+                SmtpBytesSendResult::Io { input } => return SmtpRsetResult::Io { input },
                 SmtpBytesSendResult::WriteErr { err } => {
                     return SmtpRsetResult::Err {
                         err: SmtpRsetError::Write(err),
-                    }
+                    };
                 }
                 SmtpBytesSendResult::WriteEof => {
                     return SmtpRsetResult::Err {
                         err: SmtpRsetError::WriteEof,
-                    }
+                    };
                 }
                 SmtpBytesSendResult::ReadErr { err } => {
                     return SmtpRsetResult::Err {
                         err: SmtpRsetError::Read(err),
-                    }
+                    };
                 }
                 SmtpBytesSendResult::ReadEof => {
                     return SmtpRsetResult::Err {
                         err: SmtpRsetError::ReadEof,
-                    }
+                    };
                 }
                 SmtpBytesSendResult::Ok { bytes } => {
                     trace!("read SMTP bytes: {}", escape_byte_string(&bytes));

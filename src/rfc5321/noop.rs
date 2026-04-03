@@ -1,9 +1,9 @@
 //! I/O-free coroutine to send SMTP NOOP command.
 
 use bounded_static::IntoBoundedStatic;
-use io_stream::{
-    coroutines::{read::ReadStreamError, write::WriteStreamError},
-    io::StreamIo,
+use io_socket::{
+    coroutines::{read::ReadSocketError, write::WriteSocketError},
+    io::{SocketInput, SocketOutput},
 };
 use log::trace;
 use thiserror::Error;
@@ -20,11 +20,11 @@ pub enum SmtpNoopError {
     #[error("NOOP rejected: {code} {message}")]
     Rejected { code: u16, message: String },
     #[error("Write NOOP command error")]
-    Write(#[from] WriteStreamError),
+    Write(#[from] WriteSocketError),
     #[error("Write NOOP command error (unexpected EOF)")]
     WriteEof,
     #[error("Read NOOP response error")]
-    Read(#[from] ReadStreamError),
+    Read(#[from] ReadSocketError),
     #[error("Read NOOP response error (unexpected EOF)")]
     ReadEof,
     #[error("Parse SMTP response error: {0}")]
@@ -34,7 +34,7 @@ pub enum SmtpNoopError {
 /// Output emitted when the coroutine terminates.
 pub enum SmtpNoopResult {
     Ok,
-    Io { io: StreamIo },
+    Io { input: SocketInput },
     Err { err: SmtpNoopError },
 }
 
@@ -56,29 +56,29 @@ impl SmtpNoop {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<StreamIo>) -> SmtpNoopResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpNoopResult {
         loop {
             match self.io.resume(arg.take()) {
-                SmtpBytesSendResult::Io { io } => return SmtpNoopResult::Io { io },
+                SmtpBytesSendResult::Io { input } => return SmtpNoopResult::Io { input },
                 SmtpBytesSendResult::WriteErr { err } => {
                     return SmtpNoopResult::Err {
                         err: SmtpNoopError::Write(err),
-                    }
+                    };
                 }
                 SmtpBytesSendResult::WriteEof => {
                     return SmtpNoopResult::Err {
                         err: SmtpNoopError::WriteEof,
-                    }
+                    };
                 }
                 SmtpBytesSendResult::ReadErr { err } => {
                     return SmtpNoopResult::Err {
                         err: SmtpNoopError::Read(err),
-                    }
+                    };
                 }
                 SmtpBytesSendResult::ReadEof => {
                     return SmtpNoopResult::Err {
                         err: SmtpNoopError::ReadEof,
-                    }
+                    };
                 }
                 SmtpBytesSendResult::Ok { bytes } => {
                     trace!("read SMTP bytes: {}", escape_byte_string(&bytes));

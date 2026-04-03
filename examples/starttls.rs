@@ -1,11 +1,14 @@
 use std::{env, net::TcpStream, sync::Arc};
 
 use io_smtp::{
-    context::SmtpContext,
-    coroutines::{ehlo::*, greeting::*, starttls::*},
-    types::core::Domain,
+    rfc3207::starttls::{SmtpStartTls, SmtpStartTlsResult},
+    rfc5321::{
+        ehlo::{SmtpEhlo, SmtpEhloResult},
+        greeting::{GetSmtpGreeting, GetSmtpGreetingResult},
+        types::{domain::Domain, ehlo_domain::EhloDomain},
+    },
 };
-use io_stream::runtimes::std::handle;
+use io_socket::runtimes::std_stream::handle;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use rustls_platform_verifier::ConfigVerifierExt;
 
@@ -13,76 +16,76 @@ fn main() {
     env_logger::init();
 
     let host = env::var("HOST").expect("HOST env var");
-    let port = env::var("PORT")
+    let port: u16 = env::var("PORT")
         .expect("PORT env var")
         .parse()
         .expect("PORT u16");
 
-    let context = SmtpContext::new();
     let mut stream = TcpStream::connect((host.as_str(), port)).unwrap();
 
-    // Read greeting
-    let mut coroutine = GetSmtpGreeting::new(context);
+    // Read greeting.
+    let mut coroutine = GetSmtpGreeting::new();
     let mut arg = None;
 
-    let (context, greeting) = loop {
+    let greeting = loop {
         match coroutine.resume(arg.take()) {
-            GetSmtpGreetingResult::Ok { context, greeting } => break (context, greeting),
-            GetSmtpGreetingResult::Io { io } => arg = Some(handle(&mut stream, io).unwrap()),
-            GetSmtpGreetingResult::Err { err, .. } => panic!("{err}"),
+            GetSmtpGreetingResult::Ok { greeting } => break greeting,
+            GetSmtpGreetingResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            GetSmtpGreetingResult::Err { err } => panic!("{err}"),
         }
     };
 
     println!("greeting: {greeting:#?}");
 
-    // Send EHLO to get capabilities (including STARTTLS)
-    let client_domain = Domain::try_from("localhost").unwrap();
-    let mut coroutine = SmtpEhlo::new(context, client_domain.into());
+    // Send EHLO to get capabilities (including STARTTLS).
+    let domain: EhloDomain<'_> = Domain::parse(b"localhost").unwrap().into();
+    let mut coroutine = SmtpEhlo::new(domain);
     let mut arg = None;
 
-    let (context, ehlo_response) = loop {
+    let capabilities = loop {
         match coroutine.resume(arg.take()) {
-            SmtpEhloResult::Ok { context, response } => break (context, response),
-            SmtpEhloResult::Io { io } => arg = Some(handle(&mut stream, io).unwrap()),
-            SmtpEhloResult::Err { err, .. } => panic!("{err}"),
+            SmtpEhloResult::Ok { capabilities } => break capabilities,
+            SmtpEhloResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            SmtpEhloResult::Err { err } => panic!("{err}"),
         }
     };
 
-    println!("EHLO response: {ehlo_response:#?}");
+    println!("capabilities: {capabilities:#?}");
 
-    // Send STARTTLS
-    let mut coroutine = SmtpStartTls::new(context);
+    // Send STARTTLS.
+    let mut coroutine = SmtpStartTls::new();
     let mut arg = None;
 
-    let context = loop {
+    loop {
         match coroutine.resume(arg.take()) {
-            SmtpStartTlsResult::Ok { context } => break context,
-            SmtpStartTlsResult::Io { io } => arg = Some(handle(&mut stream, io).unwrap()),
-            SmtpStartTlsResult::Err { err, .. } => panic!("{err}"),
+            SmtpStartTlsResult::Ok => break,
+            SmtpStartTlsResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            SmtpStartTlsResult::Err { err } => panic!("{err}"),
         }
-    };
+    }
 
     println!("STARTTLS successful, upgrading to TLS...");
 
-    // Upgrade to TLS
-    let server_name = host.try_into().unwrap();
+    // Upgrade the plain TCP stream to TLS.
+    let server_name = rustls::pki_types::ServerName::try_from(host.clone()).unwrap();
     let config = ClientConfig::with_platform_verifier().unwrap();
     let conn = ClientConnection::new(Arc::new(config), server_name).unwrap();
-    let mut stream = StreamOwned::new(conn, stream);
+    let mut tls_stream = StreamOwned::new(conn, stream);
 
-    // Send EHLO again after TLS upgrade
-    let client_domain = Domain::try_from("localhost").unwrap();
-    let mut coroutine = SmtpEhlo::new(context, client_domain.into());
+    // Send EHLO again after TLS upgrade.
+    let domain: EhloDomain<'_> = Domain::parse(b"localhost").unwrap().into();
+    let mut coroutine = SmtpEhlo::new(domain);
     let mut arg = None;
 
-    let (context, ehlo_response) = loop {
+    let capabilities = loop {
         match coroutine.resume(arg.take()) {
-            SmtpEhloResult::Ok { context, response } => break (context, response),
-            SmtpEhloResult::Io { io } => arg = Some(handle(&mut stream, io).unwrap()),
-            SmtpEhloResult::Err { err, .. } => panic!("{err}"),
+            SmtpEhloResult::Ok { capabilities } => break capabilities,
+            SmtpEhloResult::Io { input } => {
+                arg = Some(handle(&mut tls_stream, input).unwrap());
+            }
+            SmtpEhloResult::Err { err } => panic!("{err}"),
         }
     };
 
-    println!("EHLO after TLS: {ehlo_response:#?}");
-    println!("context: {context:#?}");
+    println!("capabilities after TLS: {capabilities:#?}");
 }

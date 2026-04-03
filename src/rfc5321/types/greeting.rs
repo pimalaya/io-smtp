@@ -49,7 +49,7 @@ pub(crate) mod parsers {
 
     use crate::{
         rfc5321::types::{domain::parsers::domain, text::parsers::text},
-        utils::parsers::{crlf, sp, Extra},
+        utils::parsers::{Extra, crlf, sp},
     };
 
     use super::Greeting;
