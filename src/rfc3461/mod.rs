@@ -5,4 +5,5 @@
 //! commands. The server must announce the `DSN` capability in its EHLO
 //! response before these parameters may be used.
 
+pub mod capability;
 pub mod parameter;

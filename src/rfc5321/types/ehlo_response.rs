@@ -50,10 +50,27 @@ impl EhloResponse<'_> {
     /// The comparison is case-insensitive and matches only the keyword part
     /// (e.g. `"AUTH"` matches `"AUTH PLAIN LOGIN"`).
     pub fn has_capability(&self, keyword: &str) -> bool {
-        self.capabilities.iter().any(|cap| {
-            let cap_keyword = cap.split_ascii_whitespace().next().unwrap_or("");
-            cap_keyword.eq_ignore_ascii_case(keyword)
-        })
+        self.get_capability(keyword).is_some()
+    }
+
+    /// Returns the full capability line for the given keyword, if
+    /// advertised.
+    ///
+    /// The returned string is the raw line including the keyword and
+    /// any parameters (e.g. `"AUTH PLAIN LOGIN"`, `"SIZE 52428800"`).
+    /// Parse capability-specific values with `str::parse::<T>()`
+    /// using the type from the relevant RFC module.
+    ///
+    /// The keyword comparison is case-insensitive.
+    pub fn get_capability(&self, keyword: &str) -> Option<&str> {
+        self.capabilities
+            .iter()
+            .find(|cap| {
+                cap.split_ascii_whitespace()
+                    .next()
+                    .map_or(false, |k| k.eq_ignore_ascii_case(keyword))
+            })
+            .map(|cap| cap.as_ref())
     }
 }
 

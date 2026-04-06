@@ -4,4 +4,5 @@
 //! Coroutine for the STARTTLS command, which upgrades a plain SMTP
 //! connection to TLS.
 
+pub mod capability;
 pub mod starttls;
