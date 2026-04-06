@@ -13,7 +13,7 @@ documentation = "https://docs.rs/io-smtp"
 repository = "https://github.com/pimalaya/io-smtp"
 
 [features]
-default = ["scram"]
+default = []
 scram = ["dep:hmac", "dep:pbkdf2", "dep:sha2"]
 
 [dev-dependencies]
