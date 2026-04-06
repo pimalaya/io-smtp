@@ -3,7 +3,11 @@
 //! Each test drives the raw coroutine loop against a live SMTP
 //! server.
 
-use std::{net::TcpStream, sync::Arc};
+use std::{
+    io::{Read, Write},
+    net::TcpStream,
+    sync::Arc,
+};
 
 use io_smtp::{
     login::*,
@@ -31,8 +35,25 @@ use secrecy::SecretString;
 
 /// Auth mechanism to use for a test run.
 pub enum Auth {
+    None,
     Plain { username: String, password: String },
     Login { username: String, password: String },
+}
+
+/// A shared end-to-end SMTP test flow.
+///
+/// Connects via SMTP (TCP) and exercises the following sequence:
+///
+/// ```text
+/// GREETING → HELO → EHLO → AUTH → NOOP
+///   → MAIL FROM → RCPT TO → RSET   (aborted transaction)
+///   → MAIL FROM → RCPT TO → DATA   (actual send)
+///   → QUIT
+/// ```
+pub fn run_smtp(host: &str, auth: Auth, email: &str) {
+    let _ = env_logger::try_init();
+    let stream = TcpStream::connect((host, 25)).expect("TCP connect");
+    run(stream, auth, email)
 }
 
 /// A shared end-to-end SMTP test flow.
@@ -46,16 +67,19 @@ pub enum Auth {
 ///   → QUIT
 /// ```
 pub fn run_smtps(host: &str, port: u16, auth: Auth, email: &str) {
-    let domain = Domain::parse(b"localhost").unwrap();
-    let ehlo_domain: EhloDomain<'static> = domain.clone().into();
-
-    // ── TCP + TLS connection ─────────────────────────────────────────────────
-
+    let _ = env_logger::try_init();
     let tcp = TcpStream::connect((host, port)).expect("TCP connect");
     let server_name = ServerName::try_from(host.to_owned()).expect("valid server name");
     let config = ClientConfig::with_platform_verifier().expect("TLS config");
     let conn = ClientConnection::new(Arc::new(config), server_name).expect("TLS handshake");
-    let mut stream = StreamOwned::new(conn, tcp);
+    let stream = StreamOwned::new(conn, tcp);
+
+    run(stream, auth, email)
+}
+
+fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
+    let domain = Domain::parse(b"pimalaya.org").unwrap();
+    let ehlo_domain: EhloDomain<'static> = domain.clone().into();
 
     // ── GREETING ─────────────────────────────────────────────────────────────
 
@@ -99,6 +123,7 @@ pub fn run_smtps(host: &str, port: u16, auth: Auth, email: &str) {
     // ── AUTH ──────────────────────────────────────────────────────────────────
 
     match auth {
+        Auth::None => {}
         Auth::Plain { username, password } => {
             let password = SecretString::from(password);
             let mut coroutine = SmtpPlain::new(&username, &password, ehlo_domain.clone());
