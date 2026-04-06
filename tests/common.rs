@@ -6,23 +6,23 @@
 use std::{net::TcpStream, sync::Arc};
 
 use io_smtp::{
-    login::{SmtpLogin, SmtpLoginResult},
-    rfc4616::plain::{SmtpPlain, SmtpPlainResult},
+    login::*,
+    rfc4616::plain::*,
     rfc5321::{
-        ehlo::{SmtpEhlo, SmtpEhloResult},
-        greeting::{GetSmtpGreeting, GetSmtpGreetingResult},
-        helo::{SmtpHelo, SmtpHeloResult},
-        mail::{SmtpMail, SmtpMailResult},
-        noop::{SmtpNoop, SmtpNoopResult},
-        quit::{SmtpQuit, SmtpQuitResult},
-        rcpt::{SmtpRcpt, SmtpRcptResult},
-        rset::{SmtpRset, SmtpRsetResult},
+        ehlo::*,
+        greeting::*,
+        helo::*,
+        mail::*,
+        noop::*,
+        quit::*,
+        rcpt::*,
+        rset::*,
         types::{
             domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath,
             local_part::LocalPart, mailbox::Mailbox, reverse_path::ReversePath,
         },
     },
-    send::{SmtpMessageSend, SmtpMessageSendResult},
+    send::*,
 };
 use io_socket::runtimes::std_stream::handle;
 use rustls::{ClientConfig, ClientConnection, StreamOwned, pki_types::ServerName};

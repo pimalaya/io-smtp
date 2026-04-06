@@ -19,8 +19,8 @@ pub enum SmtpWriteError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpWriteResult {
-    Io { input: SocketInput },
     Ok,
+    Io { input: SocketInput },
     Err { err: SmtpWriteError },
 }
 
@@ -30,9 +30,9 @@ pub struct SmtpWrite {
 }
 
 impl SmtpWrite {
-    pub fn new(bytes: Vec<u8>) -> Self {
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
         Self {
-            state: SocketWrite::new(bytes),
+            state: SocketWrite::new(bytes.into()),
         }
     }
 

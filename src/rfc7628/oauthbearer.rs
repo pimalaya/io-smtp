@@ -19,7 +19,6 @@
 
 use alloc::{
     borrow::Cow,
-    boxed::Box,
     string::{String, ToString},
     vec::Vec,
 };
@@ -33,12 +32,10 @@ use thiserror::Error;
 
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc4954::authenticate_data::AuthenticateData,
+    rfc4954::authenticate_data::{AuthenticateData, SmtpAuthCommand},
     rfc5321::{
         ehlo::*,
-        types::{
-            command::Command, ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response,
-        },
+        types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
@@ -64,13 +61,9 @@ pub enum SmtpOAuthBearerError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpOAuthBearerResult {
-    Io {
-        input: SocketInput,
-    },
+    Io { input: SocketInput },
     Ok,
-    Err {
-        err: SmtpOAuthBearerError,
-    },
+    Err { err: SmtpOAuthBearerError },
 }
 
 enum State {
@@ -103,15 +96,13 @@ impl SmtpOAuthBearer {
     /// Creates a new OAUTHBEARER coroutine.
     pub fn new(token: &SecretString, username: Option<&str>, domain: EhloDomain<'_>) -> Self {
         let initial = build_initial_response(token, username);
-        let encoded = Command::Auth {
-            mechanism: Cow::Borrowed(OAUTHBEARER),
-            initial_response: Some(SecretBox::new(Box::new(initial.into_boxed_slice()))),
-        }
-        .to_bytes();
-        trace!("AUTH OAUTHBEARER command to send: {} bytes", encoded.len());
+        trace!("sending AUTH OAUTHBEARER command");
 
         Self {
-            state: State::WriteInitial(SmtpWrite::new(encoded)),
+            state: State::WriteInitial(SmtpWrite::new(SmtpAuthCommand {
+                mechanism: Cow::Borrowed(OAUTHBEARER),
+                initial_response: Some(SecretBox::new(initial.into_boxed_slice())),
+            })),
             domain: Some(domain.into_static()),
             error_detail: None,
             buffer: Vec::new(),
@@ -180,9 +171,10 @@ impl SmtpOAuthBearer {
                                         self.error_detail = String::from_utf8(detail_bytes).ok();
                                     }
 
-                                    let ack = AuthenticateData::r#continue(vec![0x01u8]).to_bytes();
                                     self.buffer.clear();
-                                    self.state = State::WriteAck(SmtpWrite::new(ack));
+                                    self.state = State::WriteAck(SmtpWrite::new(
+                                        AuthenticateData::r#continue(vec![0x01u8]),
+                                    ));
                                     continue;
                                 }
 

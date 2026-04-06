@@ -11,10 +11,19 @@ use thiserror::Error;
 
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc5321::types::{command::Command, reply_code::ReplyCode, response::Response},
+    rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
+
+/// The DATA command (RFC 5321 §4.1.1.4).
+pub struct SmtpDataCommand;
+
+impl From<SmtpDataCommand> for Vec<u8> {
+    fn from(_: SmtpDataCommand) -> Vec<u8> {
+        b"DATA\r\n".to_vec()
+    }
+}
 
 /// Errors that can occur during DATA.
 #[derive(Debug, Error)]
@@ -65,11 +74,10 @@ impl SmtpData {
     /// The `message` should be the complete email message (headers + body).
     /// Dot-stuffing will be applied automatically.
     pub fn new(message: Vec<u8>) -> Self {
-        let encoded = Command::Data.to_bytes();
-        trace!("DATA command to send: {}", escape_byte_string(&encoded));
+        trace!("sending DATA command");
 
         Self {
-            state: State::CommandWrite(SmtpWrite::new(encoded)),
+            state: State::CommandWrite(SmtpWrite::new(SmtpDataCommand)),
             message_body: Some(message),
             buffer: Vec::new(),
         }

@@ -11,10 +11,19 @@ use thiserror::Error;
 
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc5321::types::{command::Command, reply_code::ReplyCode, response::Response},
+    rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
+
+/// The RSET command (RFC 5321 §4.1.1.5).
+pub struct SmtpRsetCommand;
+
+impl From<SmtpRsetCommand> for Vec<u8> {
+    fn from(_: SmtpRsetCommand) -> Vec<u8> {
+        b"RSET\r\n".to_vec()
+    }
+}
 
 /// Errors that can occur during RSET.
 #[derive(Debug, Error)]
@@ -52,10 +61,9 @@ pub struct SmtpRset {
 impl SmtpRset {
     /// Creates a new RSET coroutine.
     pub fn new() -> Self {
-        let bytes = Command::Rset.to_bytes();
-        trace!("command to send: {}", escape_byte_string(&bytes));
+        trace!("sending RSET command");
         Self {
-            state: State::Write(SmtpWrite::new(bytes)),
+            state: State::Write(SmtpWrite::new(SmtpRsetCommand)),
             buffer: Vec::new(),
         }
     }

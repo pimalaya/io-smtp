@@ -1,6 +1,7 @@
 //! I/O-free coroutine to send SMTP NOOP command.
 
 use alloc::{
+    borrow::Cow,
     string::{String, ToString},
     vec::Vec,
 };
@@ -11,10 +12,29 @@ use thiserror::Error;
 
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc5321::types::{command::Command, reply_code::ReplyCode, response::Response},
+    rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
+
+/// The NOOP command (RFC 5321 §4.1.1.9).
+pub struct SmtpNoopCommand<'a> {
+    /// Optional string argument (ignored by server).
+    pub string: Option<Cow<'a, str>>,
+}
+
+impl<'a> From<SmtpNoopCommand<'a>> for Vec<u8> {
+    fn from(cmd: SmtpNoopCommand<'a>) -> Vec<u8> {
+        let mut buf = String::new();
+        buf.push_str("NOOP");
+        if let Some(s) = cmd.string {
+            buf.push(' ');
+            buf.push_str(&s);
+        }
+        buf.push_str("\r\n");
+        buf.into_bytes()
+    }
+}
 
 /// Errors that can occur during NOOP.
 #[derive(Debug, Error)]
@@ -50,10 +70,9 @@ pub struct SmtpNoop {
 impl SmtpNoop {
     /// Creates a new NOOP coroutine.
     pub fn new() -> Self {
-        let bytes = Command::Noop { string: None }.to_bytes();
-        trace!("command to send: {}", escape_byte_string(&bytes));
+        trace!("sending NOOP command");
         Self {
-            state: State::Write(SmtpWrite::new(bytes)),
+            state: State::Write(SmtpWrite::new(SmtpNoopCommand { string: None })),
             buffer: Vec::new(),
         }
     }

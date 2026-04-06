@@ -67,9 +67,7 @@ fn main() {
     loop {
         match coroutine.resume(arg.take()) {
             SmtpPlainResult::Ok => break,
-            SmtpPlainResult::Io { input } => {
-                arg = Some(handle(&mut stream, input).unwrap())
-            }
+            SmtpPlainResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
             SmtpPlainResult::Err { err } => panic!("{err}"),
         }
     }

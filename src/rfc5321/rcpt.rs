@@ -12,12 +12,33 @@ use thiserror::Error;
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
     rfc5321::types::{
-        command::Command, forward_path::ForwardPath, parameter::Parameter, reply_code::ReplyCode,
-        response::Response,
+        forward_path::ForwardPath, parameter::Parameter, reply_code::ReplyCode, response::Response,
     },
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
+
+/// The RCPT TO command (RFC 5321 §4.1.1.3).
+pub struct SmtpRcptCommand<'a> {
+    /// The recipient's forward path.
+    pub forward_path: ForwardPath<'a>,
+    /// Optional ESMTP parameters.
+    pub parameters: Vec<Parameter<'a>>,
+}
+
+impl<'a> From<SmtpRcptCommand<'a>> for Vec<u8> {
+    fn from(cmd: SmtpRcptCommand<'a>) -> Vec<u8> {
+        let mut buf = String::new();
+        buf.push_str("RCPT TO:");
+        buf.push_str(&cmd.forward_path.to_string());
+        for p in cmd.parameters {
+            buf.push(' ');
+            buf.push_str(&p.to_string());
+        }
+        buf.push_str("\r\n");
+        buf.into_bytes()
+    }
+}
 
 /// Errors that can occur during RCPT TO.
 #[derive(Debug, Error)]
@@ -53,28 +74,24 @@ pub struct SmtpRcpt {
 impl SmtpRcpt {
     /// Creates a new RCPT TO coroutine.
     pub fn new(forward_path: ForwardPath<'_>) -> Self {
-        let bytes = Command::Rcpt {
-            forward_path,
-            parameters: Vec::new(),
-        }
-        .to_bytes();
-        trace!("command to send: {}", escape_byte_string(&bytes));
+        trace!("sending RCPT TO command");
         Self {
-            state: State::Write(SmtpWrite::new(bytes)),
+            state: State::Write(SmtpWrite::new(SmtpRcptCommand {
+                forward_path,
+                parameters: Vec::new(),
+            })),
             buffer: Vec::new(),
         }
     }
 
     /// Creates a new RCPT TO coroutine with parameters.
     pub fn with_params(forward_path: ForwardPath<'_>, parameters: Vec<Parameter<'_>>) -> Self {
-        let bytes = Command::Rcpt {
-            forward_path,
-            parameters,
-        }
-        .to_bytes();
-        trace!("command to send: {}", escape_byte_string(&bytes));
+        trace!("sending RCPT TO command with parameters");
         Self {
-            state: State::Write(SmtpWrite::new(bytes)),
+            state: State::Write(SmtpWrite::new(SmtpRcptCommand {
+                forward_path,
+                parameters,
+            })),
             buffer: Vec::new(),
         }
     }

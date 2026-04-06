@@ -1,9 +1,12 @@
 //! RFC 5321 — Simple Mail Transfer Protocol.
 //!
-//! Coroutines for each SMTP command (EHLO, HELO, MAIL FROM, RCPT TO,
-//! DATA, NOOP, RSET, QUIT) and a types module covering the
-//! wire-format primitives: reply codes, responses, paths, domains,
-//! and greetings.
+//! Each sub-module exposes a command type (`SmtpEhloCommand`, `SmtpHeloCommand`,
+//! `SmtpMailCommand`, `SmtpRcptCommand`, `SmtpDataCommand`, `SmtpNoopCommand`,
+//! `SmtpRsetCommand`, `SmtpQuitCommand`) that implements `From<T> for Vec<u8>`
+//! for wire serialisation, alongside the I/O-free coroutine that drives the
+//! full request/response exchange.  The `types` module covers shared
+//! wire-format primitives: reply codes, responses, paths, domains, and
+//! greetings.
 
 pub mod data;
 pub mod ehlo;

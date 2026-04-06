@@ -12,12 +12,33 @@ use thiserror::Error;
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
     rfc5321::types::{
-        command::Command, parameter::Parameter, reply_code::ReplyCode, response::Response,
-        reverse_path::ReversePath,
+        parameter::Parameter, reply_code::ReplyCode, response::Response, reverse_path::ReversePath,
     },
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
+
+/// The MAIL FROM command (RFC 5321 §4.1.1.2).
+pub struct SmtpMailCommand<'a> {
+    /// The sender's reverse path (can be null `<>`).
+    pub reverse_path: ReversePath<'a>,
+    /// Optional ESMTP parameters (e.g., SIZE, BODY).
+    pub parameters: Vec<Parameter<'a>>,
+}
+
+impl<'a> From<SmtpMailCommand<'a>> for Vec<u8> {
+    fn from(cmd: SmtpMailCommand<'a>) -> Vec<u8> {
+        let mut buf = String::new();
+        buf.push_str("MAIL FROM:");
+        buf.push_str(&cmd.reverse_path.to_string());
+        for p in cmd.parameters {
+            buf.push(' ');
+            buf.push_str(&p.to_string());
+        }
+        buf.push_str("\r\n");
+        buf.into_bytes()
+    }
+}
 
 /// Errors that can occur during MAIL FROM.
 #[derive(Debug, Error)]
@@ -53,28 +74,24 @@ pub struct SmtpMail {
 impl SmtpMail {
     /// Creates a new MAIL FROM coroutine.
     pub fn new(reverse_path: ReversePath<'_>) -> Self {
-        let bytes = Command::Mail {
-            reverse_path,
-            parameters: Vec::new(),
-        }
-        .to_bytes();
-        trace!("command to send: {}", escape_byte_string(&bytes));
+        trace!("sending MAIL FROM command");
         Self {
-            state: State::Write(SmtpWrite::new(bytes)),
+            state: State::Write(SmtpWrite::new(SmtpMailCommand {
+                reverse_path,
+                parameters: Vec::new(),
+            })),
             buffer: Vec::new(),
         }
     }
 
     /// Creates a new MAIL FROM coroutine with parameters.
     pub fn with_params(reverse_path: ReversePath<'_>, parameters: Vec<Parameter<'_>>) -> Self {
-        let bytes = Command::Mail {
-            reverse_path,
-            parameters,
-        }
-        .to_bytes();
-        trace!("command to send: {}", escape_byte_string(&bytes));
+        trace!("sending MAIL FROM command with parameters");
         Self {
-            state: State::Write(SmtpWrite::new(bytes)),
+            state: State::Write(SmtpWrite::new(SmtpMailCommand {
+                reverse_path,
+                parameters,
+            })),
             buffer: Vec::new(),
         }
     }

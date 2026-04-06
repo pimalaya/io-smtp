@@ -1,6 +1,5 @@
 pub mod address_literal;
 pub mod atom;
-pub mod command;
 pub mod domain;
 pub mod ehlo_domain;
 pub mod ehlo_response;

@@ -15,10 +15,26 @@ use thiserror::Error;
 
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc5321::types::{command::Command, domain::Domain, reply_code::ReplyCode, response::Response},
+    rfc5321::types::{domain::Domain, reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
+
+/// The HELO command (RFC 5321 §4.1.1.1).
+pub struct SmtpHeloCommand<'a> {
+    /// The client's domain.
+    pub domain: Domain<'a>,
+}
+
+impl<'a> From<SmtpHeloCommand<'a>> for Vec<u8> {
+    fn from(cmd: SmtpHeloCommand<'a>) -> Vec<u8> {
+        let mut buf = String::new();
+        buf.push_str("HELO ");
+        buf.push_str(&cmd.domain.to_string());
+        buf.push_str("\r\n");
+        buf.into_bytes()
+    }
+}
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
@@ -57,14 +73,12 @@ pub struct SmtpHelo {
 impl SmtpHelo {
     /// Creates a new coroutine.
     pub fn new(domain: Domain<'_>) -> Self {
-        let encoded = Command::Helo {
-            domain: domain.into_static(),
-        }
-        .to_bytes();
-        trace!("HELO command to send: {}", escape_byte_string(&encoded));
+        trace!("sending HELO command");
 
         Self {
-            state: State::Write(SmtpWrite::new(encoded)),
+            state: State::Write(SmtpWrite::new(SmtpHeloCommand {
+                domain: domain.into_static(),
+            })),
             buffer: Vec::new(),
         }
     }

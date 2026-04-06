@@ -3,12 +3,11 @@
 //!
 //! # Reference
 //!
-//! - RFC 5802: Salted Challenge Response Authentication Mechanism (SCRAM)
+//! - RFC 5802: Salted Challenge Response SmtpAuthCommandentication Mechanism (SCRAM)
 //! - RFC 7677: SCRAM-SHA-256 and SCRAM-SHA-256-PLUS SASL Mechanisms
 
 use alloc::{
     borrow::Cow,
-    boxed::Box,
     string::{String, ToString},
     vec::Vec,
 };
@@ -24,12 +23,10 @@ use thiserror::Error;
 
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc4954::authenticate_data::AuthenticateData,
+    rfc4954::authenticate_data::{AuthenticateData, SmtpAuthCommand},
     rfc5321::{
         ehlo::*,
-        types::{
-            command::Command, ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response,
-        },
+        types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
@@ -63,13 +60,9 @@ pub enum SmtpScramSha256Error {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpScramSha256Result {
-    Io {
-        input: SocketInput,
-    },
+    Io { input: SocketInput },
     Ok,
-    Err {
-        err: SmtpScramSha256Error,
-    },
+    Err { err: SmtpScramSha256Error },
 }
 
 enum State {
@@ -127,18 +120,13 @@ impl SmtpScramSha256 {
         client_first.extend_from_slice(b"n,,");
         client_first.extend_from_slice(&client_first_bare);
 
-        let encoded = Command::Auth {
-            mechanism: Cow::Borrowed(SCRAM_SHA_256),
-            initial_response: Some(SecretBox::new(Box::new(client_first.into_boxed_slice()))),
-        }
-        .to_bytes();
-        trace!(
-            "AUTH SCRAM-SHA-256 command to send: {} bytes",
-            encoded.len()
-        );
+        trace!("sending AUTH SCRAM-SHA-256 command");
 
         Self {
-            state: State::WriteInitial(SmtpWrite::new(encoded)),
+            state: State::WriteInitial(SmtpWrite::new(SmtpAuthCommand {
+                mechanism: Cow::Borrowed(SCRAM_SHA_256),
+                initial_response: Some(SecretBox::new(client_first.into_boxed_slice())),
+            })),
             client_first_bare,
             password: password.clone(),
             domain: Some(domain.into_static()),
@@ -210,10 +198,10 @@ impl SmtpScramSha256 {
                                         Ok(b) => b,
                                         Err(e) => {
                                             return SmtpScramSha256Result::Err {
-                                            err: SmtpScramSha256Error::ParseServerFirst(
-                                                e.to_string(),
-                                            ),
-                                        };
+                                                err: SmtpScramSha256Error::ParseServerFirst(
+                                                    e.to_string(),
+                                                ),
+                                            };
                                         }
                                     };
 
@@ -360,15 +348,12 @@ impl SmtpScramSha256 {
             }
         }
 
-        let combined_nonce = combined_nonce.ok_or_else(|| {
-            SmtpScramSha256Error::ParseServerFirst("missing r=".into())
-        })?;
-        let salt_b64 = salt_b64.ok_or_else(|| {
-            SmtpScramSha256Error::ParseServerFirst("missing s=".into())
-        })?;
-        let iterations = iterations.ok_or_else(|| {
-            SmtpScramSha256Error::ParseServerFirst("missing i=".into())
-        })?;
+        let combined_nonce = combined_nonce
+            .ok_or_else(|| SmtpScramSha256Error::ParseServerFirst("missing r=".into()))?;
+        let salt_b64 =
+            salt_b64.ok_or_else(|| SmtpScramSha256Error::ParseServerFirst("missing s=".into()))?;
+        let iterations = iterations
+            .ok_or_else(|| SmtpScramSha256Error::ParseServerFirst("missing i=".into()))?;
 
         // Verify the combined nonce starts with our client nonce
         let client_nonce_start = self
@@ -427,7 +412,7 @@ impl SmtpScramSha256 {
             v
         };
 
-        // AuthMessage = client-first-message-bare + "," + server-first + "," + client-final-without-proof
+        // SmtpAuthCommandMessage = client-first-message-bare + "," + server-first + "," + client-final-without-proof
         let mut auth_message: Vec<u8> = Vec::new();
         auth_message.extend_from_slice(&self.client_first_bare);
         auth_message.push(b',');
@@ -435,7 +420,7 @@ impl SmtpScramSha256 {
         auth_message.push(b',');
         auth_message.extend_from_slice(&client_final_no_proof);
 
-        // ClientSignature = HMAC(StoredKey, AuthMessage)
+        // ClientSignature = HMAC(StoredKey, SmtpAuthCommandMessage)
         let client_signature = hmac_sha256(&stored_key, &auth_message);
 
         // ClientProof = ClientKey XOR ClientSignature
@@ -447,7 +432,7 @@ impl SmtpScramSha256 {
         // ServerKey = HMAC(SaltedPassword, "Server Key")
         let server_key = hmac_sha256(&salted_password, b"Server Key");
 
-        // ServerSignature = HMAC(ServerKey, AuthMessage)
+        // ServerSignature = HMAC(ServerKey, SmtpAuthCommandMessage)
         let server_signature = hmac_sha256(&server_key, &auth_message);
         self.expected_server_sig = server_signature.to_vec();
 
@@ -457,8 +442,7 @@ impl SmtpScramSha256 {
         client_final.extend_from_slice(base64.encode(client_proof).as_bytes());
 
         // Wrap as SMTP authenticate data (base64-encodes the payload)
-        let wire = AuthenticateData::r#continue(client_final.as_slice()).to_bytes();
-        Ok(wire)
+        Ok(AuthenticateData::r#continue(client_final.as_slice()).into())
     }
 }
 

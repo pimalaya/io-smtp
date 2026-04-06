@@ -11,10 +11,19 @@ use thiserror::Error;
 
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc5321::types::{command::Command, reply_code::ReplyCode, response::Response},
+    rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
+
+/// The STARTTLS command (RFC 3207).
+pub struct SmtpStartTlsCommand;
+
+impl From<SmtpStartTlsCommand> for Vec<u8> {
+    fn from(_: SmtpStartTlsCommand) -> Vec<u8> {
+        b"STARTTLS\r\n".to_vec()
+    }
+}
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
@@ -51,11 +60,10 @@ pub struct SmtpStartTls {
 impl SmtpStartTls {
     /// Creates a new coroutine.
     pub fn new() -> Self {
-        let encoded = Command::StartTls.to_bytes();
-        trace!("STARTTLS command to send: {}", escape_byte_string(&encoded));
+        trace!("sending STARTTLS command");
 
         Self {
-            state: State::Write(SmtpWrite::new(encoded)),
+            state: State::Write(SmtpWrite::new(SmtpStartTlsCommand)),
             buffer: Vec::new(),
         }
     }

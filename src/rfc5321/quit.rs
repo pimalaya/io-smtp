@@ -10,10 +10,19 @@ use thiserror::Error;
 
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc5321::types::{command::Command, reply_code::ReplyCode, response::Response},
+    rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
+
+/// The QUIT command (RFC 5321 §4.1.1.10).
+pub struct SmtpQuitCommand;
+
+impl From<SmtpQuitCommand> for Vec<u8> {
+    fn from(_: SmtpQuitCommand) -> Vec<u8> {
+        b"QUIT\r\n".to_vec()
+    }
+}
 
 /// Errors that can occur during QUIT.
 #[derive(Debug, Error)]
@@ -49,10 +58,9 @@ pub struct SmtpQuit {
 impl SmtpQuit {
     /// Creates a new QUIT coroutine.
     pub fn new() -> Self {
-        let bytes = Command::Quit.to_bytes();
-        trace!("command to send: {}", escape_byte_string(&bytes));
+        trace!("sending QUIT command");
         Self {
-            state: State::Write(SmtpWrite::new(bytes)),
+            state: State::Write(SmtpWrite::new(SmtpQuitCommand)),
             buffer: Vec::new(),
         }
     }

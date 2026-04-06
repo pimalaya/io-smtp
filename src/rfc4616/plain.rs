@@ -3,7 +3,6 @@
 
 use alloc::{
     borrow::Cow,
-    boxed::Box,
     string::{String, ToString},
     vec::Vec,
 };
@@ -16,11 +15,10 @@ use thiserror::Error;
 
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
+    rfc4954::authenticate_data::SmtpAuthCommand,
     rfc5321::{
         ehlo::*,
-        types::{
-            command::Command, ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response,
-        },
+        types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
@@ -79,15 +77,13 @@ impl SmtpPlain {
         payload.push(0);
         payload.extend_from_slice(password.expose_secret().as_bytes());
 
-        let encoded = Command::Auth {
-            mechanism: Cow::Borrowed(PLAIN),
-            initial_response: Some(SecretBox::new(Box::new(payload.into_boxed_slice()))),
-        }
-        .to_bytes();
-        trace!("AUTH PLAIN command to send: {} bytes", encoded.len());
+        trace!("sending AUTH PLAIN command");
 
         Self {
-            state: State::Write(SmtpWrite::new(encoded)),
+            state: State::Write(SmtpWrite::new(SmtpAuthCommand {
+                mechanism: Cow::Borrowed(PLAIN),
+                initial_response: Some(SecretBox::new(payload.into_boxed_slice())),
+            })),
             domain: Some(domain.into_static()),
             buffer: Vec::new(),
         }

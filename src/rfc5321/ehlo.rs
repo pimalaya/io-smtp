@@ -13,13 +13,28 @@ use thiserror::Error;
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
     rfc5321::types::{
-        command::Command,
         ehlo_domain::EhloDomain,
         ehlo_response::{Capability, EhloResponse},
     },
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
+
+/// The EHLO command (RFC 5321 §4.1.1.1).
+pub struct SmtpEhloCommand<'a> {
+    /// The client's domain or address literal.
+    pub domain: EhloDomain<'a>,
+}
+
+impl<'a> From<SmtpEhloCommand<'a>> for Vec<u8> {
+    fn from(cmd: SmtpEhloCommand<'a>) -> Vec<u8> {
+        let mut buf = String::new();
+        buf.push_str("EHLO ");
+        buf.push_str(&cmd.domain.to_string());
+        buf.push_str("\r\n");
+        buf.into_bytes()
+    }
+}
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
@@ -59,11 +74,10 @@ pub struct SmtpEhlo {
 impl SmtpEhlo {
     /// Creates a new coroutine.
     pub fn new(domain: EhloDomain<'_>) -> Self {
-        let encoded = Command::Ehlo { domain }.to_bytes();
-        trace!("EHLO command to send: {}", escape_byte_string(&encoded));
+        trace!("sending EHLO command");
 
         Self {
-            state: State::Write(SmtpWrite::new(encoded)),
+            state: State::Write(SmtpWrite::new(SmtpEhloCommand { domain })),
             buffer: Vec::new(),
         }
     }

@@ -1,12 +1,11 @@
-//! I/O-free coroutine to authenticate using SMTP AUTH LOGIN then refresh
-//! capabilities via EHLO.
+//! AUTH LOGIN command and coroutine (no formal RFC).
 //!
-//! LOGIN is a legacy de-facto mechanism with no formal RFC. It performs a
-//! two-step challenge/response exchange: the server asks for the username,
-//! then the password, each base64-encoded.
+//! LOGIN is a legacy de-facto SASL mechanism. It performs a two-step
+//! challenge/response exchange: the server asks for the username, then the
+//! password, each base64-encoded. Prefer PLAIN or SCRAM-SHA-256 when the
+//! server supports them.
 
 use alloc::{
-    borrow::Cow,
     string::{String, ToString},
     vec::Vec,
 };
@@ -22,13 +21,22 @@ use crate::{
     rfc4954::authenticate_data::AuthenticateData,
     rfc5321::{
         ehlo::*,
-        types::{
-            command::Command, ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response,
-        },
+        types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
+
+/// The AUTH LOGIN command.
+///
+/// Sends `AUTH LOGIN\r\n` to initiate the two-step challenge/response exchange.
+pub struct SmtpLoginCommand;
+
+impl From<SmtpLoginCommand> for Vec<u8> {
+    fn from(_: SmtpLoginCommand) -> Vec<u8> {
+        b"AUTH LOGIN\r\n".to_vec()
+    }
+}
 
 /// The SASL mechanism name as it appears on the wire.
 pub const LOGIN: &str = "LOGIN";
@@ -50,8 +58,8 @@ pub enum SmtpLoginError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpLoginResult {
-    Io { input: SocketInput },
     Ok,
+    Io { input: SocketInput },
     Err { err: SmtpLoginError },
 }
 
@@ -78,19 +86,14 @@ pub struct SmtpLogin {
 impl SmtpLogin {
     /// Creates a new AUTH LOGIN coroutine.
     pub fn new(login: &str, password: &SecretString, domain: EhloDomain<'_>) -> Self {
-        let encoded = Command::Auth {
-            mechanism: Cow::Borrowed(LOGIN),
-            initial_response: None,
-        }
-        .to_bytes();
-        trace!("AUTH LOGIN command to send: {} bytes", encoded.len());
+        trace!("sending AUTH LOGIN command");
 
-        let username_bytes = AuthenticateData::r#continue(login.as_bytes()).to_bytes();
-        let password_bytes =
-            AuthenticateData::r#continue(password.expose_secret().as_bytes()).to_bytes();
+        let username_bytes: Vec<u8> = AuthenticateData::r#continue(login.as_bytes()).into();
+        let password_bytes: Vec<u8> =
+            AuthenticateData::r#continue(password.expose_secret().as_bytes()).into();
 
         Self {
-            state: State::AuthWrite(SmtpWrite::new(encoded)),
+            state: State::AuthWrite(SmtpWrite::new(SmtpLoginCommand)),
             domain: Some(domain.into_static()),
             username_bytes,
             password_bytes,
