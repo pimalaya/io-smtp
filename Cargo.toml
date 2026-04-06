@@ -19,7 +19,7 @@ scram = ["dep:hmac", "dep:pbkdf2", "dep:rand", "dep:sha2"]
 [dev-dependencies]
 env_logger = "0.11"
 io-socket = { version = "0.0.1", default-features = false, features = ["std-stream"] }
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-platform-verifier = "0.6"
 
 [dependencies]
