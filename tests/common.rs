@@ -11,7 +11,12 @@ use io_smtp::{
     rfc5321::{
         ehlo::{SmtpEhlo, SmtpEhloResult},
         greeting::{GetSmtpGreeting, GetSmtpGreetingResult},
+        helo::{SmtpHelo, SmtpHeloResult},
+        mail::{SmtpMail, SmtpMailResult},
+        noop::{SmtpNoop, SmtpNoopResult},
         quit::{SmtpQuit, SmtpQuitResult},
+        rcpt::{SmtpRcpt, SmtpRcptResult},
+        rset::{SmtpRset, SmtpRsetResult},
         types::{
             domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath,
             local_part::LocalPart, mailbox::Mailbox, reverse_path::ReversePath,
@@ -20,7 +25,7 @@ use io_smtp::{
     send::{SmtpMessageSend, SmtpMessageSendResult},
 };
 use io_socket::runtimes::std_stream::handle;
-use rustls::{ClientConfig, ClientConnection, StreamOwned};
+use rustls::{ClientConfig, ClientConnection, StreamOwned, pki_types::ServerName};
 use rustls_platform_verifier::ConfigVerifierExt;
 use secrecy::SecretString;
 
@@ -32,17 +37,22 @@ pub enum Auth {
 
 /// A shared end-to-end SMTP test flow.
 ///
-/// Connects via SMTPS (direct TLS), authenticates with the given credentials,
-/// sends a single test message to `email` (from and to the same address),
-/// then quits.
+/// Connects via SMTPS (direct TLS) and exercises the following sequence:
+///
+/// ```text
+/// GREETING → HELO → EHLO → AUTH → NOOP
+///   → MAIL FROM → RCPT TO → RSET   (aborted transaction)
+///   → MAIL FROM → RCPT TO → DATA   (actual send)
+///   → QUIT
+/// ```
 pub fn run_smtps(host: &str, port: u16, auth: Auth, email: &str) {
-    let client_domain: EhloDomain<'static> = Domain::parse(b"localhost").unwrap().into();
+    let domain = Domain::parse(b"localhost").unwrap();
+    let ehlo_domain: EhloDomain<'static> = domain.clone().into();
 
     // ── TCP + TLS connection ─────────────────────────────────────────────────
 
     let tcp = TcpStream::connect((host, port)).expect("TCP connect");
-    let server_name =
-        rustls::pki_types::ServerName::try_from(host.to_owned()).expect("valid server name");
+    let server_name = ServerName::try_from(host.to_owned()).expect("valid server name");
     let config = ClientConfig::with_platform_verifier().expect("TLS config");
     let conn = ClientConnection::new(Arc::new(config), server_name).expect("TLS handshake");
     let mut stream = StreamOwned::new(conn, tcp);
@@ -51,18 +61,33 @@ pub fn run_smtps(host: &str, port: u16, auth: Auth, email: &str) {
 
     let mut coroutine = GetSmtpGreeting::new();
     let mut arg = None;
+
     loop {
         match coroutine.resume(arg.take()) {
             GetSmtpGreetingResult::Ok { .. } => break,
             GetSmtpGreetingResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
-            GetSmtpGreetingResult::Err { err } => panic!("greeting: {err}"),
+            GetSmtpGreetingResult::Err { err } => panic!("GREETING: {err}"),
+        }
+    }
+
+    // ── HELO ─────────────────────────────────────────────────────────────────
+
+    let mut coroutine = SmtpHelo::new(domain);
+    let mut arg = None;
+
+    loop {
+        match coroutine.resume(arg.take()) {
+            SmtpHeloResult::Ok => break,
+            SmtpHeloResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            SmtpHeloResult::Err { err } => panic!("HELO: {err}"),
         }
     }
 
     // ── EHLO ─────────────────────────────────────────────────────────────────
 
-    let mut coroutine = SmtpEhlo::new(client_domain.clone());
+    let mut coroutine = SmtpEhlo::new(ehlo_domain.clone());
     let mut arg = None;
+
     loop {
         match coroutine.resume(arg.take()) {
             SmtpEhloResult::Ok { .. } => break,
@@ -76,7 +101,7 @@ pub fn run_smtps(host: &str, port: u16, auth: Auth, email: &str) {
     match auth {
         Auth::Plain { username, password } => {
             let password = SecretString::from(password);
-            let mut coroutine = SmtpPlain::new(&username, &password, client_domain.clone());
+            let mut coroutine = SmtpPlain::new(&username, &password, ehlo_domain.clone());
             let mut arg = None;
             loop {
                 match coroutine.resume(arg.take()) {
@@ -90,7 +115,7 @@ pub fn run_smtps(host: &str, port: u16, auth: Auth, email: &str) {
         }
         Auth::Login { username, password } => {
             let password = SecretString::from(password);
-            let mut coroutine = SmtpLogin::new(&username, &password, client_domain.clone());
+            let mut coroutine = SmtpLogin::new(&username, &password, ehlo_domain.clone());
             let mut arg = None;
             loop {
                 match coroutine.resume(arg.take()) {
@@ -104,34 +129,66 @@ pub fn run_smtps(host: &str, port: u16, auth: Auth, email: &str) {
         }
     }
 
-    // ── SEND MESSAGE ──────────────────────────────────────────────────────────
+    // ── NOOP ─────────────────────────────────────────────────────────────────
 
-    send_test_message(&mut stream, email);
-
-    // ── QUIT ──────────────────────────────────────────────────────────────────
-
-    let mut coroutine = SmtpQuit::new();
+    let mut coroutine = SmtpNoop::new();
     let mut arg = None;
+
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpQuitResult::Ok => break,
-            SmtpQuitResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
-            SmtpQuitResult::Err { err } => panic!("QUIT: {err}"),
+            SmtpNoopResult::Ok => break,
+            SmtpNoopResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            SmtpNoopResult::Err { err } => panic!("NOOP: {err}"),
         }
     }
-}
 
-/// Send a minimal test email from and to `email`.
-fn send_test_message(stream: &mut (impl std::io::Read + std::io::Write), email: &str) {
-    let (local, domain) = email.split_once('@').unwrap();
+    // ── Build paths (shared across the aborted and real transactions) ─────────
 
+    let (local, domain_part) = email.split_once('@').unwrap();
     let mailbox = Mailbox {
         local_part: LocalPart(local.to_owned().into()),
-        domain: Domain::parse(domain.as_bytes()).unwrap().into(),
+        domain: Domain::parse(domain_part.as_bytes()).unwrap().into(),
     };
 
     let reverse_path = ReversePath::Mailbox(mailbox.clone());
     let forward_path = ForwardPath(mailbox);
+
+    // ── MAIL FROM → RCPT TO → RSET (aborted transaction) ────────────────────
+
+    let mut coroutine = SmtpMail::new(reverse_path.clone());
+    let mut arg = None;
+
+    loop {
+        match coroutine.resume(arg.take()) {
+            SmtpMailResult::Ok => break,
+            SmtpMailResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            SmtpMailResult::Err { err } => panic!("MAIL FROM (aborted): {err}"),
+        }
+    }
+
+    let mut coroutine = SmtpRcpt::new(forward_path.clone());
+    let mut arg = None;
+
+    loop {
+        match coroutine.resume(arg.take()) {
+            SmtpRcptResult::Ok => break,
+            SmtpRcptResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            SmtpRcptResult::Err { err } => panic!("RCPT TO (aborted): {err}"),
+        }
+    }
+
+    let mut coroutine = SmtpRset::new();
+    let mut arg = None;
+
+    loop {
+        match coroutine.resume(arg.take()) {
+            SmtpRsetResult::Ok => break,
+            SmtpRsetResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            SmtpRsetResult::Err { err } => panic!("RSET: {err}"),
+        }
+    }
+
+    // ── MAIL FROM → RCPT TO → DATA (actual send) ─────────────────────────────
 
     let eml = [
         &format!("From: io-smtp test <{email}>"),
@@ -151,8 +208,21 @@ fn send_test_message(stream: &mut (impl std::io::Read + std::io::Write), email: 
     loop {
         match coroutine.resume(arg.take()) {
             SmtpMessageSendResult::Ok => break,
-            SmtpMessageSendResult::Io { input } => arg = Some(handle(&mut *stream, input).unwrap()),
+            SmtpMessageSendResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
             SmtpMessageSendResult::Err { err } => panic!("send message: {err}"),
+        }
+    }
+
+    // ── QUIT ──────────────────────────────────────────────────────────────────
+
+    let mut coroutine = SmtpQuit::new();
+    let mut arg = None;
+
+    loop {
+        match coroutine.resume(arg.take()) {
+            SmtpQuitResult::Ok => break,
+            SmtpQuitResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
+            SmtpQuitResult::Err { err } => panic!("QUIT: {err}"),
         }
     }
 }
