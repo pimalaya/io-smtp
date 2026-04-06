@@ -26,8 +26,7 @@ pub struct SmtpEhloCommand<'a> {
 
 impl<'a> From<SmtpEhloCommand<'a>> for Vec<u8> {
     fn from(cmd: SmtpEhloCommand<'a>) -> Vec<u8> {
-        let mut buf = String::new();
-        buf.push_str("EHLO ");
+        let mut buf = String::from("EHLO ");
         buf.push_str(&cmd.domain.to_string());
         buf.push_str("\r\n");
         buf.into_bytes()
