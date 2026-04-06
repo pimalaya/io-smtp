@@ -4,16 +4,13 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
+
 use bounded_static::IntoBoundedStatic;
 use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
-use crate::{
-    read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc5321::types::greeting::Greeting,
-    utils::escape_byte_string,
-};
+use crate::{read::*, rfc5321::types::greeting::Greeting, utils::escape_byte_string};
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
@@ -26,8 +23,8 @@ pub enum GetSmtpGreetingError {
 
 /// Output emitted when the coroutine terminates its progression.
 pub enum GetSmtpGreetingResult {
-    Io { input: SocketInput },
     Ok { greeting: Greeting<'static> },
+    Io { input: SocketInput },
     Err { err: GetSmtpGreetingError },
 }
 
@@ -52,7 +49,8 @@ impl GetSmtpGreeting {
             match self.io.resume(arg.take()) {
                 SmtpReadResult::Io { input } => return GetSmtpGreetingResult::Io { input },
                 SmtpReadResult::Err { err } => {
-                    return GetSmtpGreetingResult::Err { err: err.into() };
+                    let err = err.into();
+                    return GetSmtpGreetingResult::Err { err };
                 }
                 SmtpReadResult::Ok { bytes } => {
                     trace!("read SMTP bytes: {}", escape_byte_string(&bytes));
@@ -63,10 +61,12 @@ impl GetSmtpGreeting {
                         continue;
                     }
 
-                    return match Greeting::parse(&self.buffer) {
-                        Ok(greeting) => GetSmtpGreetingResult::Ok {
-                            greeting: greeting.into_static(),
-                        },
+                    match Greeting::parse(&self.buffer) {
+                        Ok(greeting) => {
+                            return GetSmtpGreetingResult::Ok {
+                                greeting: greeting.into_static(),
+                            };
+                        }
                         Err(errors) => {
                             let reason = errors
                                 .iter()
@@ -74,11 +74,10 @@ impl GetSmtpGreeting {
                                 .collect::<Vec<_>>()
                                 .join("; ");
 
-                            GetSmtpGreetingResult::Err {
-                                err: GetSmtpGreetingError::ParseResponse(reason),
-                            }
+                            let err = GetSmtpGreetingError::ParseResponse(reason);
+                            return GetSmtpGreetingResult::Err { err };
                         }
-                    };
+                    }
                 }
             }
         }

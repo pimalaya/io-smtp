@@ -9,10 +9,7 @@ use bounded_static_derive::ToStatic;
 #[derive(Clone, PartialEq, Eq, Hash, ToStatic)]
 pub struct Vec1<T>(pub(crate) Vec<T>);
 
-impl<T> Debug for Vec1<T>
-where
-    T: Debug,
-{
+impl<T: Debug> Debug for Vec1<T> {
     fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
         self.0.fmt(f)?;
         write!(f, "+")

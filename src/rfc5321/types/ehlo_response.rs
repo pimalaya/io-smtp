@@ -1,84 +1,26 @@
 //! Module dedicated to the SMTP EHLO response.
 
 use alloc::{borrow::Cow, vec::Vec};
-use core::fmt;
 
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
 
-use super::{atom::Atom, domain::Domain, text::Text};
-
-/// An SMTP server capability announced in EHLO response.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]
-#[non_exhaustive]
-pub enum Capability<'a> {
-    /// SIZE extension with optional maximum size.
-    Size(Option<u64>),
-
-    /// 8BITMIME extension.
-    EightBitMime,
-
-    /// PIPELINING extension.
-    Pipelining,
-
-    /// STARTTLS extension.
-    StartTls,
-
-    /// SMTPUTF8 extension.
-    SmtpUtf8,
-
-    /// ENHANCEDSTATUSCODES extension.
-    EnhancedStatusCodes,
-
-    /// AUTH extension with supported mechanisms.
-    Auth(Vec<Cow<'a, str>>),
-
-    /// Other/unknown capability.
-    Other {
-        /// The capability keyword
-        keyword: Atom<'a>,
-        /// Optional parameters
-        params: Option<Cow<'a, str>>,
-    },
-}
-
-impl fmt::Display for Capability<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Capability::Size(Some(size)) => write!(f, "SIZE {size}"),
-            Capability::Size(None) => write!(f, "SIZE"),
-            Capability::EightBitMime => write!(f, "8BITMIME"),
-            Capability::Pipelining => write!(f, "PIPELINING"),
-            Capability::StartTls => write!(f, "STARTTLS"),
-            Capability::SmtpUtf8 => write!(f, "SMTPUTF8"),
-            Capability::EnhancedStatusCodes => write!(f, "ENHANCEDSTATUSCODES"),
-            Capability::Auth(mechanisms) => {
-                write!(f, "AUTH")?;
-                for mech in mechanisms {
-                    write!(f, " {mech}")?;
-                }
-                Ok(())
-            }
-            Capability::Other { keyword, params } => {
-                write!(f, "{keyword}")?;
-                if let Some(params) = params {
-                    write!(f, " {params}")?;
-                }
-                Ok(())
-            }
-        }
-    }
-}
+use super::{domain::Domain, text::Text};
 
 /// EHLO response containing server capabilities.
+///
+/// Each capability is stored as a raw string exactly as advertised by the
+/// server (e.g. `"AUTH PLAIN LOGIN"`, `"SIZE 10485760"`, `"STARTTLS"`).
+/// Individual RFC modules are responsible for parsing the parameters of
+/// their own capability.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]
 pub struct EhloResponse<'a> {
-    /// The server's domain name
+    /// The server's domain name.
     pub domain: Domain<'a>,
-    /// Optional greeting text on the first line
+    /// Optional greeting text on the first line.
     pub greet: Option<Text<'a>>,
-    /// Server capabilities
-    pub capabilities: Vec<Capability<'a>>,
+    /// Server capabilities as raw keyword strings.
+    pub capabilities: Vec<Cow<'a, str>>,
 }
 
 impl EhloResponse<'_> {
@@ -101,34 +43,14 @@ impl EhloResponse<'_> {
         parsers::ehlo_response().parse(buf).into_result()
     }
 
-    /// Returns true if the server supports the given capability.
-    pub fn has_capability(&self, name: &str) -> bool {
-        let name_upper = name.to_ascii_uppercase();
-        self.capabilities.iter().any(|cap| match cap {
-            Capability::Size(_) => name_upper == "SIZE",
-            Capability::EightBitMime => name_upper == "8BITMIME",
-            Capability::Pipelining => name_upper == "PIPELINING",
-            Capability::StartTls => name_upper == "STARTTLS",
-            Capability::SmtpUtf8 => name_upper == "SMTPUTF8",
-            Capability::EnhancedStatusCodes => name_upper == "ENHANCEDSTATUSCODES",
-            Capability::Auth(_) => name_upper == "AUTH",
-            Capability::Other { keyword, .. } => keyword.to_ascii_uppercase() == name_upper,
-        })
-    }
-
-    /// Returns the AUTH mechanism names if AUTH capability is present.
-    pub fn auth_mechanisms(&self) -> Option<&[Cow<'_, str>]> {
-        self.capabilities.iter().find_map(|cap| match cap {
-            Capability::Auth(mechanisms) => Some(mechanisms.as_slice()),
-            _ => None,
-        })
-    }
-
-    /// Returns the maximum message size if SIZE capability is present.
-    pub fn max_size(&self) -> Option<u64> {
-        self.capabilities.iter().find_map(|cap| match cap {
-            Capability::Size(size) => *size,
-            _ => None,
+    /// Returns true if the server advertised the given capability keyword.
+    ///
+    /// The comparison is case-insensitive and matches only the keyword part
+    /// (e.g. `"AUTH"` matches `"AUTH PLAIN LOGIN"`).
+    pub fn has_capability(&self, keyword: &str) -> bool {
+        self.capabilities.iter().any(|cap| {
+            let cap_keyword = cap.split_ascii_whitespace().next().unwrap_or("");
+            cap_keyword.eq_ignore_ascii_case(keyword)
         })
     }
 }
@@ -140,14 +62,27 @@ pub(crate) mod parsers {
     use chumsky::prelude::*;
 
     use crate::rfc5321::types::{
-        atom::parsers::atom as atom_parser, domain::parsers::domain as domain_parser,
-        text::parsers::text as text_parser,
+        domain::parsers::domain as domain_parser, text::parsers::text as text_parser,
     };
-    use crate::utils::parsers::{Extra, crlf, sp, tag_no_case};
+    use crate::utils::parsers::{Extra, crlf, sp};
 
-    use super::{Capability, EhloResponse};
+    use super::EhloResponse;
 
-    /// SMTP capability parser.
+    /// Parses a single EHLO capability line as a raw string.
+    pub(crate) fn capability<'a>() -> impl Parser<'a, &'a [u8], Cow<'a, str>, Extra<'a>> + Clone {
+        any()
+            .filter(|b: &u8| matches!(*b, 0x20..=0x7e))
+            .repeated()
+            .at_least(1)
+            .to_slice()
+            .try_map(|bytes: &[u8], span| {
+                from_utf8(bytes)
+                    .map_err(|_| Rich::custom(span, "invalid UTF-8 in capability line"))
+                    .map(Cow::from)
+            })
+    }
+
+    /// SMTP EHLO response parser.
     ///
     /// ```abnf
     /// ehlo-ok-rsp    = ( "250" SP Domain [ SP ehlo-greet ] CRLF )
@@ -155,78 +90,7 @@ pub(crate) mod parsers {
     ///                  *( "250-" ehlo-line CRLF )
     ///                  "250" SP ehlo-line CRLF )
     /// ehlo-line      = ehlo-keyword *( SP ehlo-param )
-    /// ehlo-keyword   = (ALPHA / DIGIT) *(ALPHA / DIGIT / "-")
-    /// ehlo-param     = 1*(%d33-126)
     /// ```
-    pub(crate) fn capability<'a>() -> impl Parser<'a, &'a [u8], Capability<'a>, Extra<'a>> + Clone {
-        let size = tag_no_case(b"SIZE")
-            .ignore_then(
-                sp().ignore_then(
-                    any()
-                        .filter(|b: &u8| b.is_ascii_digit())
-                        .repeated()
-                        .at_least(1)
-                        .to_slice()
-                        .try_map(|bytes: &[u8], span| {
-                            from_utf8(bytes)
-                                .map_err(|_| Rich::custom(span, "invalid UTF-8 in SIZE"))
-                                .and_then(|s| {
-                                    s.parse::<u64>()
-                                        .map_err(|_| Rich::custom(span, "invalid SIZE value"))
-                                })
-                        }),
-                )
-                .or_not(),
-            )
-            .map(Capability::Size);
-
-        let eightbitmime = tag_no_case(b"8BITMIME").to(Capability::EightBitMime);
-        let pipelining = tag_no_case(b"PIPELINING").to(Capability::Pipelining);
-        let starttls = tag_no_case(b"STARTTLS").to(Capability::StartTls);
-        let smtputf8 = tag_no_case(b"SMTPUTF8").to(Capability::SmtpUtf8);
-        let enhanced = tag_no_case(b"ENHANCEDSTATUSCODES").to(Capability::EnhancedStatusCodes);
-
-        let auth = tag_no_case(b"AUTH")
-            .ignore_then(
-                sp().ignore_then(atom_parser().map(|a| Cow::Owned(a.to_ascii_uppercase())))
-                    .repeated()
-                    .at_least(1)
-                    .collect::<Vec<_>>(),
-            )
-            .map(Capability::Auth);
-
-        let other = atom_parser()
-            .then(
-                sp().ignore_then(
-                    any()
-                        .filter(|b: &u8| *b == 0x09 || matches!(*b, 0x20..=0x7e))
-                        .repeated()
-                        .to_slice()
-                        .try_map(|bytes: &[u8], span| {
-                            from_utf8(bytes)
-                                .map_err(|_| {
-                                    Rich::custom(span, "invalid UTF-8 in capability params")
-                                })
-                                .map(Cow::from)
-                        }),
-                )
-                .or_not(),
-            )
-            .map(|(keyword, params)| Capability::Other { keyword, params });
-
-        choice((
-            size,
-            eightbitmime,
-            pipelining,
-            starttls,
-            smtputf8,
-            enhanced,
-            auth,
-            other,
-        ))
-    }
-
-    /// SMTP EHLO response parser.
     pub(crate) fn ehlo_response<'a>() -> impl Parser<'a, &'a [u8], EhloResponse<'a>, Extra<'a>> {
         just(b"250" as &[u8])
             .ignore_then(choice((just(b'-').to(true), just(b' ').to(false))))
@@ -249,27 +113,18 @@ pub(crate) mod parsers {
                     .or_not(),
             )
             .map(|((((is_multi, domain), greet), cont_caps), final_cap)| {
-                let mut ehlo = match greet {
-                    Some(g) => EhloResponse {
-                        domain,
-                        greet: Some(g),
-                        capabilities: Vec::new(),
-                    },
-                    None => EhloResponse {
-                        domain,
-                        greet: None,
-                        capabilities: Vec::new(),
-                    },
-                };
+                let mut capabilities = Vec::new();
                 if is_multi {
-                    for cap in cont_caps {
-                        ehlo.capabilities.push(cap);
-                    }
+                    capabilities.extend(cont_caps);
                     if let Some(cap) = final_cap {
-                        ehlo.capabilities.push(cap);
+                        capabilities.push(cap);
                     }
                 }
-                ehlo
+                EhloResponse {
+                    domain,
+                    greet,
+                    capabilities,
+                }
             })
     }
 }

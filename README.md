@@ -22,14 +22,16 @@ This library implements SMTP as I/O-agnostic coroutines — no sockets, no async
 | `login`  | LOGIN — legacy de-facto AUTH mechanism (no RFC)                                  |
 | [3207]   | STARTTLS — upgrade a plain connection to TLS                                     |
 | [3461]   | DSN — `RET`, `ENVID`, `NOTIFY`, `ORCPT` ESMTP parameters for MAIL FROM / RCPT TO |
+| [3463]   | Enhanced status codes — `EnhancedStatusCode` type                                |
 | [4616]   | PLAIN — SASL PLAIN authentication mechanism                                      |
-| [4954]   | AUTH — SASL exchange protocol (`AuthenticateData`)                               |
+| [4954]   | AUTH — SASL exchange protocol (`SmtpAuthCommand`, `SmtpAuthData`)                |
 | [5321]   | SMTP — greeting, EHLO, HELO, MAIL FROM, RCPT TO, DATA, NOOP, RSET, QUIT          |
 | [7628]   | OAUTHBEARER — OAuth 2.0 bearer token SASL mechanism                              |
 | [7677]   | SCRAM-SHA-256 — SASL SCRAM-SHA-256 mechanism (feature `scram`)                   |
 
 [3207]: https://www.rfc-editor.org/rfc/rfc3207
 [3461]: https://www.rfc-editor.org/rfc/rfc3461
+[3463]: https://www.rfc-editor.org/rfc/rfc3463
 [4616]: https://www.rfc-editor.org/rfc/rfc4616
 [4954]: https://www.rfc-editor.org/rfc/rfc4954
 [5321]: https://www.rfc-editor.org/rfc/rfc5321

@@ -5,16 +5,17 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
+
 use bounded_static::IntoBoundedStatic;
 use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
-    read::{SmtpRead, SmtpReadError, SmtpReadResult},
+    read::*,
     rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
-    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
+    write::*,
 };
 
 /// The NOOP command (RFC 5321 §4.1.1.9).
@@ -25,12 +26,13 @@ pub struct SmtpNoopCommand<'a> {
 
 impl<'a> From<SmtpNoopCommand<'a>> for Vec<u8> {
     fn from(cmd: SmtpNoopCommand<'a>) -> Vec<u8> {
-        let mut buf = String::new();
-        buf.push_str("NOOP");
+        let mut buf = String::from("NOOP");
+
         if let Some(s) = cmd.string {
             buf.push(' ');
             buf.push_str(&s);
         }
+
         buf.push_str("\r\n");
         buf.into_bytes()
     }
@@ -88,13 +90,15 @@ impl SmtpNoop {
                     }
                     SmtpWriteResult::Io { input } => return SmtpNoopResult::Io { input },
                     SmtpWriteResult::Err { err } => {
-                        return SmtpNoopResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpNoopResult::Err { err };
                     }
                 },
                 State::Read(r) => match r.resume(arg.take()) {
                     SmtpReadResult::Io { input } => return SmtpNoopResult::Io { input },
                     SmtpReadResult::Err { err } => {
-                        return SmtpNoopResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpNoopResult::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read SMTP bytes: {}", escape_byte_string(&bytes));
@@ -110,15 +114,12 @@ impl SmtpNoop {
                                 let response = response.into_static();
                                 if response.code == ReplyCode::OK {
                                     return SmtpNoopResult::Ok;
-                                } else {
-                                    let message = response.text().to_string();
-                                    return SmtpNoopResult::Err {
-                                        err: SmtpNoopError::Rejected {
-                                            code: response.code.code(),
-                                            message,
-                                        },
-                                    };
                                 }
+
+                                let message = response.text().to_string();
+                                let code = response.code.code();
+                                let err = SmtpNoopError::Rejected { code, message };
+                                return SmtpNoopResult::Err { err };
                             }
                             Err(errors) => {
                                 let reason = errors
@@ -126,9 +127,9 @@ impl SmtpNoop {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpNoopResult::Err {
-                                    err: SmtpNoopError::ParseResponse(reason),
-                                };
+
+                                let err = SmtpNoopError::ParseResponse(reason);
+                                return SmtpNoopResult::Err { err };
                             }
                         }
                     }

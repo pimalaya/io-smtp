@@ -19,8 +19,6 @@ use alloc::{borrow::Cow, string::String, vec::Vec};
 
 use crate::rfc5321::types::{atom::Atom, parameter::Parameter};
 
-// ─── RET parameter (MAIL FROM) ───────────────────────────────────────────────
-
 /// The value of the `RET` ESMTP parameter on `MAIL FROM`.
 ///
 /// Controls how much of the original message is included in a DSN.
@@ -50,16 +48,14 @@ impl DsnRet {
     }
 }
 
-// ─── ENVID parameter (MAIL FROM) ─────────────────────────────────────────────
-
 /// Build the `ENVID=<id>` [`Parameter`] for `MAIL FROM`.
 ///
-/// The envelope identifier is an opaque string chosen by the sender that
-/// uniquely identifies this mail transaction. It is included in any DSN
-/// generated for the message.
+/// The envelope identifier is an opaque string chosen by the sender
+/// that uniquely identifies this mail transaction. It is included in
+/// any DSN generated for the message.
 ///
-/// The value must contain only printable US-ASCII characters excluding `=`
-/// and whitespace (xtext encoding, RFC 3461 §4).
+/// The value must contain only printable US-ASCII characters
+/// excluding `=` and whitespace (xtext encoding, RFC 3461 §4).
 ///
 /// # Reference
 ///
@@ -71,12 +67,11 @@ pub fn envid(id: impl Into<String>) -> Parameter<'static> {
     }
 }
 
-// ─── NOTIFY parameter (RCPT TO) ──────────────────────────────────────────────
-
 /// The `NOTIFY` conditions for a single `RCPT TO`.
 ///
-/// Flags may be combined (e.g. `DsnNotify::SUCCESS | DsnNotify::FAILURE`),
-/// except that `NEVER` must not be combined with any other value.
+/// Flags may be combined (e.g. `DsnNotify::SUCCESS |
+/// DsnNotify::FAILURE`), except that `NEVER` must not be combined
+/// with any other value.
 ///
 /// # Reference
 ///
@@ -130,8 +125,6 @@ impl core::ops::BitOr for DsnNotify {
         Self(self.0 | rhs.0)
     }
 }
-
-// ─── ORCPT parameter (RCPT TO) ───────────────────────────────────────────────
 
 /// Build the `ORCPT=rfc822;<address>` [`Parameter`] for `RCPT TO`.
 ///

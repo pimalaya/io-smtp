@@ -1,23 +1,21 @@
 //! I/O-free coroutine to send SMTP EHLO command.
 
 use alloc::{
+    borrow::Cow,
     string::{String, ToString},
     vec::Vec,
 };
+
 use bounded_static::IntoBoundedStatic;
-use hashbrown::HashSet;
 use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
-    read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc5321::types::{
-        ehlo_domain::EhloDomain,
-        ehlo_response::{Capability, EhloResponse},
-    },
+    read::*,
+    rfc5321::types::{ehlo_domain::EhloDomain, ehlo_response::EhloResponse},
     utils::escape_byte_string,
-    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
+    write::*,
 };
 
 /// The EHLO command (RFC 5321 §4.1.1.1).
@@ -49,11 +47,16 @@ pub enum SmtpEhloError {
 
 /// Output emitted when the coroutine terminates its progression.
 pub enum SmtpEhloResult {
+    Ok {
+        /// Raw capability strings from the EHLO response (e.g. `"AUTH
+        /// PLAIN LOGIN"`, `"SIZE 10240000"`).  Each entry is the full
+        /// capability line after the initial domain/greeting line.
+        /// Parse mechanism-specific parameters using the relevant RFC
+        /// module.
+        capabilities: Vec<Cow<'static, str>>,
+    },
     Io {
         input: SocketInput,
-    },
-    Ok {
-        capabilities: HashSet<Capability<'static>>,
     },
     Err {
         err: SmtpEhloError,
@@ -93,13 +96,15 @@ impl SmtpEhlo {
                     }
                     SmtpWriteResult::Io { input } => return SmtpEhloResult::Io { input },
                     SmtpWriteResult::Err { err } => {
-                        return SmtpEhloResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpEhloResult::Err { err };
                     }
                 },
                 State::Read(r) => match r.resume(arg.take()) {
                     SmtpReadResult::Io { input } => return SmtpEhloResult::Io { input },
                     SmtpReadResult::Err { err } => {
-                        return SmtpEhloResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpEhloResult::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -112,8 +117,7 @@ impl SmtpEhlo {
 
                         match EhloResponse::parse(&self.buffer) {
                             Ok(response) => {
-                                let response = response.into_static();
-                                let capabilities = response.capabilities.into_iter().collect();
+                                let capabilities = response.into_static().capabilities;
                                 return SmtpEhloResult::Ok { capabilities };
                             }
                             Err(errors) => {
@@ -122,9 +126,9 @@ impl SmtpEhlo {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpEhloResult::Err {
-                                    err: SmtpEhloError::ParseResponse(reason),
-                                };
+
+                                let err = SmtpEhloError::ParseResponse(reason);
+                                return SmtpEhloResult::Err { err };
                             }
                         }
                     }

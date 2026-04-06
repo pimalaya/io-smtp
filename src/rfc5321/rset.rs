@@ -4,16 +4,17 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
+
 use bounded_static::IntoBoundedStatic;
 use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
-    read::{SmtpRead, SmtpReadError, SmtpReadResult},
+    read::*,
     rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
-    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
+    write::*,
 };
 
 /// The RSET command (RFC 5321 §4.1.1.5).
@@ -40,8 +41,8 @@ pub enum SmtpRsetError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpRsetResult {
-    Io { input: SocketInput },
     Ok,
+    Io { input: SocketInput },
     Err { err: SmtpRsetError },
 }
 
@@ -79,13 +80,15 @@ impl SmtpRset {
                     }
                     SmtpWriteResult::Io { input } => return SmtpRsetResult::Io { input },
                     SmtpWriteResult::Err { err } => {
-                        return SmtpRsetResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpRsetResult::Err { err };
                     }
                 },
                 State::Read(r) => match r.resume(arg.take()) {
                     SmtpReadResult::Io { input } => return SmtpRsetResult::Io { input },
                     SmtpReadResult::Err { err } => {
-                        return SmtpRsetResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpRsetResult::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read SMTP bytes: {}", escape_byte_string(&bytes));
@@ -101,15 +104,12 @@ impl SmtpRset {
                                 let response = response.into_static();
                                 if response.code == ReplyCode::OK {
                                     return SmtpRsetResult::Ok;
-                                } else {
-                                    let message = response.text().to_string();
-                                    return SmtpRsetResult::Err {
-                                        err: SmtpRsetError::Rejected {
-                                            code: response.code.code(),
-                                            message,
-                                        },
-                                    };
                                 }
+
+                                let message = response.text().to_string();
+                                let code = response.code.code();
+                                let err = SmtpRsetError::Rejected { code, message };
+                                return SmtpRsetResult::Err { err };
                             }
                             Err(errors) => {
                                 let reason = errors
@@ -117,9 +117,9 @@ impl SmtpRset {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpRsetResult::Err {
-                                    err: SmtpRsetError::ParseResponse(reason),
-                                };
+
+                                let err = SmtpRsetError::ParseResponse(reason);
+                                return SmtpRsetResult::Err { err };
                             }
                         }
                     }

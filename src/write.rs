@@ -30,6 +30,7 @@ pub struct SmtpWrite {
 }
 
 impl SmtpWrite {
+    /// Creates a new coroutine that will write the given bytes to the socket.
     pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
         Self {
             state: SocketWrite::new(bytes.into()),

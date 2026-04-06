@@ -15,10 +15,8 @@ use crate::rfc5321::types::atom::Atom;
 pub enum AddressLiteral<'a> {
     /// IPv4 address.
     Ipv4(Ipv4Addr),
-
     /// IPv6 address.
     Ipv6(Ipv6Addr),
-
     /// General address literal.
     General {
         tag: Atom<'a>,

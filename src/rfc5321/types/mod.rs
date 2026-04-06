@@ -3,7 +3,6 @@ pub mod atom;
 pub mod domain;
 pub mod ehlo_domain;
 pub mod ehlo_response;
-pub mod enhanced_status_code;
 pub mod forward_path;
 pub mod greeting;
 pub mod local_part;

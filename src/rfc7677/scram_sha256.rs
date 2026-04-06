@@ -3,7 +3,7 @@
 //!
 //! # Reference
 //!
-//! - RFC 5802: Salted Challenge Response SmtpAuthCommandentication Mechanism (SCRAM)
+//! - RFC 5802: Salted Challenge Response Authentication Mechanism (SCRAM)
 //! - RFC 7677: SCRAM-SHA-256 and SCRAM-SHA-256-PLUS SASL Mechanisms
 
 use alloc::{
@@ -22,14 +22,14 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc4954::authenticate_data::{AuthenticateData, SmtpAuthCommand},
+    read::*,
+    rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
     rfc5321::{
         ehlo::*,
         types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
-    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
+    write::*,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -60,8 +60,8 @@ pub enum SmtpScramSha256Error {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpScramSha256Result {
-    Io { input: SocketInput },
     Ok,
+    Io { input: SocketInput },
     Err { err: SmtpScramSha256Error },
 }
 
@@ -148,7 +148,8 @@ impl SmtpScramSha256 {
                         return SmtpScramSha256Result::Io { input };
                     }
                     SmtpWriteResult::Err { err } => {
-                        return SmtpScramSha256Result::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpScramSha256Result::Err { err };
                     }
                 },
 
@@ -157,7 +158,8 @@ impl SmtpScramSha256 {
                         return SmtpScramSha256Result::Io { input };
                     }
                     SmtpReadResult::Err { err } => {
-                        return SmtpScramSha256Result::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpScramSha256Result::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -175,44 +177,38 @@ impl SmtpScramSha256 {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpScramSha256Result::Err {
-                                    err: SmtpScramSha256Error::ParseResponse(reason),
-                                };
+
+                                let err = SmtpScramSha256Error::ParseResponse(reason);
+                                return SmtpScramSha256Result::Err { err };
                             }
                             Ok(response) => {
                                 let response = response.into_static();
                                 if response.code != ReplyCode::AUTH_CONTINUE {
                                     let message = response.text().to_string();
-                                    return SmtpScramSha256Result::Err {
-                                        err: SmtpScramSha256Error::Rejected {
-                                            code: response.code.code(),
-                                            message,
-                                        },
-                                    };
+                                    let code = response.code.code();
+                                    let err = SmtpScramSha256Error::Rejected { code, message };
+                                    return SmtpScramSha256Result::Err { err };
                                 }
 
                                 // The 334 response text is base64(server-first-message)
                                 let server_first_b64 = response.text().0.trim_start();
-                                let server_first_bytes =
-                                    match base64.decode(server_first_b64.as_bytes()) {
-                                        Ok(b) => b,
-                                        Err(e) => {
-                                            return SmtpScramSha256Result::Err {
-                                                err: SmtpScramSha256Error::ParseServerFirst(
-                                                    e.to_string(),
-                                                ),
-                                            };
-                                        }
-                                    };
+                                let server_first_bytes = match base64
+                                    .decode(server_first_b64.as_bytes())
+                                {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        let err =
+                                            SmtpScramSha256Error::ParseServerFirst(e.to_string());
+                                        return SmtpScramSha256Result::Err { err };
+                                    }
+                                };
 
                                 let server_first = match core::str::from_utf8(&server_first_bytes) {
                                     Ok(s) => s,
                                     Err(e) => {
-                                        return SmtpScramSha256Result::Err {
-                                            err: SmtpScramSha256Error::ParseServerFirst(
-                                                e.to_string(),
-                                            ),
-                                        };
+                                        let err =
+                                            SmtpScramSha256Error::ParseServerFirst(e.to_string());
+                                        return SmtpScramSha256Result::Err { err };
                                     }
                                 };
 
@@ -242,7 +238,8 @@ impl SmtpScramSha256 {
                         return SmtpScramSha256Result::Io { input };
                     }
                     SmtpWriteResult::Err { err } => {
-                        return SmtpScramSha256Result::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpScramSha256Result::Err { err };
                     }
                 },
 
@@ -251,7 +248,8 @@ impl SmtpScramSha256 {
                         return SmtpScramSha256Result::Io { input };
                     }
                     SmtpReadResult::Err { err } => {
-                        return SmtpScramSha256Result::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpScramSha256Result::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -269,20 +267,17 @@ impl SmtpScramSha256 {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpScramSha256Result::Err {
-                                    err: SmtpScramSha256Error::ParseResponse(reason),
-                                };
+
+                                let err = SmtpScramSha256Error::ParseResponse(reason);
+                                return SmtpScramSha256Result::Err { err };
                             }
                             Ok(response) => {
                                 let response = response.into_static();
                                 if response.code != ReplyCode::AUTH_SUCCESSFUL {
                                     let message = response.text().to_string();
-                                    return SmtpScramSha256Result::Err {
-                                        err: SmtpScramSha256Error::Rejected {
-                                            code: response.code.code(),
-                                            message,
-                                        },
-                                    };
+                                    let code = response.code.code();
+                                    let err = SmtpScramSha256Error::Rejected { code, message };
+                                    return SmtpScramSha256Result::Err { err };
                                 }
 
                                 // Verify server signature if present in 235 text
@@ -296,9 +291,8 @@ impl SmtpScramSha256 {
                                         if let Some(v) = server_final.strip_prefix("v=") {
                                             if let Ok(server_sig) = base64.decode(v.as_bytes()) {
                                                 if server_sig != self.expected_server_sig {
-                                                    return SmtpScramSha256Result::Err {
-                                                        err: SmtpScramSha256Error::ServerSignatureMismatch,
-                                                    };
+                                                    let err = SmtpScramSha256Error::ServerSignatureMismatch;
+                                                    return SmtpScramSha256Result::Err { err };
                                                 }
                                             }
                                         }
@@ -321,7 +315,8 @@ impl SmtpScramSha256 {
                         return SmtpScramSha256Result::Ok;
                     }
                     SmtpEhloResult::Err { err } => {
-                        return SmtpScramSha256Result::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpScramSha256Result::Err { err };
                     }
                 },
             }
@@ -412,7 +407,7 @@ impl SmtpScramSha256 {
             v
         };
 
-        // SmtpAuthCommandMessage = client-first-message-bare + "," + server-first + "," + client-final-without-proof
+        // AuthMessage = client-first-message-bare + "," + server-first + "," + client-final-without-proof
         let mut auth_message: Vec<u8> = Vec::new();
         auth_message.extend_from_slice(&self.client_first_bare);
         auth_message.push(b',');
@@ -420,7 +415,7 @@ impl SmtpScramSha256 {
         auth_message.push(b',');
         auth_message.extend_from_slice(&client_final_no_proof);
 
-        // ClientSignature = HMAC(StoredKey, SmtpAuthCommandMessage)
+        // ClientSignature = HMAC(StoredKey, AuthMessage)
         let client_signature = hmac_sha256(&stored_key, &auth_message);
 
         // ClientProof = ClientKey XOR ClientSignature
@@ -432,7 +427,7 @@ impl SmtpScramSha256 {
         // ServerKey = HMAC(SaltedPassword, "Server Key")
         let server_key = hmac_sha256(&salted_password, b"Server Key");
 
-        // ServerSignature = HMAC(ServerKey, SmtpAuthCommandMessage)
+        // ServerSignature = HMAC(ServerKey, AuthMessage)
         let server_signature = hmac_sha256(&server_key, &auth_message);
         self.expected_server_sig = server_signature.to_vec();
 
@@ -442,7 +437,7 @@ impl SmtpScramSha256 {
         client_final.extend_from_slice(base64.encode(client_proof).as_bytes());
 
         // Wrap as SMTP authenticate data (base64-encodes the payload)
-        Ok(AuthenticateData::r#continue(client_final.as_slice()).into())
+        Ok(SmtpAuthData::r#continue(client_final.as_slice()).into())
     }
 }
 

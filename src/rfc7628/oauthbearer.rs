@@ -31,14 +31,14 @@ use secrecy::{ExposeSecret, SecretBox, SecretString};
 use thiserror::Error;
 
 use crate::{
-    read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc4954::authenticate_data::{AuthenticateData, SmtpAuthCommand},
+    read::*,
+    rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
     rfc5321::{
         ehlo::*,
         types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
-    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
+    write::*,
 };
 
 /// The SASL mechanism name as it appears on the wire.
@@ -61,8 +61,8 @@ pub enum SmtpOAuthBearerError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpOAuthBearerResult {
-    Io { input: SocketInput },
     Ok,
+    Io { input: SocketInput },
     Err { err: SmtpOAuthBearerError },
 }
 
@@ -122,7 +122,8 @@ impl SmtpOAuthBearer {
                         return SmtpOAuthBearerResult::Io { input };
                     }
                     SmtpWriteResult::Err { err } => {
-                        return SmtpOAuthBearerResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpOAuthBearerResult::Err { err };
                     }
                 },
 
@@ -131,7 +132,8 @@ impl SmtpOAuthBearer {
                         return SmtpOAuthBearerResult::Io { input };
                     }
                     SmtpReadResult::Err { err } => {
-                        return SmtpOAuthBearerResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpOAuthBearerResult::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -149,9 +151,9 @@ impl SmtpOAuthBearer {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpOAuthBearerResult::Err {
-                                    err: SmtpOAuthBearerError::ParseResponse(reason),
-                                };
+
+                                let err = SmtpOAuthBearerError::ParseResponse(reason);
+                                return SmtpOAuthBearerResult::Err { err };
                             }
                             Ok(response) => {
                                 let response = response.into_static();
@@ -173,19 +175,16 @@ impl SmtpOAuthBearer {
 
                                     self.buffer.clear();
                                     self.state = State::WriteAck(SmtpWrite::new(
-                                        AuthenticateData::r#continue(vec![0x01u8]),
+                                        SmtpAuthData::r#continue(vec![0x01u8]),
                                     ));
                                     continue;
                                 }
 
                                 // Any other response (5xx / 4xx) is a direct rejection.
                                 let message = response.text().to_string();
-                                return SmtpOAuthBearerResult::Err {
-                                    err: SmtpOAuthBearerError::Rejected {
-                                        code: response.code.code(),
-                                        message,
-                                    },
-                                };
+                                let code = response.code.code();
+                                let err = SmtpOAuthBearerError::Rejected { code, message };
+                                return SmtpOAuthBearerResult::Err { err };
                             }
                         }
                     }
@@ -200,7 +199,8 @@ impl SmtpOAuthBearer {
                         return SmtpOAuthBearerResult::Io { input };
                     }
                     SmtpWriteResult::Err { err } => {
-                        return SmtpOAuthBearerResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpOAuthBearerResult::Err { err };
                     }
                 },
 
@@ -209,7 +209,8 @@ impl SmtpOAuthBearer {
                         return SmtpOAuthBearerResult::Io { input };
                     }
                     SmtpReadResult::Err { err } => {
-                        return SmtpOAuthBearerResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpOAuthBearerResult::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -225,9 +226,8 @@ impl SmtpOAuthBearer {
                             .take()
                             .unwrap_or_else(|| "authentication failed".into());
 
-                        return SmtpOAuthBearerResult::Err {
-                            err: SmtpOAuthBearerError::Rejected { code: 535, message },
-                        };
+                        let err = SmtpOAuthBearerError::Rejected { code: 535, message };
+                        return SmtpOAuthBearerResult::Err { err };
                     }
                 },
 
@@ -239,7 +239,8 @@ impl SmtpOAuthBearer {
                         return SmtpOAuthBearerResult::Ok;
                     }
                     SmtpEhloResult::Err { err } => {
-                        return SmtpOAuthBearerResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpOAuthBearerResult::Err { err };
                     }
                 },
             }

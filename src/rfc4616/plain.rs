@@ -14,14 +14,14 @@ use secrecy::{ExposeSecret, SecretBox, SecretString};
 use thiserror::Error;
 
 use crate::{
-    read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc4954::authenticate_data::SmtpAuthCommand,
+    read::*,
+    rfc4954::auth::SmtpAuthCommand,
     rfc5321::{
         ehlo::*,
         types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
-    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
+    write::*,
 };
 
 /// The SASL mechanism name as it appears on the wire.
@@ -44,8 +44,8 @@ pub enum SmtpPlainError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpPlainResult {
-    Io { input: SocketInput },
     Ok,
+    Io { input: SocketInput },
     Err { err: SmtpPlainError },
 }
 
@@ -102,7 +102,8 @@ impl SmtpPlain {
                         return SmtpPlainResult::Io { input };
                     }
                     SmtpWriteResult::Err { err } => {
-                        return SmtpPlainResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpPlainResult::Err { err };
                     }
                 },
                 State::Read(r) => match r.resume(arg.take()) {
@@ -110,7 +111,8 @@ impl SmtpPlain {
                         return SmtpPlainResult::Io { input };
                     }
                     SmtpReadResult::Err { err } => {
-                        return SmtpPlainResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpPlainResult::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -157,7 +159,8 @@ impl SmtpPlain {
                         return SmtpPlainResult::Ok;
                     }
                     SmtpEhloResult::Err { err } => {
-                        return SmtpPlainResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpPlainResult::Err { err };
                     }
                 },
             }

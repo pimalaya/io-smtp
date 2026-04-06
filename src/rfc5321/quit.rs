@@ -4,15 +4,16 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
+
 use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
-    read::{SmtpRead, SmtpReadError, SmtpReadResult},
+    read::*,
     rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
-    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
+    write::*,
 };
 
 /// The QUIT command (RFC 5321 §4.1.1.10).
@@ -39,8 +40,8 @@ pub enum SmtpQuitError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpQuitResult {
-    Io { input: SocketInput },
     Ok,
+    Io { input: SocketInput },
     Err { err: SmtpQuitError },
 }
 
@@ -76,13 +77,15 @@ impl SmtpQuit {
                     }
                     SmtpWriteResult::Io { input } => return SmtpQuitResult::Io { input },
                     SmtpWriteResult::Err { err } => {
-                        return SmtpQuitResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpQuitResult::Err { err };
                     }
                 },
                 State::Read(r) => match r.resume(arg.take()) {
                     SmtpReadResult::Io { input } => return SmtpQuitResult::Io { input },
                     SmtpReadResult::Err { err } => {
-                        return SmtpQuitResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpQuitResult::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read SMTP bytes: {}", escape_byte_string(&bytes));
@@ -93,19 +96,16 @@ impl SmtpQuit {
                             continue;
                         }
 
-                        return match Response::parse(&self.buffer) {
+                        match Response::parse(&self.buffer) {
                             Ok(response) => {
                                 if response.code == ReplyCode::SERVICE_CLOSING {
-                                    SmtpQuitResult::Ok
-                                } else {
-                                    let message = response.text().to_string();
-                                    SmtpQuitResult::Err {
-                                        err: SmtpQuitError::Rejected {
-                                            code: response.code.code(),
-                                            message,
-                                        },
-                                    }
+                                    return SmtpQuitResult::Ok;
                                 }
+
+                                let message = response.text().to_string();
+                                let code = response.code.code();
+                                let err = SmtpQuitError::Rejected { code, message };
+                                return SmtpQuitResult::Err { err };
                             }
                             Err(errors) => {
                                 let reason = errors
@@ -113,11 +113,11 @@ impl SmtpQuit {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                SmtpQuitResult::Err {
-                                    err: SmtpQuitError::ParseResponse(reason),
-                                }
+
+                                let err = SmtpQuitError::ParseResponse(reason);
+                                return SmtpQuitResult::Err { err };
                             }
-                        };
+                        }
                     }
                 },
             }

@@ -4,16 +4,17 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
+
 use bounded_static::IntoBoundedStatic;
 use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
-    read::{SmtpRead, SmtpReadError, SmtpReadResult},
+    read::*,
     rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
-    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
+    write::*,
 };
 
 /// The DATA command (RFC 5321 §4.1.1.4).
@@ -46,8 +47,8 @@ pub enum SmtpDataError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpDataResult {
-    Io { input: SocketInput },
     Ok,
+    Io { input: SocketInput },
     Err { err: SmtpDataError },
 }
 
@@ -126,17 +127,15 @@ impl SmtpData {
                     }
                     SmtpWriteResult::Io { input } => return SmtpDataResult::Io { input },
                     SmtpWriteResult::Err { err } => {
-                        return SmtpDataResult::Err {
-                            err: SmtpDataError::CommandWrite(err),
-                        };
+                        let err = SmtpDataError::CommandWrite(err);
+                        return SmtpDataResult::Err { err };
                     }
                 },
                 State::CommandRead(r) => match r.resume(arg.take()) {
                     SmtpReadResult::Io { input } => return SmtpDataResult::Io { input },
                     SmtpReadResult::Err { err } => {
-                        return SmtpDataResult::Err {
-                            err: SmtpDataError::CommandRead(err),
-                        };
+                        let err = SmtpDataError::CommandRead(err);
+                        return SmtpDataResult::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -153,12 +152,9 @@ impl SmtpData {
 
                                 if response.code != ReplyCode::START_MAIL_INPUT {
                                     let message = response.text().to_string();
-                                    return SmtpDataResult::Err {
-                                        err: SmtpDataError::CommandRejected {
-                                            code: response.code.code(),
-                                            message,
-                                        },
-                                    };
+                                    let code = response.code.code();
+                                    let err = SmtpDataError::CommandRejected { code, message };
+                                    return SmtpDataResult::Err { err };
                                 }
 
                                 let body = self.message_body.take().unwrap();
@@ -175,9 +171,9 @@ impl SmtpData {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpDataResult::Err {
-                                    err: SmtpDataError::ParseResponse(reason),
-                                };
+
+                                let err = SmtpDataError::ParseResponse(reason);
+                                return SmtpDataResult::Err { err };
                             }
                         }
                     }
@@ -189,17 +185,15 @@ impl SmtpData {
                     }
                     SmtpWriteResult::Io { input } => return SmtpDataResult::Io { input },
                     SmtpWriteResult::Err { err } => {
-                        return SmtpDataResult::Err {
-                            err: SmtpDataError::BodyWrite(err),
-                        };
+                        let err = SmtpDataError::BodyWrite(err);
+                        return SmtpDataResult::Err { err };
                     }
                 },
                 State::BodyRead(r) => match r.resume(arg.take()) {
                     SmtpReadResult::Io { input } => return SmtpDataResult::Io { input },
                     SmtpReadResult::Err { err } => {
-                        return SmtpDataResult::Err {
-                            err: SmtpDataError::BodyRead(err),
-                        };
+                        let err = SmtpDataError::BodyRead(err);
+                        return SmtpDataResult::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -216,15 +210,12 @@ impl SmtpData {
 
                                 if response.code == ReplyCode::OK {
                                     return SmtpDataResult::Ok;
-                                } else {
-                                    let message = response.text().to_string();
-                                    return SmtpDataResult::Err {
-                                        err: SmtpDataError::BodyRejected {
-                                            code: response.code.code(),
-                                            message,
-                                        },
-                                    };
                                 }
+
+                                let message = response.text().to_string();
+                                let code = response.code.code();
+                                let err = SmtpDataError::BodyRejected { code, message };
+                                return SmtpDataResult::Err { err };
                             }
                             Err(errors) => {
                                 let reason = errors
@@ -232,9 +223,9 @@ impl SmtpData {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpDataResult::Err {
-                                    err: SmtpDataError::ParseResponse(reason),
-                                };
+
+                                let err = SmtpDataError::ParseResponse(reason);
+                                return SmtpDataResult::Err { err };
                             }
                         }
                     }

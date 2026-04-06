@@ -4,18 +4,19 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
+
 use bounded_static::IntoBoundedStatic;
 use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
-    read::{SmtpRead, SmtpReadError, SmtpReadResult},
+    read::*,
     rfc5321::types::{
         forward_path::ForwardPath, parameter::Parameter, reply_code::ReplyCode, response::Response,
     },
     utils::escape_byte_string,
-    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
+    write::*,
 };
 
 /// The RCPT TO command (RFC 5321 §4.1.1.3).
@@ -55,8 +56,8 @@ pub enum SmtpRcptError {
 
 /// Output emitted when the coroutine terminates.
 pub enum SmtpRcptResult {
-    Io { input: SocketInput },
     Ok,
+    Io { input: SocketInput },
     Err { err: SmtpRcptError },
 }
 
@@ -107,13 +108,15 @@ impl SmtpRcpt {
                     }
                     SmtpWriteResult::Io { input } => return SmtpRcptResult::Io { input },
                     SmtpWriteResult::Err { err } => {
-                        return SmtpRcptResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpRcptResult::Err { err };
                     }
                 },
                 State::Read(r) => match r.resume(arg.take()) {
                     SmtpReadResult::Io { input } => return SmtpRcptResult::Io { input },
                     SmtpReadResult::Err { err } => {
-                        return SmtpRcptResult::Err { err: err.into() };
+                        let err = err.into();
+                        return SmtpRcptResult::Err { err };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read SMTP bytes: {}", escape_byte_string(&bytes));
@@ -129,15 +132,12 @@ impl SmtpRcpt {
                                 let response = response.into_static();
                                 if response.code == ReplyCode::OK {
                                     return SmtpRcptResult::Ok;
-                                } else {
-                                    let message = response.text().to_string();
-                                    return SmtpRcptResult::Err {
-                                        err: SmtpRcptError::Rejected {
-                                            code: response.code.code(),
-                                            message,
-                                        },
-                                    };
                                 }
+
+                                let message = response.text().to_string();
+                                let code = response.code.code();
+                                let err = SmtpRcptError::Rejected { code, message };
+                                return SmtpRcptResult::Err { err };
                             }
                             Err(errors) => {
                                 let reason = errors
@@ -145,9 +145,9 @@ impl SmtpRcpt {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpRcptResult::Err {
-                                    err: SmtpRcptError::ParseResponse(reason),
-                                };
+
+                                let err = SmtpRcptError::ParseResponse(reason);
+                                return SmtpRcptResult::Err { err };
                             }
                         }
                     }
