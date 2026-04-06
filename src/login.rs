@@ -1,10 +1,16 @@
 //! I/O-free coroutine to authenticate using SMTP AUTH LOGIN then refresh
 //! capabilities via EHLO.
+//!
+//! LOGIN is a legacy de-facto mechanism with no formal RFC. It performs a
+//! two-step challenge/response exchange: the server asks for the username,
+//! then the password, each base64-encoded.
 
 use alloc::{
+    borrow::Cow,
     string::{String, ToString},
     vec::Vec,
 };
+
 use bounded_static::IntoBoundedStatic;
 use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
@@ -13,7 +19,7 @@ use thiserror::Error;
 
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc4954::types::{auth_mechanism::AuthMechanism, authenticate_data::AuthenticateData},
+    rfc4954::authenticate_data::AuthenticateData,
     rfc5321::{
         ehlo::*,
         types::{
@@ -24,9 +30,12 @@ use crate::{
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
 
+/// The SASL mechanism name as it appears on the wire.
+pub const LOGIN: &str = "LOGIN";
+
 /// Errors that can occur during AUTH LOGIN.
 #[derive(Debug, Error)]
-pub enum SmtpAuthenticateLoginError {
+pub enum SmtpLoginError {
     #[error(transparent)]
     Write(#[from] SmtpWriteError),
     #[error(transparent)]
@@ -40,10 +49,10 @@ pub enum SmtpAuthenticateLoginError {
 }
 
 /// Output emitted when the coroutine terminates.
-pub enum SmtpAuthenticateLoginResult {
+pub enum SmtpLoginResult {
     Io { input: SocketInput },
     Ok,
-    Err { err: SmtpAuthenticateLoginError },
+    Err { err: SmtpLoginError },
 }
 
 enum State {
@@ -58,7 +67,7 @@ enum State {
 
 /// I/O-free coroutine to authenticate using SMTP AUTH LOGIN then refresh
 /// capabilities via EHLO.
-pub struct SmtpAuthenticateLogin {
+pub struct SmtpLogin {
     state: State,
     domain: Option<EhloDomain<'static>>,
     username_bytes: Vec<u8>,
@@ -66,11 +75,11 @@ pub struct SmtpAuthenticateLogin {
     buffer: Vec<u8>,
 }
 
-impl SmtpAuthenticateLogin {
+impl SmtpLogin {
     /// Creates a new AUTH LOGIN coroutine.
     pub fn new(login: &str, password: &SecretString, domain: EhloDomain<'_>) -> Self {
         let encoded = Command::Auth {
-            mechanism: AuthMechanism::Login,
+            mechanism: Cow::Borrowed(LOGIN),
             initial_response: None,
         }
         .to_bytes();
@@ -90,7 +99,7 @@ impl SmtpAuthenticateLogin {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpAuthenticateLoginResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpLoginResult {
         loop {
             match &mut self.state {
                 State::AuthWrite(w) => match w.resume(arg.take()) {
@@ -99,18 +108,18 @@ impl SmtpAuthenticateLogin {
                         continue;
                     }
                     SmtpWriteResult::Io { input } => {
-                        return SmtpAuthenticateLoginResult::Io { input };
+                        return SmtpLoginResult::Io { input };
                     }
                     SmtpWriteResult::Err { err } => {
-                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
+                        return SmtpLoginResult::Err { err: err.into() };
                     }
                 },
                 State::AuthRead(r) => match r.resume(arg.take()) {
                     SmtpReadResult::Io { input } => {
-                        return SmtpAuthenticateLoginResult::Io { input };
+                        return SmtpLoginResult::Io { input };
                     }
                     SmtpReadResult::Err { err } => {
-                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
+                        return SmtpLoginResult::Err { err: err.into() };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -131,8 +140,8 @@ impl SmtpAuthenticateLogin {
                                     continue;
                                 } else {
                                     let message = response.text().to_string();
-                                    return SmtpAuthenticateLoginResult::Err {
-                                        err: SmtpAuthenticateLoginError::Rejected {
+                                    return SmtpLoginResult::Err {
+                                        err: SmtpLoginError::Rejected {
                                             code: response.code.code(),
                                             message,
                                         },
@@ -145,8 +154,8 @@ impl SmtpAuthenticateLogin {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpAuthenticateLoginResult::Err {
-                                    err: SmtpAuthenticateLoginError::ParseResponse(reason),
+                                return SmtpLoginResult::Err {
+                                    err: SmtpLoginError::ParseResponse(reason),
                                 };
                             }
                         }
@@ -158,18 +167,18 @@ impl SmtpAuthenticateLogin {
                         continue;
                     }
                     SmtpWriteResult::Io { input } => {
-                        return SmtpAuthenticateLoginResult::Io { input };
+                        return SmtpLoginResult::Io { input };
                     }
                     SmtpWriteResult::Err { err } => {
-                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
+                        return SmtpLoginResult::Err { err: err.into() };
                     }
                 },
                 State::UsernameRead(r) => match r.resume(arg.take()) {
                     SmtpReadResult::Io { input } => {
-                        return SmtpAuthenticateLoginResult::Io { input };
+                        return SmtpLoginResult::Io { input };
                     }
                     SmtpReadResult::Err { err } => {
-                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
+                        return SmtpLoginResult::Err { err: err.into() };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -190,8 +199,8 @@ impl SmtpAuthenticateLogin {
                                     continue;
                                 } else {
                                     let message = response.text().to_string();
-                                    return SmtpAuthenticateLoginResult::Err {
-                                        err: SmtpAuthenticateLoginError::Rejected {
+                                    return SmtpLoginResult::Err {
+                                        err: SmtpLoginError::Rejected {
                                             code: response.code.code(),
                                             message,
                                         },
@@ -204,8 +213,8 @@ impl SmtpAuthenticateLogin {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpAuthenticateLoginResult::Err {
-                                    err: SmtpAuthenticateLoginError::ParseResponse(reason),
+                                return SmtpLoginResult::Err {
+                                    err: SmtpLoginError::ParseResponse(reason),
                                 };
                             }
                         }
@@ -217,18 +226,18 @@ impl SmtpAuthenticateLogin {
                         continue;
                     }
                     SmtpWriteResult::Io { input } => {
-                        return SmtpAuthenticateLoginResult::Io { input };
+                        return SmtpLoginResult::Io { input };
                     }
                     SmtpWriteResult::Err { err } => {
-                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
+                        return SmtpLoginResult::Err { err: err.into() };
                     }
                 },
                 State::PasswordRead(r) => match r.resume(arg.take()) {
                     SmtpReadResult::Io { input } => {
-                        return SmtpAuthenticateLoginResult::Io { input };
+                        return SmtpLoginResult::Io { input };
                     }
                     SmtpReadResult::Err { err } => {
-                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
+                        return SmtpLoginResult::Err { err: err.into() };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -248,8 +257,8 @@ impl SmtpAuthenticateLogin {
                                     continue;
                                 } else {
                                     let message = response.text().to_string();
-                                    return SmtpAuthenticateLoginResult::Err {
-                                        err: SmtpAuthenticateLoginError::Rejected {
+                                    return SmtpLoginResult::Err {
+                                        err: SmtpLoginError::Rejected {
                                             code: response.code.code(),
                                             message,
                                         },
@@ -262,8 +271,8 @@ impl SmtpAuthenticateLogin {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpAuthenticateLoginResult::Err {
-                                    err: SmtpAuthenticateLoginError::ParseResponse(reason),
+                                return SmtpLoginResult::Err {
+                                    err: SmtpLoginError::ParseResponse(reason),
                                 };
                             }
                         }
@@ -271,13 +280,13 @@ impl SmtpAuthenticateLogin {
                 },
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
                     SmtpEhloResult::Io { input } => {
-                        return SmtpAuthenticateLoginResult::Io { input };
+                        return SmtpLoginResult::Io { input };
                     }
                     SmtpEhloResult::Ok { .. } => {
-                        return SmtpAuthenticateLoginResult::Ok;
+                        return SmtpLoginResult::Ok;
                     }
                     SmtpEhloResult::Err { err } => {
-                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
+                        return SmtpLoginResult::Err { err: err.into() };
                     }
                 },
             }

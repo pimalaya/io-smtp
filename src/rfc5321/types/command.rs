@@ -6,7 +6,6 @@ use core::fmt::Write;
 use base64::{Engine, engine::general_purpose::STANDARD as base64};
 use secrecy::{ExposeSecret, SecretBox};
 
-use crate::rfc4954::types::auth_mechanism::AuthMechanism;
 use crate::rfc5321::types::{
     domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath, parameter::Parameter,
     reverse_path::ReversePath,
@@ -94,8 +93,8 @@ pub enum Command<'a> {
     ///
     /// RFC 4954: SMTP Service Extension for Authentication
     Auth {
-        /// The SASL mechanism to use
-        mechanism: AuthMechanism<'a>,
+        /// The SASL mechanism name as it appears on the wire (e.g. `"PLAIN"`).
+        mechanism: Cow<'a, str>,
         /// Optional initial response (base64-encoded by encoder)
         initial_response: Option<SecretBox<Box<[u8]>>>,
     },
@@ -176,7 +175,7 @@ impl<'a> Command<'a> {
                 mechanism,
                 initial_response,
             } => {
-                write!(buf, "AUTH {}", mechanism.as_ref()).unwrap();
+                write!(buf, "AUTH {mechanism}").unwrap();
                 if let Some(ir) = initial_response {
                     let data = ir.expose_secret();
                     if data.is_empty() {

@@ -15,7 +15,7 @@ use crate::rfc5321::{
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
-pub enum SendSmtpMessageError {
+pub enum SmtpMessageSendError {
     #[error(transparent)]
     MailFrom(#[from] SmtpMailError),
     #[error(transparent)]
@@ -33,20 +33,20 @@ enum State {
 
 /// Output emitted when the coroutine terminates its progression.
 #[derive(Debug)]
-pub enum SendSmtpMessageResult {
-    Io { input: SocketInput },
+pub enum SmtpMessageSendResult {
     Ok,
-    Err { err: SendSmtpMessageError },
+    Io { input: SocketInput },
+    Err { err: SmtpMessageSendError },
 }
 
 /// I/O-free coroutine to send a complete SMTP message.
-pub struct SendSmtpMessage {
+pub struct SmtpMessageSend {
     state: State,
     forward_paths: VecDeque<ForwardPath<'static>>,
     message: Option<Vec<u8>>,
 }
 
-impl SendSmtpMessage {
+impl SmtpMessageSend {
     /// Creates a new coroutine.
     pub fn new<'a>(
         reverse_path: ReversePath,
@@ -67,17 +67,17 @@ impl SendSmtpMessage {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SendSmtpMessageResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpMessageSendResult {
         loop {
             match &mut self.state {
                 State::MailFrom(coroutine) => {
                     match coroutine.resume(arg.take()) {
                         SmtpMailResult::Io { input } => {
-                            break SendSmtpMessageResult::Io { input };
+                            break SmtpMessageSendResult::Io { input };
                         }
                         SmtpMailResult::Ok => (),
                         SmtpMailResult::Err { err } => {
-                            break SendSmtpMessageResult::Err { err: err.into() };
+                            break SmtpMessageSendResult::Err { err: err.into() };
                         }
                     };
 
@@ -92,11 +92,11 @@ impl SendSmtpMessage {
                 State::RcptTo(coroutine) => {
                     match coroutine.resume(arg.take()) {
                         SmtpRcptResult::Io { input } => {
-                            break SendSmtpMessageResult::Io { input };
+                            break SmtpMessageSendResult::Io { input };
                         }
                         SmtpRcptResult::Ok => (),
                         SmtpRcptResult::Err { err } => {
-                            break SendSmtpMessageResult::Err { err: err.into() };
+                            break SmtpMessageSendResult::Err { err: err.into() };
                         }
                     };
 
@@ -105,11 +105,11 @@ impl SendSmtpMessage {
                 State::Data(coroutine) => {
                     match coroutine.resume(arg.take()) {
                         SmtpDataResult::Io { input } => {
-                            break SendSmtpMessageResult::Io { input };
+                            break SmtpMessageSendResult::Io { input };
                         }
-                        SmtpDataResult::Ok => break SendSmtpMessageResult::Ok,
+                        SmtpDataResult::Ok => break SmtpMessageSendResult::Ok,
                         SmtpDataResult::Err { err } => {
-                            break SendSmtpMessageResult::Err { err: err.into() };
+                            break SmtpMessageSendResult::Err { err: err.into() };
                         }
                     };
                 }

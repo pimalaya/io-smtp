@@ -83,10 +83,12 @@ pub(crate) mod parsers {
                     .to_slice(),
             )
             .to_slice()
-            .map(from_utf8)
-            .map(Result::unwrap)
-            .map(Cow::from)
-            .map(Domain)
+            .try_map(|bytes: &[u8], span| {
+                from_utf8(bytes)
+                    .map_err(|_| Rich::custom(span, "invalid UTF-8 in domain"))
+                    .map(Cow::from)
+                    .map(Domain)
+            })
             .labelled("domain")
     }
 }

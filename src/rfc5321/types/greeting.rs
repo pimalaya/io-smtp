@@ -13,14 +13,30 @@ use super::{domain::Domain, text::Text};
 pub struct Greeting<'a> {
     /// The server's domain name
     pub domain: Domain<'a>,
-    /// Optional greeting text
+    /// Optional greeting text (from the first greeting line)
     pub text: Option<Text<'a>>,
 }
 
 impl Greeting<'_> {
-    /// Returns true if `buf` contains a complete greeting (ends with CRLF).
+    /// Returns true if `buf` contains a complete greeting.
+    ///
+    /// A greeting is complete when the last CRLF-terminated line begins with
+    /// `220 ` (space, not dash). This correctly handles both single-line and
+    /// multi-line greetings.
     pub fn is_complete(buf: &[u8]) -> bool {
-        buf.ends_with(b"\r\n")
+        if !buf.ends_with(b"\r\n") {
+            return false;
+        }
+
+        let body = &buf[..buf.len() - 2];
+        let line_start = body
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+
+        let last_line = &body[line_start..];
+        last_line.len() >= 4 && last_line[3] == b' '
     }
 
     pub fn parse<'a>(buf: &'a [u8]) -> Result<Greeting<'a>, Vec<Rich<'a, u8>>> {
@@ -46,6 +62,8 @@ impl fmt::Display for Greeting<'_> {
 }
 
 pub(crate) mod parsers {
+    use alloc::vec::Vec;
+
     use chumsky::prelude::*;
 
     use crate::{
@@ -57,19 +75,53 @@ pub(crate) mod parsers {
 
     /// SMTP greeting parser.
     ///
+    /// Handles both single-line and multi-line greetings per RFC 5321:
+    ///
     /// ```abnf
-    /// Greeting       = ( "220" ( SP / "-" ) Domain SP textstring CRLF ) /
-    ///                  ( "220-" Domain SP textstring CRLF
+    /// Greeting       = ( "220" ( SP / "-" ) Domain [ SP textstring ] CRLF ) /
+    ///                  ( "220-" Domain [ SP textstring ] CRLF
     ///                    *( "220-" [ textstring ] CRLF )
     ///                    "220" SP [ textstring ] CRLF )
     /// ```
+    ///
+    /// Only the domain and text from the first line are retained; continuation
+    /// lines carry informational text that clients do not need to act on.
     pub(crate) fn greeting<'a>() -> impl Parser<'a, &'a [u8], Greeting<'a>, Extra<'a>> + Clone {
-        just(b"220" as &[u8])
+        // Single-line: "220 " domain [SP text] CRLF
+        let single = just(b"220" as &[u8])
             .ignore_then(sp())
             .ignore_then(domain())
             .then(sp().ignore_then(text()).or_not())
             .then_ignore(crlf())
-            .map(|(domain, text)| Greeting { domain, text })
-            .labelled("greeting")
+            .map(|(domain, text)| Greeting { domain, text });
+
+        // Multi-line first line: "220-" domain [SP text] CRLF
+        let multi_first = just(b"220" as &[u8])
+            .ignore_then(just(b'-'))
+            .ignore_then(domain())
+            .then(sp().ignore_then(text()).or_not())
+            .then_ignore(crlf());
+
+        // Continuation lines: "220-" [text] CRLF
+        let multi_cont = just(b"220" as &[u8])
+            .then_ignore(just(b'-'))
+            .ignore_then(text().or_not())
+            .then_ignore(crlf());
+
+        // Final line: "220 " [text] CRLF
+        let multi_last = just(b"220" as &[u8])
+            .ignore_then(sp())
+            .ignore_then(text().or_not())
+            .then_ignore(crlf());
+
+        let multi = multi_first
+            .then(multi_cont.repeated().collect::<Vec<_>>())
+            .then(multi_last)
+            .map(|((first, _conts), _last)| {
+                let (domain, text) = first;
+                Greeting { domain, text }
+            });
+
+        choice((multi, single)).labelled("greeting")
     }
 }

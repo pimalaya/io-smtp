@@ -7,7 +7,6 @@ use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
 
 use super::{atom::Atom, domain::Domain, text::Text};
-use crate::rfc4954::types::auth_mechanism::AuthMechanism;
 
 /// An SMTP server capability announced in EHLO response.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]
@@ -32,7 +31,7 @@ pub enum Capability<'a> {
     EnhancedStatusCodes,
 
     /// AUTH extension with supported mechanisms.
-    Auth(Vec<AuthMechanism<'a>>),
+    Auth(Vec<Cow<'a, str>>),
 
     /// Other/unknown capability.
     Other {
@@ -56,7 +55,7 @@ impl fmt::Display for Capability<'_> {
             Capability::Auth(mechanisms) => {
                 write!(f, "AUTH")?;
                 for mech in mechanisms {
-                    write!(f, " {}", mech.as_ref())?;
+                    write!(f, " {mech}")?;
                 }
                 Ok(())
             }
@@ -117,8 +116,8 @@ impl EhloResponse<'_> {
         })
     }
 
-    /// Returns the AUTH mechanisms if AUTH capability is present.
-    pub fn auth_mechanisms(&self) -> Option<&[AuthMechanism<'_>]> {
+    /// Returns the AUTH mechanism names if AUTH capability is present.
+    pub fn auth_mechanisms(&self) -> Option<&[Cow<'_, str>]> {
         self.capabilities.iter().find_map(|cap| match cap {
             Capability::Auth(mechanisms) => Some(mechanisms.as_slice()),
             _ => None,
@@ -140,7 +139,6 @@ pub(crate) mod parsers {
 
     use chumsky::prelude::*;
 
-    use crate::rfc4954::types::auth_mechanism::parsers::auth_mechanism as auth_mechanism_parser;
     use crate::rfc5321::types::{
         atom::parsers::atom as atom_parser, domain::parsers::domain as domain_parser,
         text::parsers::text as text_parser,
@@ -169,9 +167,14 @@ pub(crate) mod parsers {
                         .repeated()
                         .at_least(1)
                         .to_slice()
-                        .map(from_utf8)
-                        .map(Result::unwrap)
-                        .map(|s: &str| s.parse::<u64>().unwrap()),
+                        .try_map(|bytes: &[u8], span| {
+                            from_utf8(bytes)
+                                .map_err(|_| Rich::custom(span, "invalid UTF-8 in SIZE"))
+                                .and_then(|s| {
+                                    s.parse::<u64>()
+                                        .map_err(|_| Rich::custom(span, "invalid SIZE value"))
+                                })
+                        }),
                 )
                 .or_not(),
             )
@@ -185,7 +188,7 @@ pub(crate) mod parsers {
 
         let auth = tag_no_case(b"AUTH")
             .ignore_then(
-                sp().ignore_then(auth_mechanism_parser())
+                sp().ignore_then(atom_parser().map(|a| Cow::Owned(a.to_ascii_uppercase())))
                     .repeated()
                     .at_least(1)
                     .collect::<Vec<_>>(),
@@ -199,9 +202,13 @@ pub(crate) mod parsers {
                         .filter(|b: &u8| *b == 0x09 || matches!(*b, 0x20..=0x7e))
                         .repeated()
                         .to_slice()
-                        .map(from_utf8)
-                        .map(Result::unwrap)
-                        .map(Cow::from),
+                        .try_map(|bytes: &[u8], span| {
+                            from_utf8(bytes)
+                                .map_err(|_| {
+                                    Rich::custom(span, "invalid UTF-8 in capability params")
+                                })
+                                .map(Cow::from)
+                        }),
                 )
                 .or_not(),
             )

@@ -64,10 +64,12 @@ pub(crate) mod parsers {
             .repeated()
             .at_least(1)
             .to_slice()
-            .map(from_utf8)
-            .map(Result::unwrap)
-            .map(Cow::from)
-            .map(Atom)
+            .try_map(|bytes: &[u8], span| {
+                from_utf8(bytes)
+                    .map_err(|_| Rich::custom(span, "invalid UTF-8 in atom"))
+                    .map(Cow::from)
+                    .map(Atom)
+            })
             .labelled("atom")
     }
 }

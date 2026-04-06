@@ -1,7 +1,7 @@
 use std::{env, net::TcpStream, sync::Arc};
 
 use io_smtp::{
-    rfc4954::authenticate::{SmtpAuthenticate, SmtpAuthenticateCandidate, SmtpAuthenticateResult},
+    rfc4616::plain::{SmtpPlain, SmtpPlainResult},
     rfc5321::{
         ehlo::{SmtpEhlo, SmtpEhloResult},
         greeting::{GetSmtpGreeting, GetSmtpGreetingResult},
@@ -45,8 +45,8 @@ fn main() {
     println!("greeting: {greeting:#?}");
 
     // Send EHLO.
-    let domain: EhloDomain<'_> = Domain::parse(b"localhost").unwrap().into();
-    let mut coroutine = SmtpEhlo::new(domain);
+    let domain: EhloDomain<'static> = Domain::parse(b"localhost").unwrap().into();
+    let mut coroutine = SmtpEhlo::new(domain.clone());
     let mut arg = None;
 
     let capabilities = loop {
@@ -61,20 +61,16 @@ fn main() {
 
     // AUTH PLAIN.
     let password = SecretString::from(pass);
-    let domain: EhloDomain<'static> = Domain::parse(b"localhost").unwrap().into();
-    let candidates = [SmtpAuthenticateCandidate::Plain {
-        login: user,
-        password,
-        domain,
-    }];
-    let mut coroutine = SmtpAuthenticate::new(candidates);
+    let mut coroutine = SmtpPlain::new(&user, &password, domain);
     let mut arg = None;
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpAuthenticateResult::Ok => break,
-            SmtpAuthenticateResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
-            SmtpAuthenticateResult::Err { err } => panic!("{err}"),
+            SmtpPlainResult::Ok => break,
+            SmtpPlainResult::Io { input } => {
+                arg = Some(handle(&mut stream, input).unwrap())
+            }
+            SmtpPlainResult::Err { err } => panic!("{err}"),
         }
     }
 

@@ -1,9 +1,5 @@
 //! RFC 4954 — SMTP Service Extension for Authentication.
 //!
-//! Coroutines and types for the SMTP AUTH command, covering PLAIN,
-//! LOGIN, and SCRAM SASL mechanisms.
+//! Defines the AUTH command exchange types used by all SASL mechanisms.
 
-pub mod authenticate;
-pub mod login;
-pub mod plain;
-pub mod types;
+pub mod authenticate_data;

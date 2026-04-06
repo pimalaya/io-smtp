@@ -2,10 +2,12 @@
 //! capabilities via EHLO.
 
 use alloc::{
+    borrow::Cow,
     boxed::Box,
     string::{String, ToString},
     vec::Vec,
 };
+
 use bounded_static::IntoBoundedStatic;
 use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
@@ -14,7 +16,6 @@ use thiserror::Error;
 
 use crate::{
     read::{SmtpRead, SmtpReadError, SmtpReadResult},
-    rfc4954::types::auth_mechanism::AuthMechanism,
     rfc5321::{
         ehlo::*,
         types::{
@@ -25,9 +26,12 @@ use crate::{
     write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
 
+/// The SASL mechanism name as it appears on the wire.
+pub const PLAIN: &str = "PLAIN";
+
 /// Errors that can occur during AUTH PLAIN.
 #[derive(Debug, Error)]
-pub enum SmtpAuthenticatePlainError {
+pub enum SmtpPlainError {
     #[error(transparent)]
     Write(#[from] SmtpWriteError),
     #[error(transparent)]
@@ -41,10 +45,10 @@ pub enum SmtpAuthenticatePlainError {
 }
 
 /// Output emitted when the coroutine terminates.
-pub enum SmtpAuthenticatePlainResult {
+pub enum SmtpPlainResult {
     Io { input: SocketInput },
     Ok,
-    Err { err: SmtpAuthenticatePlainError },
+    Err { err: SmtpPlainError },
 }
 
 enum State {
@@ -58,13 +62,13 @@ enum State {
 ///
 /// AUTH PLAIN sends credentials as: base64(authzid\0authcid\0password)
 /// where authzid is optional (usually empty), authcid is the username.
-pub struct SmtpAuthenticatePlain {
+pub struct SmtpPlain {
     state: State,
     domain: Option<EhloDomain<'static>>,
     buffer: Vec<u8>,
 }
 
-impl SmtpAuthenticatePlain {
+impl SmtpPlain {
     /// Creates a new AUTH PLAIN coroutine.
     ///
     /// Uses initial response (IR) to send credentials in a single round-trip.
@@ -76,7 +80,7 @@ impl SmtpAuthenticatePlain {
         payload.extend_from_slice(password.expose_secret().as_bytes());
 
         let encoded = Command::Auth {
-            mechanism: AuthMechanism::Plain,
+            mechanism: Cow::Borrowed(PLAIN),
             initial_response: Some(SecretBox::new(Box::new(payload.into_boxed_slice()))),
         }
         .to_bytes();
@@ -90,7 +94,7 @@ impl SmtpAuthenticatePlain {
     }
 
     /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpAuthenticatePlainResult {
+    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpPlainResult {
         loop {
             match &mut self.state {
                 State::Write(w) => match w.resume(arg.take()) {
@@ -99,18 +103,18 @@ impl SmtpAuthenticatePlain {
                         continue;
                     }
                     SmtpWriteResult::Io { input } => {
-                        return SmtpAuthenticatePlainResult::Io { input };
+                        return SmtpPlainResult::Io { input };
                     }
                     SmtpWriteResult::Err { err } => {
-                        return SmtpAuthenticatePlainResult::Err { err: err.into() };
+                        return SmtpPlainResult::Err { err: err.into() };
                     }
                 },
                 State::Read(r) => match r.resume(arg.take()) {
                     SmtpReadResult::Io { input } => {
-                        return SmtpAuthenticatePlainResult::Io { input };
+                        return SmtpPlainResult::Io { input };
                     }
                     SmtpReadResult::Err { err } => {
-                        return SmtpAuthenticatePlainResult::Err { err: err.into() };
+                        return SmtpPlainResult::Err { err: err.into() };
                     }
                     SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
@@ -129,15 +133,12 @@ impl SmtpAuthenticatePlain {
                                     let domain = self.domain.take().unwrap();
                                     self.state = State::Ehlo(SmtpEhlo::new(domain));
                                     continue;
-                                } else {
-                                    let message = response.text().to_string();
-                                    return SmtpAuthenticatePlainResult::Err {
-                                        err: SmtpAuthenticatePlainError::Rejected {
-                                            code: response.code.code(),
-                                            message,
-                                        },
-                                    };
                                 }
+
+                                let code = response.code.code();
+                                let message = response.text().to_string();
+                                let err = SmtpPlainError::Rejected { code, message };
+                                return SmtpPlainResult::Err { err };
                             }
                             Err(errors) => {
                                 let reason = errors
@@ -145,22 +146,22 @@ impl SmtpAuthenticatePlain {
                                     .map(|e| e.to_string())
                                     .collect::<Vec<_>>()
                                     .join("; ");
-                                return SmtpAuthenticatePlainResult::Err {
-                                    err: SmtpAuthenticatePlainError::ParseResponse(reason),
-                                };
+
+                                let err = SmtpPlainError::ParseResponse(reason);
+                                return SmtpPlainResult::Err { err };
                             }
                         }
                     }
                 },
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
                     SmtpEhloResult::Io { input } => {
-                        return SmtpAuthenticatePlainResult::Io { input };
+                        return SmtpPlainResult::Io { input };
                     }
                     SmtpEhloResult::Ok { .. } => {
-                        return SmtpAuthenticatePlainResult::Ok;
+                        return SmtpPlainResult::Ok;
                     }
                     SmtpEhloResult::Err { err } => {
-                        return SmtpAuthenticatePlainResult::Err { err: err.into() };
+                        return SmtpPlainResult::Err { err: err.into() };
                     }
                 },
             }

@@ -6,7 +6,7 @@
 
 - [RFC coverage](#rfc-coverage)
 - [Examples](#examples)
-  - [Send a message via SMTP (blocking)](#send-a-message-via-smtp-blocking)
+  - [Send EHLO via SMTP (blocking)](#send-ehlo-via-smtp-blocking)
   - [Send a message via SMTP (async)](#send-a-message-via-smtp-async)
 - [More examples](#more-examples)
 - [License](#license)
@@ -17,39 +17,48 @@
 
 This library implements SMTP as I/O-agnostic coroutines — no sockets, no async runtime, no `std` required.
 
-| RFC    | What it covers                                                                       |
-|--------|--------------------------------------------------------------------------------------|
-| [3207] | STARTTLS — upgrade a plain connection to TLS                                         |
-| [4954] | AUTH — SASL authentication (PLAIN, LOGIN, SCRAM)                                     |
-| [5321] | SMTP — greeting, EHLO, MAIL FROM, RCPT TO, DATA, NOOP, RSET, QUIT                    |
+| Module   | What it covers                                                                   |
+|----------|----------------------------------------------------------------------------------|
+| `login`  | LOGIN — legacy de-facto AUTH mechanism (no RFC)                                  |
+| [3207]   | STARTTLS — upgrade a plain connection to TLS                                     |
+| [3461]   | DSN — `RET`, `ENVID`, `NOTIFY`, `ORCPT` ESMTP parameters for MAIL FROM / RCPT TO |
+| [4616]   | PLAIN — SASL PLAIN authentication mechanism                                      |
+| [4954]   | AUTH — SASL exchange protocol (`AuthenticateData`)                               |
+| [5321]   | SMTP — greeting, EHLO, HELO, MAIL FROM, RCPT TO, DATA, NOOP, RSET, QUIT          |
+| [7628]   | OAUTHBEARER — OAuth 2.0 bearer token SASL mechanism                              |
+| [7677]   | SCRAM-SHA-256 — SASL SCRAM-SHA-256 mechanism (feature `scram`)                   |
 
 [3207]: https://www.rfc-editor.org/rfc/rfc3207
+[3461]: https://www.rfc-editor.org/rfc/rfc3461
+[4616]: https://www.rfc-editor.org/rfc/rfc4616
 [4954]: https://www.rfc-editor.org/rfc/rfc4954
 [5321]: https://www.rfc-editor.org/rfc/rfc5321
+[7628]: https://www.rfc-editor.org/rfc/rfc7628
+[7677]: https://www.rfc-editor.org/rfc/rfc7677
 
 ## Examples
 
-### Send a message via SMTP (blocking)
+### Send EHLO via SMTP (blocking)
 
 ```rust,ignore
 use std::net::TcpStream;
 
 use io_smtp::rfc5321::{
-    greeting::{GetSmtpGreeting, GetSmtpGreetingResult},
     ehlo::{SmtpEhlo, SmtpEhloResult},
-    types::ehlo_domain::EhloDomain,
+    greeting::{GetSmtpGreeting, GetSmtpGreetingResult},
+    types::domain::Domain,
 };
 use io_socket::runtimes::std_stream::handle;
 
 let mut stream = TcpStream::connect("smtp.example.com:25").unwrap();
-let domain: EhloDomain = "localhost".parse().unwrap();
+let domain = Domain::parse(b"localhost").unwrap();
 
 // Read greeting
-let mut greeting = GetSmtpGreeting::new();
+let mut coroutine = GetSmtpGreeting::new();
 let mut arg = None;
 
 loop {
-    match greeting.resume(arg.take()) {
+    match coroutine.resume(arg.take()) {
         GetSmtpGreetingResult::Ok { .. } => break,
         GetSmtpGreetingResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
         GetSmtpGreetingResult::Err { err } => panic!("{err}"),
@@ -57,11 +66,11 @@ loop {
 }
 
 // Send EHLO
-let mut ehlo = SmtpEhlo::new(domain);
+let mut coroutine = SmtpEhlo::new(domain.into());
 let mut arg = None;
 
 let capabilities = loop {
-    match ehlo.resume(arg.take()) {
+    match coroutine.resume(arg.take()) {
         SmtpEhloResult::Ok { capabilities } => break capabilities,
         SmtpEhloResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
         SmtpEhloResult::Err { err } => panic!("{err}"),
@@ -74,7 +83,7 @@ println!("Server capabilities: {capabilities:?}");
 ### Send a message via SMTP (async)
 
 ```rust,ignore
-use io_smtp::send::{SendSmtpMessage, SendSmtpMessageResult};
+use io_smtp::send::{SmtpMessageSend, SmtpMessageSendResult};
 use io_smtp::rfc5321::types::{forward_path::ForwardPath, reverse_path::ReversePath};
 use io_socket::runtimes::tokio_stream::handle;
 use tokio::net::TcpStream;
@@ -85,14 +94,14 @@ let from: ReversePath = "<sender@example.com>".parse().unwrap();
 let to: ForwardPath = "<recipient@example.com>".parse().unwrap();
 let message = b"From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: Test\r\n\r\nHello!".to_vec();
 
-let mut send = SendSmtpMessage::new(from, [to], message);
+let mut coroutine = SmtpMessageSend::new(from, [to], message);
 let mut arg = None;
 
 loop {
-    match send.resume(arg.take()) {
-        SendSmtpMessageResult::Ok => break,
-        SendSmtpMessageResult::Io { input } => arg = Some(handle(&mut stream, input).await.unwrap()),
-        SendSmtpMessageResult::Err { err } => panic!("{err}"),
+    match coroutine.resume(arg.take()) {
+        SmtpMessageSendResult::Ok => break,
+        SmtpMessageSendResult::Io { input } => arg = Some(handle(&mut stream, input).await.unwrap()),
+        SmtpMessageSendResult::Err { err } => panic!("{err}"),
     }
 }
 ```
