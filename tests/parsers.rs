@@ -5,10 +5,7 @@
 //! add a test case here so the behaviour is preserved forever.
 
 use io_smtp::rfc5321::types::{
-    domain::Domain,
-    ehlo_response::{Capability, EhloResponse},
-    greeting::Greeting,
-    reply_code::ReplyCode,
+    domain::Domain, ehlo_response::EhloResponse, greeting::Greeting, reply_code::ReplyCode,
     response::Response,
 };
 
@@ -226,7 +223,17 @@ fn ehlo_response_multiline_capabilities() {
     assert!(r.has_capability("STARTTLS"));
     assert!(r.has_capability("AUTH"));
     assert!(r.has_capability("ENHANCEDSTATUSCODES"));
-    assert_eq!(r.max_size(), Some(52428800));
+    let max_size: Option<u64> = r
+        .capabilities
+        .iter()
+        .find(|c| {
+            c.split_ascii_whitespace()
+                .next()
+                .map_or(false, |k| k.eq_ignore_ascii_case("SIZE"))
+        })
+        .and_then(|c| c.split_ascii_whitespace().nth(1))
+        .and_then(|v| v.parse().ok());
+    assert_eq!(max_size, Some(52428800));
 }
 
 #[test]
@@ -234,7 +241,17 @@ fn ehlo_response_size_without_value() {
     let buf = b"250-smtp.example.com\r\n250 SIZE\r\n";
     let r = EhloResponse::parse(buf).unwrap();
     assert!(r.has_capability("SIZE"));
-    assert_eq!(r.max_size(), None);
+    let max_size: Option<u64> = r
+        .capabilities
+        .iter()
+        .find(|c| {
+            c.split_ascii_whitespace()
+                .next()
+                .map_or(false, |k| k.eq_ignore_ascii_case("SIZE"))
+        })
+        .and_then(|c| c.split_ascii_whitespace().nth(1))
+        .and_then(|v| v.parse().ok());
+    assert_eq!(max_size, None);
 }
 
 #[test]
@@ -242,10 +259,18 @@ fn ehlo_response_auth_mechanisms() {
     let buf = b"250-smtp.example.com\r\n\
                 250 AUTH PLAIN LOGIN SCRAM-SHA-256\r\n";
     let r = EhloResponse::parse(buf).unwrap();
-    let mechs = r.auth_mechanisms().unwrap();
-    assert!(mechs.iter().any(|m| m == "PLAIN"));
-    assert!(mechs.iter().any(|m| m == "LOGIN"));
-    assert!(mechs.iter().any(|m| m == "SCRAM-SHA-256"));
+    let mechs: Vec<&str> = r
+        .capabilities
+        .iter()
+        .find(|c| {
+            c.split_ascii_whitespace()
+                .next()
+                .map_or(false, |k| k.eq_ignore_ascii_case("AUTH"))
+        })
+        .map_or(vec![], |c| c.split_ascii_whitespace().skip(1).collect());
+    assert!(mechs.iter().any(|m| *m == "PLAIN"));
+    assert!(mechs.iter().any(|m| *m == "LOGIN"));
+    assert!(mechs.iter().any(|m| *m == "SCRAM-SHA-256"));
 }
 
 #[test]
@@ -259,7 +284,7 @@ fn ehlo_response_unknown_capability() {
 fn ehlo_response_smtputf8() {
     let buf = b"250-smtp.example.com\r\n250 SMTPUTF8\r\n";
     let r = EhloResponse::parse(buf).unwrap();
-    assert!(matches!(r.capabilities[0], Capability::SmtpUtf8));
+    assert_eq!(r.capabilities[0].as_ref(), "SMTPUTF8");
 }
 
 #[test]
@@ -291,7 +316,17 @@ fn real_world_gmail_ehlo() {
     assert_eq!(r.domain.as_ref(), "smtp.gmail.com");
     assert!(r.has_capability("STARTTLS"));
     assert!(r.has_capability("SMTPUTF8"));
-    assert_eq!(r.max_size(), Some(35882577));
+    let max_size: Option<u64> = r
+        .capabilities
+        .iter()
+        .find(|c| {
+            c.split_ascii_whitespace()
+                .next()
+                .map_or(false, |k| k.eq_ignore_ascii_case("SIZE"))
+        })
+        .and_then(|c| c.split_ascii_whitespace().nth(1))
+        .and_then(|v| v.parse().ok());
+    assert_eq!(max_size, Some(35882577));
 }
 
 /// Fastmail EHLO response (real-world sample).
@@ -306,8 +341,16 @@ fn real_world_fastmail_ehlo() {
                 250 AUTH PLAIN\r\n";
     let r = EhloResponse::parse(buf).unwrap();
     assert!(r.has_capability("AUTH"));
-    let mechs = r.auth_mechanisms().unwrap();
-    assert!(mechs.iter().any(|m| m == "PLAIN"));
+    let mechs: Vec<&str> = r
+        .capabilities
+        .iter()
+        .find(|c| {
+            c.split_ascii_whitespace()
+                .next()
+                .map_or(false, |k| k.eq_ignore_ascii_case("AUTH"))
+        })
+        .map_or(vec![], |c| c.split_ascii_whitespace().skip(1).collect());
+    assert!(mechs.iter().any(|m| *m == "PLAIN"));
 }
 
 /// Multi-line 220 greeting as sent by some Sendmail/Postfix configurations.

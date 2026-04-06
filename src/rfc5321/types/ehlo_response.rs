@@ -9,10 +9,10 @@ use super::{domain::Domain, text::Text};
 
 /// EHLO response containing server capabilities.
 ///
-/// Each capability is stored as a raw string exactly as advertised by the
-/// server (e.g. `"AUTH PLAIN LOGIN"`, `"SIZE 10485760"`, `"STARTTLS"`).
-/// Individual RFC modules are responsible for parsing the parameters of
-/// their own capability.
+/// Each capability is stored as a raw string exactly as advertised by
+/// the server (e.g. `"AUTH PLAIN LOGIN"`, `"SIZE 10485760"`,
+/// `"STARTTLS"`).  Individual RFC modules are responsible for parsing
+/// the parameters of their own capability.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]
 pub struct EhloResponse<'a> {
     /// The server's domain name.
@@ -29,12 +29,14 @@ impl EhloResponse<'_> {
         if !buf.ends_with(b"\r\n") {
             return false;
         }
+
         let body = &buf[..buf.len() - 2];
         let line_start = body
             .iter()
             .rposition(|&b| b == b'\n')
             .map(|p| p + 1)
             .unwrap_or(0);
+
         let last_line = &body[line_start..];
         last_line.len() >= 4 && last_line[3] == b' '
     }
@@ -61,10 +63,12 @@ pub(crate) mod parsers {
 
     use chumsky::prelude::*;
 
-    use crate::rfc5321::types::{
-        domain::parsers::domain as domain_parser, text::parsers::text as text_parser,
+    use crate::{
+        rfc5321::types::{
+            domain::parsers::domain as domain_parser, text::parsers::text as text_parser,
+        },
+        utils::parsers::{Extra, crlf, sp},
     };
-    use crate::utils::parsers::{Extra, crlf, sp};
 
     use super::EhloResponse;
 
@@ -114,12 +118,15 @@ pub(crate) mod parsers {
             )
             .map(|((((is_multi, domain), greet), cont_caps), final_cap)| {
                 let mut capabilities = Vec::new();
+
                 if is_multi {
                     capabilities.extend(cont_caps);
+
                     if let Some(cap) = final_cap {
                         capabilities.push(cap);
                     }
                 }
+
                 EhloResponse {
                     domain,
                     greet,
