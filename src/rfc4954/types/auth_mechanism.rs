@@ -1,6 +1,7 @@
 //! Module dedicated to the SMTP authentication mechanism.
 
-use std::fmt;
+use alloc::vec::Vec;
+use core::fmt;
 
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;

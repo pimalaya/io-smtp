@@ -1,6 +1,6 @@
 //! Module dedicated to the SMTP reverse path.
 
-use std::fmt;
+use core::fmt;
 
 use bounded_static_derive::ToStatic;
 

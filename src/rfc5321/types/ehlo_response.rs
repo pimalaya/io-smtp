@@ -1,6 +1,7 @@
 //! Module dedicated to the SMTP EHLO response.
 
-use std::{borrow::Cow, fmt};
+use alloc::{borrow::Cow, vec::Vec};
+use core::fmt;
 
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
@@ -134,7 +135,8 @@ impl EhloResponse<'_> {
 }
 
 pub(crate) mod parsers {
-    use std::{borrow::Cow, str::from_utf8};
+    use alloc::{borrow::Cow, vec::Vec};
+    use core::str::from_utf8;
 
     use chumsky::prelude::*;
 

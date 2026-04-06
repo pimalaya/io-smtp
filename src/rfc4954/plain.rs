@@ -1,39 +1,37 @@
 //! I/O-free coroutine to authenticate using SMTP AUTH PLAIN then refresh
 //! capabilities via EHLO.
 
-use io_socket::{
-    coroutines::{read::ReadSocketError, write::WriteSocketError},
-    io::{SocketInput, SocketOutput},
+use alloc::{
+    boxed::Box,
+    string::{String, ToString},
+    vec::Vec,
 };
+use bounded_static::IntoBoundedStatic;
+use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use thiserror::Error;
 
-use bounded_static::IntoBoundedStatic;
-
 use crate::{
+    read::{SmtpRead, SmtpReadError, SmtpReadResult},
     rfc4954::types::auth_mechanism::AuthMechanism,
     rfc5321::{
-        ehlo::{SmtpEhlo, SmtpEhloError, SmtpEhloResult},
+        ehlo::*,
         types::{
             command::Command, ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response,
         },
     },
-    send_bytes::{SmtpBytesSend, SmtpBytesSendResult},
     utils::escape_byte_string,
+    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
 
 /// Errors that can occur during AUTH PLAIN.
 #[derive(Debug, Error)]
 pub enum SmtpAuthenticatePlainError {
-    #[error("Write AUTH PLAIN command error")]
-    Write(#[from] WriteSocketError),
-    #[error("Write AUTH PLAIN command error (unexpected EOF)")]
-    WriteEof,
-    #[error("Read AUTH PLAIN response error")]
-    Read(#[from] ReadSocketError),
-    #[error("Read AUTH PLAIN response error (unexpected EOF)")]
-    ReadEof,
+    #[error(transparent)]
+    Write(#[from] SmtpWriteError),
+    #[error(transparent)]
+    Read(#[from] SmtpReadError),
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
     #[error("AUTH PLAIN rejected: {code} {message}")]
@@ -50,7 +48,8 @@ pub enum SmtpAuthenticatePlainResult {
 }
 
 enum State {
-    Auth(SmtpBytesSend),
+    Write(SmtpWrite),
+    Read(SmtpRead),
     Ehlo(SmtpEhlo),
 }
 
@@ -70,8 +69,6 @@ impl SmtpAuthenticatePlain {
     ///
     /// Uses initial response (IR) to send credentials in a single round-trip.
     pub fn new(login: &str, password: &SecretString, domain: EhloDomain<'_>) -> Self {
-        // Build SASL PLAIN payload: authzid\0authcid\0password
-        // authzid is typically empty for SMTP
         let mut payload = Vec::new();
         payload.push(0); // empty authzid
         payload.extend_from_slice(login.as_bytes());
@@ -86,7 +83,7 @@ impl SmtpAuthenticatePlain {
         trace!("AUTH PLAIN command to send: {} bytes", encoded.len());
 
         Self {
-            state: State::Auth(SmtpBytesSend::new(encoded)),
+            state: State::Write(SmtpWrite::new(encoded)),
             domain: Some(domain.into_static()),
             buffer: Vec::new(),
         }
@@ -96,36 +93,31 @@ impl SmtpAuthenticatePlain {
     pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpAuthenticatePlainResult {
         loop {
             match &mut self.state {
-                State::Auth(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { input } => {
+                State::Write(w) => match w.resume(arg.take()) {
+                    SmtpWriteResult::Ok => {
+                        self.state = State::Read(SmtpRead::new());
+                        continue;
+                    }
+                    SmtpWriteResult::Io { input } => {
                         return SmtpAuthenticatePlainResult::Io { input };
                     }
-                    SmtpBytesSendResult::WriteErr { err } => {
-                        return SmtpAuthenticatePlainResult::Err {
-                            err: SmtpAuthenticatePlainError::Write(err),
-                        };
+                    SmtpWriteResult::Err { err } => {
+                        return SmtpAuthenticatePlainResult::Err { err: err.into() };
                     }
-                    SmtpBytesSendResult::WriteEof => {
-                        return SmtpAuthenticatePlainResult::Err {
-                            err: SmtpAuthenticatePlainError::WriteEof,
-                        };
+                },
+                State::Read(r) => match r.resume(arg.take()) {
+                    SmtpReadResult::Io { input } => {
+                        return SmtpAuthenticatePlainResult::Io { input };
                     }
-                    SmtpBytesSendResult::ReadErr { err } => {
-                        return SmtpAuthenticatePlainResult::Err {
-                            err: SmtpAuthenticatePlainError::Read(err),
-                        };
+                    SmtpReadResult::Err { err } => {
+                        return SmtpAuthenticatePlainResult::Err { err: err.into() };
                     }
-                    SmtpBytesSendResult::ReadEof => {
-                        return SmtpAuthenticatePlainResult::Err {
-                            err: SmtpAuthenticatePlainError::ReadEof,
-                        };
-                    }
-                    SmtpBytesSendResult::Ok { bytes } => {
+                    SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
                         self.buffer.extend_from_slice(&bytes);
 
                         if !Response::is_complete(&self.buffer) {
-                            self.state = State::Auth(SmtpBytesSend::new(vec![]));
+                            self.state = State::Read(SmtpRead::new());
                             continue;
                         }
 

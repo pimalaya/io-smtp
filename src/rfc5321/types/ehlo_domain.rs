@@ -1,6 +1,6 @@
 //! Module dedicated to the SMTP EHLO domain.
 
-use std::{
+use core::{
     fmt,
     net::{Ipv4Addr, Ipv6Addr},
 };

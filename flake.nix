@@ -1,5 +1,5 @@
 {
-  description = "Set of I/O-free Rust coroutines to manage SMTP streams";
+  description = "I/O-free SMTP client library written in Rust";
 
   inputs = {
     nixpkgs = {

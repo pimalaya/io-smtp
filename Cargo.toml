@@ -1,15 +1,15 @@
 [package]
 name = "io-smtp"
-description = "Set of I/O-free Rust coroutines to manage SMTP sockets"
+description = "I/O-free SMTP client library"
 version = "0.0.1"
 authors = ["Clément DOUIN <pimalaya.org@posteo.net>"]
 edition = "2024"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
-categories = ["email"]
-keywords = ["email", "smtp", "client"]
+categories = ["email", "no-std"]
+keywords = ["smtp", "io-free", "coroutine", "no-std", "sans-io"]
 homepage = "https://pimalaya.org"
-documentation = "https://github.com/pimalaya/io-smtp"
+documentation = "https://docs.rs/io-smtp"
 repository = "https://github.com/pimalaya/io-smtp"
 
 [features]
@@ -26,15 +26,16 @@ rustls-platform-verifier = "0.6"
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 bounded-static = { version = "0.8", default-features = false, features = ["alloc"] }
 bounded-static-derive = { version = "0.8", default-features = false }
-chumsky = { version = "1.0.0-alpha.7", default-features = false, features = ["std"] }
-hmac = { version = "0.13", optional = true }
+chumsky = { version = "1.0.0-alpha.7", default-features = false }
+hashbrown = { version = "0.15", default-features = false, features = ["alloc"] }
+hmac = { version = "0.13", optional = true, default-features = false }
 io-socket = { version = "0.0.1", default-features = false }
-log = "0.4"
-pbkdf2 = { version = "0.12", optional = true }
+log = { version = "0.4", default-features = false }
+pbkdf2 = { version = "0.12", optional = true, default-features = false }
 rand = { version = "0.10", optional = true }
-secrecy = "0.10"
-sha2 = { version = "0.11", optional = true }
-thiserror = "2"
+secrecy = { version = "0.10", default-features = false }
+sha2 = { version = "0.11", optional = true, default-features = false }
+thiserror = { version = "2", default-features = false }
 
 [patch.crates-io]
 io-socket.git = "https://github.com/pimalaya/io-socket"

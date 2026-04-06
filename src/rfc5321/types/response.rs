@@ -1,5 +1,6 @@
 //! Module dedicated to the SMTP response.
 
+use alloc::vec::Vec;
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
 
@@ -21,12 +22,14 @@ impl Response<'_> {
         if !buf.ends_with(b"\r\n") {
             return false;
         }
+
         let body = &buf[..buf.len() - 2]; // strip final CRLF
         let line_start = body
             .iter()
             .rposition(|&b| b == b'\n')
             .map(|p| p + 1)
             .unwrap_or(0);
+
         let last_line = &body[line_start..];
         last_line.len() >= 4 && last_line[3] == b' '
     }
@@ -65,7 +68,7 @@ impl Response<'_> {
 }
 
 pub(crate) mod parsers {
-    use std::borrow::Cow;
+    use alloc::{borrow::Cow, vec::Vec};
 
     use chumsky::prelude::*;
 

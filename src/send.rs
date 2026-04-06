@@ -1,15 +1,16 @@
 //! I/O-free coroutine to send a complete SMTP message.
 
-use std::collections::VecDeque;
+use alloc::{collections::VecDeque, vec::Vec};
 
+use bounded_static::IntoBoundedStatic;
 use io_socket::io::{SocketInput, SocketOutput};
 use thiserror::Error;
 
-use bounded_static::IntoBoundedStatic;
-
-use crate::{
-    rfc5321::types::{forward_path::ForwardPath, reverse_path::ReversePath},
-    rfc5321::{data::*, mail::*, rcpt::*},
+use crate::rfc5321::{
+    data::*,
+    mail::*,
+    rcpt::*,
+    types::{forward_path::ForwardPath, reverse_path::ReversePath},
 };
 
 /// Errors that can occur during the coroutine progression.

@@ -1,26 +1,25 @@
 //! I/O-free coroutine to read the greeting from an SMTP server.
 
-use bounded_static::IntoBoundedStatic;
-use io_socket::{
-    coroutines::read::ReadSocketError,
-    io::{SocketInput, SocketOutput},
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
 };
+use bounded_static::IntoBoundedStatic;
+use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
+    read::{SmtpRead, SmtpReadError, SmtpReadResult},
     rfc5321::types::greeting::Greeting,
-    send_bytes::{SmtpBytesSend, SmtpBytesSendResult},
     utils::escape_byte_string,
 };
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
 pub enum GetSmtpGreetingError {
-    #[error("Read greeting from SMTP socket error")]
-    Read(#[from] ReadSocketError),
-    #[error("Read greeting from SMTP socket error (unexpected EOF)")]
-    ReadEof,
+    #[error(transparent)]
+    Io(#[from] SmtpReadError),
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
 }
@@ -34,7 +33,7 @@ pub enum GetSmtpGreetingResult {
 
 /// I/O-free coroutine to read the greeting from an SMTP server.
 pub struct GetSmtpGreeting {
-    io: SmtpBytesSend,
+    io: SmtpRead,
     buffer: Vec<u8>,
 }
 
@@ -42,7 +41,7 @@ impl GetSmtpGreeting {
     /// Creates a new coroutine.
     pub fn new() -> Self {
         Self {
-            io: SmtpBytesSend::new(vec![]),
+            io: SmtpRead::new(),
             buffer: Vec::new(),
         }
     }
@@ -51,27 +50,16 @@ impl GetSmtpGreeting {
     pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> GetSmtpGreetingResult {
         loop {
             match self.io.resume(arg.take()) {
-                SmtpBytesSendResult::Io { input } => {
-                    return GetSmtpGreetingResult::Io { input };
+                SmtpReadResult::Io { input } => return GetSmtpGreetingResult::Io { input },
+                SmtpReadResult::Err { err } => {
+                    return GetSmtpGreetingResult::Err { err: err.into() };
                 }
-                SmtpBytesSendResult::WriteErr { .. } => unreachable!(),
-                SmtpBytesSendResult::WriteEof => unreachable!(),
-                SmtpBytesSendResult::ReadErr { err } => {
-                    return GetSmtpGreetingResult::Err {
-                        err: GetSmtpGreetingError::Read(err),
-                    };
-                }
-                SmtpBytesSendResult::ReadEof => {
-                    return GetSmtpGreetingResult::Err {
-                        err: GetSmtpGreetingError::ReadEof,
-                    };
-                }
-                SmtpBytesSendResult::Ok { bytes } => {
+                SmtpReadResult::Ok { bytes } => {
                     trace!("read SMTP bytes: {}", escape_byte_string(&bytes));
                     self.buffer.extend_from_slice(&bytes);
 
                     if !Greeting::is_complete(&self.buffer) {
-                        self.io = SmtpBytesSend::new(vec![]);
+                        self.io = SmtpRead::new();
                         continue;
                     }
 
@@ -94,5 +82,11 @@ impl GetSmtpGreeting {
                 }
             }
         }
+    }
+}
+
+impl Default for GetSmtpGreeting {
+    fn default() -> Self {
+        Self::new()
     }
 }

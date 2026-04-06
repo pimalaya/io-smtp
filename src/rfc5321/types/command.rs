@@ -1,6 +1,7 @@
 //! Module dedicated to the SMTP command.
 
-use std::{borrow::Cow, io::Write};
+use alloc::{borrow::Cow, boxed::Box, string::String, vec::Vec};
+use core::fmt::Write;
 
 use base64::{Engine, engine::general_purpose::STANDARD as base64};
 use secrecy::{ExposeSecret, SecretBox};
@@ -122,7 +123,7 @@ impl<'a> Command<'a> {
 
     /// Serialize this command to wire bytes (includes CRLF).
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
+        let mut buf = String::new();
 
         match self {
             Command::Ehlo { domain } => {
@@ -149,11 +150,11 @@ impl<'a> Command<'a> {
                     write!(buf, " {p}").unwrap();
                 }
             }
-            Command::Data => buf.write_all(b"DATA").unwrap(),
-            Command::Rset => buf.write_all(b"RSET").unwrap(),
-            Command::Quit => buf.write_all(b"QUIT").unwrap(),
+            Command::Data => buf.push_str("DATA"),
+            Command::Rset => buf.push_str("RSET"),
+            Command::Quit => buf.push_str("QUIT"),
             Command::Noop { string } => {
-                buf.write_all(b"NOOP").unwrap();
+                buf.push_str("NOOP");
                 if let Some(s) = string {
                     write!(buf, " {s}").unwrap();
                 }
@@ -165,12 +166,12 @@ impl<'a> Command<'a> {
                 write!(buf, "EXPN {string}").unwrap();
             }
             Command::Help { topic } => {
-                buf.write_all(b"HELP").unwrap();
+                buf.push_str("HELP");
                 if let Some(t) = topic {
                     write!(buf, " {t}").unwrap();
                 }
             }
-            Command::StartTls => buf.write_all(b"STARTTLS").unwrap(),
+            Command::StartTls => buf.push_str("STARTTLS"),
             Command::Auth {
                 mechanism,
                 initial_response,
@@ -179,7 +180,7 @@ impl<'a> Command<'a> {
                 if let Some(ir) = initial_response {
                     let data = ir.expose_secret();
                     if data.is_empty() {
-                        buf.write_all(b" =").unwrap();
+                        buf.push_str(" =");
                     } else {
                         write!(buf, " {}", base64.encode(data.as_ref())).unwrap();
                     }
@@ -188,7 +189,7 @@ impl<'a> Command<'a> {
             #[allow(unreachable_patterns)]
             _ => unreachable!("Unknown command variant"),
         }
-        buf.write_all(b"\r\n").unwrap();
-        buf
+        buf.push_str("\r\n");
+        buf.into_bytes()
     }
 }

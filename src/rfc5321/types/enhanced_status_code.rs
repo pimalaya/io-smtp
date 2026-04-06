@@ -1,6 +1,6 @@
 //! Module dedicated to the SMTP enhanced status code.
 
-use std::fmt;
+use core::fmt;
 
 use bounded_static_derive::ToStatic;
 

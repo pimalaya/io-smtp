@@ -1,29 +1,28 @@
 //! I/O-free coroutine to perform SMTP STARTTLS negotiation.
 
-use io_socket::{
-    coroutines::{read::ReadSocketError, write::WriteSocketError},
-    io::{SocketInput, SocketOutput},
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
 };
+
+use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
+    read::{SmtpRead, SmtpReadError, SmtpReadResult},
     rfc5321::types::{command::Command, reply_code::ReplyCode},
-    send_bytes::{SmtpBytesSend, SmtpBytesSendResult},
     utils::escape_byte_string,
+    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
 
 /// Errors that can occur during the coroutine progression.
-#[derive(Clone, Debug, Error)]
+#[derive(Debug, Error)]
 pub enum SmtpStartTlsError {
-    #[error("Write STARTTLS command to SMTP socket error")]
-    WriteStartTls(#[source] WriteSocketError),
-    #[error("Write STARTTLS command to SMTP socket error (unexpected EOF)")]
-    WriteStartTlsEof,
-    #[error("Read STARTTLS response from SMTP socket error")]
-    ReadStartTls(#[source] ReadSocketError),
-    #[error("Read STARTTLS response from SMTP socket error (unexpected EOF)")]
-    ReadStartTlsEof,
+    #[error(transparent)]
+    Write(#[from] SmtpWriteError),
+    #[error(transparent)]
+    Read(#[from] SmtpReadError),
     #[error("STARTTLS rejected by server: {0}")]
     Rejected(String),
 }
@@ -36,9 +35,14 @@ pub enum SmtpStartTlsResult {
     Err { err: SmtpStartTlsError },
 }
 
+enum State {
+    Write(SmtpWrite),
+    Read(SmtpRead),
+}
+
 /// I/O-free coroutine to perform SMTP STARTTLS negotiation.
 pub struct SmtpStartTls {
-    io: SmtpBytesSend,
+    state: State,
     buffer: Vec<u8>,
 }
 
@@ -49,7 +53,7 @@ impl SmtpStartTls {
         trace!("STARTTLS command to send: {}", escape_byte_string(&encoded));
 
         Self {
-            io: SmtpBytesSend::new(encoded),
+            state: State::Write(SmtpWrite::new(encoded)),
             buffer: Vec::new(),
         }
     }
@@ -57,64 +61,60 @@ impl SmtpStartTls {
     /// Makes the coroutine progress.
     pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpStartTlsResult {
         loop {
-            match self.io.resume(arg.take()) {
-                SmtpBytesSendResult::Io { input } => return SmtpStartTlsResult::Io { input },
-                SmtpBytesSendResult::WriteErr { err } => {
-                    return SmtpStartTlsResult::Err {
-                        err: SmtpStartTlsError::WriteStartTls(err),
-                    };
-                }
-                SmtpBytesSendResult::WriteEof => {
-                    return SmtpStartTlsResult::Err {
-                        err: SmtpStartTlsError::WriteStartTlsEof,
-                    };
-                }
-                SmtpBytesSendResult::ReadErr { err } => {
-                    return SmtpStartTlsResult::Err {
-                        err: SmtpStartTlsError::ReadStartTls(err),
-                    };
-                }
-                SmtpBytesSendResult::ReadEof => {
-                    return SmtpStartTlsResult::Err {
-                        err: SmtpStartTlsError::ReadStartTlsEof,
-                    };
-                }
-                SmtpBytesSendResult::Ok { bytes } => {
-                    self.buffer.extend_from_slice(&bytes);
-
-                    // Look for complete response line
-                    let Some(newline_pos) = self.buffer.iter().position(|&b| b == b'\n') else {
-                        // Need more data
-                        self.io = SmtpBytesSend::new(vec![]);
+            match &mut self.state {
+                State::Write(w) => match w.resume(arg.take()) {
+                    SmtpWriteResult::Ok => {
+                        self.state = State::Read(SmtpRead::new());
                         continue;
-                    };
+                    }
+                    SmtpWriteResult::Io { input } => return SmtpStartTlsResult::Io { input },
+                    SmtpWriteResult::Err { err } => {
+                        return SmtpStartTlsResult::Err { err: err.into() };
+                    }
+                },
+                State::Read(r) => match r.resume(arg.take()) {
+                    SmtpReadResult::Io { input } => return SmtpStartTlsResult::Io { input },
+                    SmtpReadResult::Err { err } => {
+                        return SmtpStartTlsResult::Err { err: err.into() };
+                    }
+                    SmtpReadResult::Ok { bytes } => {
+                        self.buffer.extend_from_slice(&bytes);
 
-                    let response_line = &self.buffer[..=newline_pos];
-                    trace!("STARTTLS response: {}", escape_byte_string(response_line));
+                        let Some(newline_pos) = self.buffer.iter().position(|&b| b == b'\n') else {
+                            self.state = State::Read(SmtpRead::new());
+                            continue;
+                        };
 
-                    // Parse the reply code (first 3 bytes)
-                    if response_line.len() >= 3 {
-                        if let Ok(reply_code) = ReplyCode::parse(&response_line[..3]) {
-                            if reply_code == ReplyCode::SERVICE_READY {
-                                // 220 = Ready to start TLS
-                                return SmtpStartTlsResult::Ok;
-                            } else {
-                                // Server rejected STARTTLS
-                                let msg = String::from_utf8_lossy(response_line).trim().to_string();
-                                return SmtpStartTlsResult::Err {
-                                    err: SmtpStartTlsError::Rejected(msg),
-                                };
+                        let response_line = &self.buffer[..=newline_pos];
+                        trace!("STARTTLS response: {}", escape_byte_string(response_line));
+
+                        if response_line.len() >= 3 {
+                            if let Ok(reply_code) = ReplyCode::parse(&response_line[..3]) {
+                                if reply_code == ReplyCode::SERVICE_READY {
+                                    return SmtpStartTlsResult::Ok;
+                                } else {
+                                    let msg =
+                                        String::from_utf8_lossy(response_line).trim().to_string();
+                                    return SmtpStartTlsResult::Err {
+                                        err: SmtpStartTlsError::Rejected(msg),
+                                    };
+                                }
                             }
                         }
-                    }
 
-                    // Failed to parse response
-                    let msg = String::from_utf8_lossy(response_line).trim().to_string();
-                    return SmtpStartTlsResult::Err {
-                        err: SmtpStartTlsError::Rejected(msg),
-                    };
-                }
+                        let msg = String::from_utf8_lossy(response_line).trim().to_string();
+                        return SmtpStartTlsResult::Err {
+                            err: SmtpStartTlsError::Rejected(msg),
+                        };
+                    }
+                },
             }
         }
+    }
+}
+
+impl Default for SmtpStartTls {
+    fn default() -> Self {
+        Self::new()
     }
 }

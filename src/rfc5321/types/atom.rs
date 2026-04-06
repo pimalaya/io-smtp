@@ -1,6 +1,7 @@
 //! Module dedicated to the SMTP atom.
 
-use std::{borrow::Cow, fmt, ops::Deref};
+use alloc::{borrow::Cow, vec::Vec};
+use core::{fmt, ops::Deref};
 
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
@@ -33,7 +34,8 @@ impl<'a> Deref for Atom<'a> {
 }
 
 pub(crate) mod parsers {
-    use std::{borrow::Cow, str::from_utf8};
+    use alloc::borrow::Cow;
+    use core::str::from_utf8;
 
     use chumsky::prelude::*;
 

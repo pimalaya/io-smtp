@@ -1,12 +1,9 @@
 //! Functions that may come in handy.
 
-use std::borrow::Cow;
+use alloc::{borrow::Cow, string::String, vec::Vec};
 
 /// Converts bytes into a ready-to-be-printed form.
-pub fn escape_byte_string<B>(bytes: B) -> String
-where
-    B: AsRef<[u8]>,
-{
+pub fn escape_byte_string(bytes: impl AsRef<[u8]>) -> String {
     let bytes = bytes.as_ref();
 
     bytes
@@ -192,7 +189,11 @@ pub fn unescape_quoted(escaped: &str) -> Cow<'_, str> {
 pub mod parsers {
     //! Chumsky parser helpers for SMTP byte-slice parsing.
 
-    use std::str::from_utf8;
+    use alloc::{
+        string::{String, ToString},
+        vec::Vec,
+    };
+    use core::str::from_utf8;
 
     use chumsky::{
         error::{RichPattern, RichReason},
@@ -329,6 +330,7 @@ pub mod parsers {
 
     #[cfg(test)]
     mod tests {
+        use alloc::string::String;
         use chumsky::prelude::*;
 
         use super::{Extra, format_rich_errors, tag_no_case};

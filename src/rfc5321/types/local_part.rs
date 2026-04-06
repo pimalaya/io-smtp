@@ -1,6 +1,7 @@
 //! Module dedicated to the SMTP local part.
 
-use std::{borrow::Cow, fmt};
+use alloc::borrow::Cow;
+use core::fmt;
 
 use bounded_static_derive::ToStatic;
 

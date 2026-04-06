@@ -1,38 +1,38 @@
 //! I/O-free coroutine to send SMTP DATA command and message body.
 
-use bounded_static::IntoBoundedStatic;
-use io_socket::{
-    coroutines::{read::ReadSocketError, write::WriteSocketError},
-    io::{SocketInput, SocketOutput},
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
 };
+use bounded_static::IntoBoundedStatic;
+use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
+    read::{SmtpRead, SmtpReadError, SmtpReadResult},
     rfc5321::types::{command::Command, reply_code::ReplyCode, response::Response},
-    send_bytes::{SmtpBytesSend, SmtpBytesSendResult},
     utils::escape_byte_string,
+    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
 
 /// Errors that can occur during DATA.
 #[derive(Debug, Error)]
 pub enum SmtpDataError {
-    #[error("Write DATA command error")]
-    WriteCommand(#[source] WriteSocketError),
-    #[error("Write DATA command error (unexpected EOF)")]
-    WriteCommandEof,
-    #[error("Write message body error")]
-    WriteBody(#[source] WriteSocketError),
-    #[error("Write message body error (unexpected EOF)")]
-    WriteBodyEof,
-    #[error("Read response error")]
-    Read(#[from] ReadSocketError),
-    #[error("Read response error (unexpected EOF)")]
-    ReadEof,
+    #[error("DATA command write error")]
+    CommandWrite(#[source] SmtpWriteError),
+    #[error("DATA command read error")]
+    CommandRead(#[source] SmtpReadError),
+    #[error("DATA body write error")]
+    BodyWrite(#[source] SmtpWriteError),
+    #[error("DATA body read error")]
+    BodyRead(#[source] SmtpReadError),
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
-    #[error("DATA rejected: {code} {message}")]
-    Rejected { code: u16, message: String },
+    #[error("DATA command rejected: {code} {message}")]
+    CommandRejected { code: u16, message: String },
+    #[error("DATA body rejected: {code} {message}")]
+    BodyRejected { code: u16, message: String },
 }
 
 /// Output emitted when the coroutine terminates.
@@ -42,11 +42,11 @@ pub enum SmtpDataResult {
     Err { err: SmtpDataError },
 }
 
-enum DataState {
-    /// Send DATA command, then read 354 response
-    Command(SmtpBytesSend),
-    /// Send message body, then read final 250 response
-    Body(SmtpBytesSend),
+enum State {
+    CommandWrite(SmtpWrite),
+    CommandRead(SmtpRead),
+    BodyWrite(SmtpWrite),
+    BodyRead(SmtpRead),
 }
 
 /// I/O-free coroutine to send SMTP DATA command and message body.
@@ -54,7 +54,7 @@ enum DataState {
 /// The message body should be the raw email content. This coroutine handles
 /// dot-stuffing (prepending dots to lines starting with dots) automatically.
 pub struct SmtpData {
-    state: DataState,
+    state: State,
     message_body: Option<Vec<u8>>,
     buffer: Vec<u8>,
 }
@@ -69,7 +69,7 @@ impl SmtpData {
         trace!("DATA command to send: {}", escape_byte_string(&encoded));
 
         Self {
-            state: DataState::Command(SmtpBytesSend::new(encoded)),
+            state: State::CommandWrite(SmtpWrite::new(encoded)),
             message_body: Some(message),
             buffer: Vec::new(),
         }
@@ -92,7 +92,6 @@ impl SmtpData {
         // Ensure message ends with CRLF
         if !result.ends_with(b"\r\n") {
             if result.ends_with(b"\n") {
-                // Replace \n with \r\n
                 result.pop();
                 result.extend_from_slice(b"\r\n");
             } else if result.ends_with(b"\r") {
@@ -112,34 +111,31 @@ impl SmtpData {
     pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpDataResult {
         loop {
             match &mut self.state {
-                DataState::Command(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { input } => return SmtpDataResult::Io { input },
-                    SmtpBytesSendResult::WriteErr { err } => {
+                State::CommandWrite(w) => match w.resume(arg.take()) {
+                    SmtpWriteResult::Ok => {
+                        self.state = State::CommandRead(SmtpRead::new());
+                        continue;
+                    }
+                    SmtpWriteResult::Io { input } => return SmtpDataResult::Io { input },
+                    SmtpWriteResult::Err { err } => {
                         return SmtpDataResult::Err {
-                            err: SmtpDataError::WriteCommand(err),
+                            err: SmtpDataError::CommandWrite(err),
                         };
                     }
-                    SmtpBytesSendResult::WriteEof => {
+                },
+                State::CommandRead(r) => match r.resume(arg.take()) {
+                    SmtpReadResult::Io { input } => return SmtpDataResult::Io { input },
+                    SmtpReadResult::Err { err } => {
                         return SmtpDataResult::Err {
-                            err: SmtpDataError::WriteCommandEof,
+                            err: SmtpDataError::CommandRead(err),
                         };
                     }
-                    SmtpBytesSendResult::ReadErr { err } => {
-                        return SmtpDataResult::Err {
-                            err: SmtpDataError::Read(err),
-                        };
-                    }
-                    SmtpBytesSendResult::ReadEof => {
-                        return SmtpDataResult::Err {
-                            err: SmtpDataError::ReadEof,
-                        };
-                    }
-                    SmtpBytesSendResult::Ok { bytes } => {
+                    SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
                         self.buffer.extend_from_slice(&bytes);
 
                         if !Response::is_complete(&self.buffer) {
-                            self.state = DataState::Command(SmtpBytesSend::new(vec![]));
+                            self.state = State::CommandRead(SmtpRead::new());
                             continue;
                         }
 
@@ -147,24 +143,22 @@ impl SmtpData {
                             Ok(response) => {
                                 let response = response.into_static();
 
-                                // Expect 354 START_MAIL_INPUT
                                 if response.code != ReplyCode::START_MAIL_INPUT {
                                     let message = response.text().to_string();
                                     return SmtpDataResult::Err {
-                                        err: SmtpDataError::Rejected {
+                                        err: SmtpDataError::CommandRejected {
                                             code: response.code.code(),
                                             message,
                                         },
                                     };
                                 }
 
-                                // Prepare and send message body
                                 let body = self.message_body.take().unwrap();
                                 let prepared = Self::prepare_body(body);
                                 trace!("message body prepared: {} bytes", prepared.len());
 
                                 self.buffer.clear();
-                                self.state = DataState::Body(SmtpBytesSend::new(prepared));
+                                self.state = State::BodyWrite(SmtpWrite::new(prepared));
                                 continue;
                             }
                             Err(errors) => {
@@ -180,34 +174,31 @@ impl SmtpData {
                         }
                     }
                 },
-                DataState::Body(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { input } => return SmtpDataResult::Io { input },
-                    SmtpBytesSendResult::WriteErr { err } => {
+                State::BodyWrite(w) => match w.resume(arg.take()) {
+                    SmtpWriteResult::Ok => {
+                        self.state = State::BodyRead(SmtpRead::new());
+                        continue;
+                    }
+                    SmtpWriteResult::Io { input } => return SmtpDataResult::Io { input },
+                    SmtpWriteResult::Err { err } => {
                         return SmtpDataResult::Err {
-                            err: SmtpDataError::WriteBody(err),
+                            err: SmtpDataError::BodyWrite(err),
                         };
                     }
-                    SmtpBytesSendResult::WriteEof => {
+                },
+                State::BodyRead(r) => match r.resume(arg.take()) {
+                    SmtpReadResult::Io { input } => return SmtpDataResult::Io { input },
+                    SmtpReadResult::Err { err } => {
                         return SmtpDataResult::Err {
-                            err: SmtpDataError::WriteBodyEof,
+                            err: SmtpDataError::BodyRead(err),
                         };
                     }
-                    SmtpBytesSendResult::ReadErr { err } => {
-                        return SmtpDataResult::Err {
-                            err: SmtpDataError::Read(err),
-                        };
-                    }
-                    SmtpBytesSendResult::ReadEof => {
-                        return SmtpDataResult::Err {
-                            err: SmtpDataError::ReadEof,
-                        };
-                    }
-                    SmtpBytesSendResult::Ok { bytes } => {
+                    SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
                         self.buffer.extend_from_slice(&bytes);
 
                         if !Response::is_complete(&self.buffer) {
-                            self.state = DataState::Body(SmtpBytesSend::new(vec![]));
+                            self.state = State::BodyRead(SmtpRead::new());
                             continue;
                         }
 
@@ -220,7 +211,7 @@ impl SmtpData {
                                 } else {
                                     let message = response.text().to_string();
                                     return SmtpDataResult::Err {
-                                        err: SmtpDataError::Rejected {
+                                        err: SmtpDataError::BodyRejected {
                                             code: response.code.code(),
                                             message,
                                         },

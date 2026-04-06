@@ -1,6 +1,6 @@
 //! I/O-free coroutine to authenticate an SMTP session.
 
-use std::collections::VecDeque;
+use alloc::{boxed::Box, collections::VecDeque, string::String};
 
 use io_socket::io::{SocketInput, SocketOutput};
 use log::debug;
@@ -9,10 +9,7 @@ use thiserror::Error;
 
 use crate::rfc5321::types::ehlo_domain::EhloDomain;
 
-use super::{
-    login::{SmtpAuthenticateLogin, SmtpAuthenticateLoginError, SmtpAuthenticateLoginResult},
-    plain::{SmtpAuthenticatePlain, SmtpAuthenticatePlainError, SmtpAuthenticatePlainResult},
-};
+use super::{login::*, plain::*};
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]

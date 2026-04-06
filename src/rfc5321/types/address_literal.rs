@@ -1,7 +1,7 @@
 //! Module dedicated to the SMTP address literal.
 
-use std::{
-    borrow::Cow,
+use alloc::borrow::Cow;
+use core::{
     fmt,
     net::{Ipv4Addr, Ipv6Addr},
 };

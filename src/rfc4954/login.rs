@@ -1,39 +1,36 @@
 //! I/O-free coroutine to authenticate using SMTP AUTH LOGIN then refresh
 //! capabilities via EHLO.
 
-use io_socket::{
-    coroutines::{read::ReadSocketError, write::WriteSocketError},
-    io::{SocketInput, SocketOutput},
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
 };
+use bounded_static::IntoBoundedStatic;
+use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
-use bounded_static::IntoBoundedStatic;
-
 use crate::{
+    read::{SmtpRead, SmtpReadError, SmtpReadResult},
     rfc4954::types::{auth_mechanism::AuthMechanism, authenticate_data::AuthenticateData},
     rfc5321::{
-        ehlo::{SmtpEhlo, SmtpEhloError, SmtpEhloResult},
+        ehlo::*,
         types::{
             command::Command, ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response,
         },
     },
-    send_bytes::{SmtpBytesSend, SmtpBytesSendResult},
     utils::escape_byte_string,
+    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
 
 /// Errors that can occur during AUTH LOGIN.
 #[derive(Debug, Error)]
 pub enum SmtpAuthenticateLoginError {
-    #[error("Write AUTH LOGIN command error")]
-    Write(#[from] WriteSocketError),
-    #[error("Write AUTH LOGIN command error (unexpected EOF)")]
-    WriteEof,
-    #[error("Read AUTH LOGIN response error")]
-    Read(#[from] ReadSocketError),
-    #[error("Read AUTH LOGIN response error (unexpected EOF)")]
-    ReadEof,
+    #[error(transparent)]
+    Write(#[from] SmtpWriteError),
+    #[error(transparent)]
+    Read(#[from] SmtpReadError),
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
     #[error("AUTH LOGIN rejected: {code} {message}")]
@@ -50,9 +47,12 @@ pub enum SmtpAuthenticateLoginResult {
 }
 
 enum State {
-    Auth(SmtpBytesSend),
-    Username(SmtpBytesSend),
-    Password(SmtpBytesSend),
+    AuthWrite(SmtpWrite),
+    AuthRead(SmtpRead),
+    UsernameWrite(SmtpWrite),
+    UsernameRead(SmtpRead),
+    PasswordWrite(SmtpWrite),
+    PasswordRead(SmtpRead),
     Ehlo(SmtpEhlo),
 }
 
@@ -81,7 +81,7 @@ impl SmtpAuthenticateLogin {
             AuthenticateData::r#continue(password.expose_secret().as_bytes()).to_bytes();
 
         Self {
-            state: State::Auth(SmtpBytesSend::new(encoded)),
+            state: State::AuthWrite(SmtpWrite::new(encoded)),
             domain: Some(domain.into_static()),
             username_bytes,
             password_bytes,
@@ -93,37 +93,31 @@ impl SmtpAuthenticateLogin {
     pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpAuthenticateLoginResult {
         loop {
             match &mut self.state {
-                // Step 1: Send AUTH LOGIN command, read 334 response
-                State::Auth(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { input } => {
+                State::AuthWrite(w) => match w.resume(arg.take()) {
+                    SmtpWriteResult::Ok => {
+                        self.state = State::AuthRead(SmtpRead::new());
+                        continue;
+                    }
+                    SmtpWriteResult::Io { input } => {
                         return SmtpAuthenticateLoginResult::Io { input };
                     }
-                    SmtpBytesSendResult::WriteErr { err } => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::Write(err),
-                        };
+                    SmtpWriteResult::Err { err } => {
+                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
                     }
-                    SmtpBytesSendResult::WriteEof => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::WriteEof,
-                        };
+                },
+                State::AuthRead(r) => match r.resume(arg.take()) {
+                    SmtpReadResult::Io { input } => {
+                        return SmtpAuthenticateLoginResult::Io { input };
                     }
-                    SmtpBytesSendResult::ReadErr { err } => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::Read(err),
-                        };
+                    SmtpReadResult::Err { err } => {
+                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
                     }
-                    SmtpBytesSendResult::ReadEof => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::ReadEof,
-                        };
-                    }
-                    SmtpBytesSendResult::Ok { bytes } => {
+                    SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
                         self.buffer.extend_from_slice(&bytes);
 
                         if !Response::is_complete(&self.buffer) {
-                            self.state = State::Auth(SmtpBytesSend::new(vec![]));
+                            self.state = State::AuthRead(SmtpRead::new());
                             continue;
                         }
 
@@ -132,8 +126,8 @@ impl SmtpAuthenticateLogin {
                                 let response = response.into_static();
                                 if response.code == ReplyCode::AUTH_CONTINUE {
                                     self.buffer.clear();
-                                    let username = std::mem::take(&mut self.username_bytes);
-                                    self.state = State::Username(SmtpBytesSend::new(username));
+                                    let username = core::mem::take(&mut self.username_bytes);
+                                    self.state = State::UsernameWrite(SmtpWrite::new(username));
                                     continue;
                                 } else {
                                     let message = response.text().to_string();
@@ -158,38 +152,31 @@ impl SmtpAuthenticateLogin {
                         }
                     }
                 },
-
-                // Step 2: Send base64(username), read 334 response
-                State::Username(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { input } => {
+                State::UsernameWrite(w) => match w.resume(arg.take()) {
+                    SmtpWriteResult::Ok => {
+                        self.state = State::UsernameRead(SmtpRead::new());
+                        continue;
+                    }
+                    SmtpWriteResult::Io { input } => {
                         return SmtpAuthenticateLoginResult::Io { input };
                     }
-                    SmtpBytesSendResult::WriteErr { err } => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::Write(err),
-                        };
+                    SmtpWriteResult::Err { err } => {
+                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
                     }
-                    SmtpBytesSendResult::WriteEof => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::WriteEof,
-                        };
+                },
+                State::UsernameRead(r) => match r.resume(arg.take()) {
+                    SmtpReadResult::Io { input } => {
+                        return SmtpAuthenticateLoginResult::Io { input };
                     }
-                    SmtpBytesSendResult::ReadErr { err } => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::Read(err),
-                        };
+                    SmtpReadResult::Err { err } => {
+                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
                     }
-                    SmtpBytesSendResult::ReadEof => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::ReadEof,
-                        };
-                    }
-                    SmtpBytesSendResult::Ok { bytes } => {
+                    SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
                         self.buffer.extend_from_slice(&bytes);
 
                         if !Response::is_complete(&self.buffer) {
-                            self.state = State::Username(SmtpBytesSend::new(vec![]));
+                            self.state = State::UsernameRead(SmtpRead::new());
                             continue;
                         }
 
@@ -198,8 +185,8 @@ impl SmtpAuthenticateLogin {
                                 let response = response.into_static();
                                 if response.code == ReplyCode::AUTH_CONTINUE {
                                     self.buffer.clear();
-                                    let password = std::mem::take(&mut self.password_bytes);
-                                    self.state = State::Password(SmtpBytesSend::new(password));
+                                    let password = core::mem::take(&mut self.password_bytes);
+                                    self.state = State::PasswordWrite(SmtpWrite::new(password));
                                     continue;
                                 } else {
                                     let message = response.text().to_string();
@@ -224,38 +211,31 @@ impl SmtpAuthenticateLogin {
                         }
                     }
                 },
-
-                // Step 3: Send base64(password), read 235 response
-                State::Password(io) => match io.resume(arg.take()) {
-                    SmtpBytesSendResult::Io { input } => {
+                State::PasswordWrite(w) => match w.resume(arg.take()) {
+                    SmtpWriteResult::Ok => {
+                        self.state = State::PasswordRead(SmtpRead::new());
+                        continue;
+                    }
+                    SmtpWriteResult::Io { input } => {
                         return SmtpAuthenticateLoginResult::Io { input };
                     }
-                    SmtpBytesSendResult::WriteErr { err } => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::Write(err),
-                        };
+                    SmtpWriteResult::Err { err } => {
+                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
                     }
-                    SmtpBytesSendResult::WriteEof => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::WriteEof,
-                        };
+                },
+                State::PasswordRead(r) => match r.resume(arg.take()) {
+                    SmtpReadResult::Io { input } => {
+                        return SmtpAuthenticateLoginResult::Io { input };
                     }
-                    SmtpBytesSendResult::ReadErr { err } => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::Read(err),
-                        };
+                    SmtpReadResult::Err { err } => {
+                        return SmtpAuthenticateLoginResult::Err { err: err.into() };
                     }
-                    SmtpBytesSendResult::ReadEof => {
-                        return SmtpAuthenticateLoginResult::Err {
-                            err: SmtpAuthenticateLoginError::ReadEof,
-                        };
-                    }
-                    SmtpBytesSendResult::Ok { bytes } => {
+                    SmtpReadResult::Ok { bytes } => {
                         trace!("read bytes: {}", escape_byte_string(&bytes));
                         self.buffer.extend_from_slice(&bytes);
 
                         if !Response::is_complete(&self.buffer) {
-                            self.state = State::Password(SmtpBytesSend::new(vec![]));
+                            self.state = State::PasswordRead(SmtpRead::new());
                             continue;
                         }
 
@@ -289,8 +269,6 @@ impl SmtpAuthenticateLogin {
                         }
                     }
                 },
-
-                // Step 4: Refresh capabilities via EHLO
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
                     SmtpEhloResult::Io { input } => {
                         return SmtpAuthenticateLoginResult::Io { input };

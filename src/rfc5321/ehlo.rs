@@ -1,36 +1,33 @@
 //! I/O-free coroutine to send SMTP EHLO command.
 
-use std::collections::HashSet;
-
-use bounded_static::IntoBoundedStatic;
-use io_socket::{
-    coroutines::{read::ReadSocketError, write::WriteSocketError},
-    io::{SocketInput, SocketOutput},
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
 };
+use bounded_static::IntoBoundedStatic;
+use hashbrown::HashSet;
+use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
+    read::{SmtpRead, SmtpReadError, SmtpReadResult},
     rfc5321::types::{
         command::Command,
         ehlo_domain::EhloDomain,
         ehlo_response::{Capability, EhloResponse},
     },
-    send_bytes::{SmtpBytesSend, SmtpBytesSendResult},
     utils::escape_byte_string,
+    write::{SmtpWrite, SmtpWriteError, SmtpWriteResult},
 };
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
 pub enum SmtpEhloError {
-    #[error("Write EHLO command to SMTP socket error")]
-    Write(#[from] WriteSocketError),
-    #[error("Write EHLO command to SMTP socket error (unexpected EOF)")]
-    WriteEof,
-    #[error("Read EHLO response from SMTP socket error")]
-    Read(#[from] ReadSocketError),
-    #[error("Read EHLO response from SMTP socket error (unexpected EOF)")]
-    ReadEof,
+    #[error(transparent)]
+    Write(#[from] SmtpWriteError),
+    #[error(transparent)]
+    Read(#[from] SmtpReadError),
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
 }
@@ -48,9 +45,14 @@ pub enum SmtpEhloResult {
     },
 }
 
+enum State {
+    Write(SmtpWrite),
+    Read(SmtpRead),
+}
+
 /// I/O-free coroutine to send SMTP EHLO command.
 pub struct SmtpEhlo {
-    io: SmtpBytesSend,
+    state: State,
     buffer: Vec<u8>,
 }
 
@@ -61,7 +63,7 @@ impl SmtpEhlo {
         trace!("EHLO command to send: {}", escape_byte_string(&encoded));
 
         Self {
-            io: SmtpBytesSend::new(encoded),
+            state: State::Write(SmtpWrite::new(encoded)),
             buffer: Vec::new(),
         }
     }
@@ -69,55 +71,50 @@ impl SmtpEhlo {
     /// Makes the coroutine progress.
     pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpEhloResult {
         loop {
-            match self.io.resume(arg.take()) {
-                SmtpBytesSendResult::Io { input } => return SmtpEhloResult::Io { input },
-                SmtpBytesSendResult::WriteErr { err } => {
-                    return SmtpEhloResult::Err {
-                        err: SmtpEhloError::Write(err),
-                    };
-                }
-                SmtpBytesSendResult::WriteEof => {
-                    return SmtpEhloResult::Err {
-                        err: SmtpEhloError::WriteEof,
-                    };
-                }
-                SmtpBytesSendResult::ReadErr { err } => {
-                    return SmtpEhloResult::Err {
-                        err: SmtpEhloError::Read(err),
-                    };
-                }
-                SmtpBytesSendResult::ReadEof => {
-                    return SmtpEhloResult::Err {
-                        err: SmtpEhloError::ReadEof,
-                    };
-                }
-                SmtpBytesSendResult::Ok { bytes } => {
-                    trace!("read bytes: {}", escape_byte_string(&bytes));
-                    self.buffer.extend_from_slice(&bytes);
-
-                    if !EhloResponse::is_complete(&self.buffer) {
-                        self.io = SmtpBytesSend::new(vec![]);
+            match &mut self.state {
+                State::Write(w) => match w.resume(arg.take()) {
+                    SmtpWriteResult::Ok => {
+                        self.state = State::Read(SmtpRead::new());
                         continue;
                     }
+                    SmtpWriteResult::Io { input } => return SmtpEhloResult::Io { input },
+                    SmtpWriteResult::Err { err } => {
+                        return SmtpEhloResult::Err { err: err.into() };
+                    }
+                },
+                State::Read(r) => match r.resume(arg.take()) {
+                    SmtpReadResult::Io { input } => return SmtpEhloResult::Io { input },
+                    SmtpReadResult::Err { err } => {
+                        return SmtpEhloResult::Err { err: err.into() };
+                    }
+                    SmtpReadResult::Ok { bytes } => {
+                        trace!("read bytes: {}", escape_byte_string(&bytes));
+                        self.buffer.extend_from_slice(&bytes);
 
-                    match EhloResponse::parse(&self.buffer) {
-                        Ok(response) => {
-                            let response = response.into_static();
-                            let capabilities = response.capabilities.into_iter().collect();
-                            return SmtpEhloResult::Ok { capabilities };
+                        if !EhloResponse::is_complete(&self.buffer) {
+                            self.state = State::Read(SmtpRead::new());
+                            continue;
                         }
-                        Err(errors) => {
-                            let reason = errors
-                                .iter()
-                                .map(|e| e.to_string())
-                                .collect::<Vec<_>>()
-                                .join("; ");
-                            return SmtpEhloResult::Err {
-                                err: SmtpEhloError::ParseResponse(reason),
-                            };
+
+                        match EhloResponse::parse(&self.buffer) {
+                            Ok(response) => {
+                                let response = response.into_static();
+                                let capabilities = response.capabilities.into_iter().collect();
+                                return SmtpEhloResult::Ok { capabilities };
+                            }
+                            Err(errors) => {
+                                let reason = errors
+                                    .iter()
+                                    .map(|e| e.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                return SmtpEhloResult::Err {
+                                    err: SmtpEhloError::ParseResponse(reason),
+                                };
+                            }
                         }
                     }
-                }
+                },
             }
         }
     }
