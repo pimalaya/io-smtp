@@ -1,6 +1,8 @@
 //! I/O-free coroutine to authenticate using SMTP AUTH PLAIN then refresh
 //! capabilities via EHLO.
 
+use core::mem;
+
 use alloc::{
     borrow::Cow,
     string::{String, ToString},
@@ -8,20 +10,17 @@ use alloc::{
 };
 
 use bounded_static::IntoBoundedStatic;
-use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use thiserror::Error;
 
 use crate::{
-    read::*,
     rfc4954::auth::SmtpAuthCommand,
     rfc5321::{
-        ehlo::*,
+        ehlo::{SmtpEhlo, SmtpEhloError, SmtpEhloResult},
         types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
-    write::*,
 };
 
 /// The SASL mechanism name as it appears on the wire.
@@ -30,10 +29,8 @@ pub const PLAIN: &str = "PLAIN";
 /// Errors that can occur during AUTH PLAIN.
 #[derive(Debug, Error)]
 pub enum SmtpPlainError {
-    #[error(transparent)]
-    Write(#[from] SmtpWriteError),
-    #[error(transparent)]
-    Read(#[from] SmtpReadError),
+    #[error("Reached unexpected EOF")]
+    Eof,
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
     #[error("AUTH PLAIN rejected: {code} {message}")]
@@ -42,16 +39,19 @@ pub enum SmtpPlainError {
     Ehlo(#[from] SmtpEhloError),
 }
 
-/// Output emitted when the coroutine terminates.
+/// Result returned by [`SmtpPlain::resume`].
+#[derive(Debug)]
 pub enum SmtpPlainResult {
     Ok,
-    Io { input: SocketInput },
-    Err { err: SmtpPlainError },
+    WantsRead,
+    WantsWrite(Vec<u8>),
+    Err(SmtpPlainError),
 }
 
 enum State {
-    Write(SmtpWrite),
-    Read(SmtpRead),
+    /// Awaiting the AUTH PLAIN reply.
+    AwaitAuth,
+    /// Auth succeeded; refreshing capabilities via EHLO.
     Ehlo(SmtpEhlo),
 }
 
@@ -62,8 +62,10 @@ enum State {
 /// where authzid is optional (usually empty), authcid is the username.
 pub struct SmtpPlain {
     state: State,
+    wants_read: bool,
+    wants_write: Option<Vec<u8>>,
     domain: Option<EhloDomain<'static>>,
-    buffer: Vec<u8>,
+    buf: Vec<u8>,
 }
 
 impl SmtpPlain {
@@ -72,95 +74,86 @@ impl SmtpPlain {
     /// Uses initial response (IR) to send credentials in a single round-trip.
     pub fn new(login: &str, password: &SecretString, domain: EhloDomain<'_>) -> Self {
         let mut payload = Vec::new();
-        payload.push(0); // empty authzid
+        payload.push(0);
         payload.extend_from_slice(login.as_bytes());
         payload.push(0);
         payload.extend_from_slice(password.expose_secret().as_bytes());
 
         trace!("sending AUTH PLAIN command");
 
+        let bytes = SmtpAuthCommand {
+            mechanism: Cow::Borrowed(PLAIN),
+            initial_response: Some(SecretBox::new(payload.into_boxed_slice())),
+        }
+        .into();
+
         Self {
-            state: State::Write(SmtpWrite::new(SmtpAuthCommand {
-                mechanism: Cow::Borrowed(PLAIN),
-                initial_response: Some(SecretBox::new(payload.into_boxed_slice())),
-            })),
+            state: State::AwaitAuth,
+            wants_read: false,
+            wants_write: Some(bytes),
             domain: Some(domain.into_static()),
-            buffer: Vec::new(),
+            buf: Vec::new(),
         }
     }
 
-    /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpPlainResult {
+    /// Advances the coroutine.
+    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpPlainResult {
         loop {
+            if let Some(bytes) = self.wants_write.take() {
+                return SmtpPlainResult::WantsWrite(bytes);
+            }
+
+            if mem::take(&mut self.wants_read) {
+                return SmtpPlainResult::WantsRead;
+            }
+
             match &mut self.state {
-                State::Write(w) => match w.resume(arg.take()) {
-                    SmtpWriteResult::Ok => {
-                        self.state = State::Read(SmtpRead::new());
+                State::AwaitAuth => {
+                    match arg.take() {
+                        Some(&[]) => return SmtpPlainResult::Err(SmtpPlainError::Eof),
+                        Some(data) => {
+                            trace!("read SMTP bytes: {}", escape_byte_string(data));
+                            self.buf.extend_from_slice(data);
+                        }
+                        None => {}
+                    }
+
+                    if !Response::is_complete(&self.buf) {
+                        self.wants_read = true;
                         continue;
                     }
-                    SmtpWriteResult::Io { input } => {
-                        return SmtpPlainResult::Io { input };
-                    }
-                    SmtpWriteResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpPlainResult::Err { err };
-                    }
-                },
-                State::Read(r) => match r.resume(arg.take()) {
-                    SmtpReadResult::Io { input } => {
-                        return SmtpPlainResult::Io { input };
-                    }
-                    SmtpReadResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpPlainResult::Err { err };
-                    }
-                    SmtpReadResult::Ok { bytes } => {
-                        trace!("read bytes: {}", escape_byte_string(&bytes));
-                        self.buffer.extend_from_slice(&bytes);
 
-                        if !Response::is_complete(&self.buffer) {
-                            self.state = State::Read(SmtpRead::new());
-                            continue;
+                    let response = match Response::parse(&self.buf) {
+                        Ok(response) => response.into_static(),
+                        Err(errors) => {
+                            let reason = errors
+                                .iter()
+                                .map(|e| e.to_string())
+                                .collect::<Vec<_>>()
+                                .join("; ");
+
+                            return SmtpPlainResult::Err(SmtpPlainError::ParseResponse(reason));
                         }
+                    };
 
-                        match Response::parse(&self.buffer) {
-                            Ok(response) => {
-                                let response: Response<'static> = response.into_static();
-
-                                if response.code == ReplyCode::AUTH_SUCCESSFUL {
-                                    let domain = self.domain.take().unwrap();
-                                    self.state = State::Ehlo(SmtpEhlo::new(domain));
-                                    continue;
-                                }
-
-                                let code = response.code.code();
-                                let message = response.text().to_string();
-                                let err = SmtpPlainError::Rejected { code, message };
-                                return SmtpPlainResult::Err { err };
-                            }
-                            Err(errors) => {
-                                let reason = errors
-                                    .iter()
-                                    .map(|e| e.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("; ");
-
-                                let err = SmtpPlainError::ParseResponse(reason);
-                                return SmtpPlainResult::Err { err };
-                            }
-                        }
+                    if response.code != ReplyCode::AUTH_SUCCESSFUL {
+                        let code = response.code.code();
+                        let message = response.text().to_string();
+                        return SmtpPlainResult::Err(SmtpPlainError::Rejected { code, message });
                     }
-                },
+
+                    self.buf.clear();
+                    let domain = self.domain.take().expect("domain taken twice");
+                    self.state = State::Ehlo(SmtpEhlo::new(domain));
+                }
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpEhloResult::Io { input } => {
-                        return SmtpPlainResult::Io { input };
+                    SmtpEhloResult::Ok { .. } => return SmtpPlainResult::Ok,
+                    SmtpEhloResult::WantsRead => return SmtpPlainResult::WantsRead,
+                    SmtpEhloResult::WantsWrite(bytes) => {
+                        return SmtpPlainResult::WantsWrite(bytes);
                     }
-                    SmtpEhloResult::Ok { .. } => {
-                        return SmtpPlainResult::Ok;
-                    }
-                    SmtpEhloResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpPlainResult::Err { err };
+                    SmtpEhloResult::Err(err) => {
+                        return SmtpPlainResult::Err(SmtpPlainError::Ehlo(err));
                     }
                 },
             }

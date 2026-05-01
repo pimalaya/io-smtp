@@ -305,22 +305,12 @@ dependencies = [
  "chumsky",
  "env_logger",
  "hmac",
- "io-socket",
  "log",
  "pbkdf2",
  "rustls",
  "rustls-platform-verifier",
  "secrecy",
  "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "io-socket"
-version = "0.0.1"
-source = "git+https://github.com/pimalaya/io-socket#5899582a02a2bde78a4c92e5a2ed2f2cfea54c29"
-dependencies = [
- "log",
  "thiserror",
 ]
 

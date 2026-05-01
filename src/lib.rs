@@ -6,7 +6,6 @@
 extern crate alloc;
 
 pub mod login;
-pub mod read;
 pub mod rfc1870;
 pub mod rfc3207;
 pub mod rfc3461;
@@ -18,4 +17,3 @@ pub mod rfc7628;
 pub mod rfc7677;
 pub mod send;
 pub mod utils;
-pub mod write;

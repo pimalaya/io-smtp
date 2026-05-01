@@ -1,19 +1,18 @@
 //! I/O-free coroutine to perform SMTP STARTTLS negotiation.
 
+use core::mem;
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
 
-use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
-    read::*,
     rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
-    write::*,
 };
 
 /// The STARTTLS command (RFC 3207).
@@ -28,33 +27,43 @@ impl From<SmtpStartTlsCommand> for Vec<u8> {
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
 pub enum SmtpStartTlsError {
-    #[error(transparent)]
-    Write(#[from] SmtpWriteError),
-    #[error(transparent)]
-    Read(#[from] SmtpReadError),
+    #[error("Reached unexpected EOF")]
+    Eof,
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
     #[error("STARTTLS rejected by server: {code} {message}")]
     Rejected { code: u16, message: String },
 }
 
-/// Output emitted when the coroutine terminates its progression.
+/// Result returned by [`SmtpStartTls::resume`].
 #[derive(Debug)]
 pub enum SmtpStartTlsResult {
-    Ok,
-    Io { input: SocketInput },
-    Err { err: SmtpStartTlsError },
-}
-
-enum State {
-    Write(SmtpWrite),
-    Read(SmtpRead),
+    /// The server accepted STARTTLS. The caller must now upgrade the
+    /// socket to TLS.
+    ///
+    /// The single payload carries any bytes the coroutine pre-read
+    /// from the socket past the `220` reply, so the caller can re-feed
+    /// them after the TLS handshake. A well-behaved server never
+    /// speaks before the handshake (any pre-handshake bytes are a
+    /// classic STARTTLS-injection signal — RFC 3207 §6), so the
+    /// payload is normally empty.
+    WantsStartTls(Vec<u8>),
+    WantsRead,
+    WantsWrite(Vec<u8>),
+    Err(SmtpStartTlsError),
 }
 
 /// I/O-free coroutine to perform SMTP STARTTLS negotiation.
 pub struct SmtpStartTls {
-    state: State,
-    buffer: Vec<u8>,
+    wants_read: bool,
+    wants_write: Option<Vec<u8>>,
+    buf: Vec<u8>,
+}
+
+impl Default for SmtpStartTls {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SmtpStartTls {
@@ -63,71 +72,58 @@ impl SmtpStartTls {
         trace!("sending STARTTLS command");
 
         Self {
-            state: State::Write(SmtpWrite::new(SmtpStartTlsCommand)),
-            buffer: Vec::new(),
+            wants_read: false,
+            wants_write: Some(SmtpStartTlsCommand.into()),
+            buf: Vec::new(),
         }
     }
 
-    /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpStartTlsResult {
+    /// Advances the coroutine.
+    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpStartTlsResult {
         loop {
-            match &mut self.state {
-                State::Write(w) => match w.resume(arg.take()) {
-                    SmtpWriteResult::Ok => {
-                        self.state = State::Read(SmtpRead::new());
-                        continue;
-                    }
-                    SmtpWriteResult::Io { input } => return SmtpStartTlsResult::Io { input },
-                    SmtpWriteResult::Err { err } => {
-                        return SmtpStartTlsResult::Err { err: err.into() };
-                    }
-                },
-                State::Read(r) => match r.resume(arg.take()) {
-                    SmtpReadResult::Io { input } => return SmtpStartTlsResult::Io { input },
-                    SmtpReadResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpStartTlsResult::Err { err };
-                    }
-                    SmtpReadResult::Ok { bytes } => {
-                        trace!("read bytes: {}", escape_byte_string(&bytes));
-                        self.buffer.extend_from_slice(&bytes);
-
-                        if !Response::is_complete(&self.buffer) {
-                            self.state = State::Read(SmtpRead::new());
-                            continue;
-                        }
-
-                        match Response::parse(&self.buffer) {
-                            Ok(response) => {
-                                if response.code == ReplyCode::SERVICE_READY {
-                                    return SmtpStartTlsResult::Ok;
-                                }
-
-                                let message = response.text().to_string();
-                                let code = response.code.code();
-                                let err = SmtpStartTlsError::Rejected { code, message };
-                                return SmtpStartTlsResult::Err { err };
-                            }
-                            Err(errors) => {
-                                let reason = errors
-                                    .iter()
-                                    .map(|e| e.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("; ");
-
-                                let err = SmtpStartTlsError::ParseResponse(reason);
-                                return SmtpStartTlsResult::Err { err };
-                            }
-                        }
-                    }
-                },
+            if let Some(bytes) = self.wants_write.take() {
+                return SmtpStartTlsResult::WantsWrite(bytes);
             }
-        }
-    }
-}
 
-impl Default for SmtpStartTls {
-    fn default() -> Self {
-        Self::new()
+            if mem::take(&mut self.wants_read) {
+                return SmtpStartTlsResult::WantsRead;
+            }
+
+            match arg.take() {
+                Some(&[]) => return SmtpStartTlsResult::Err(SmtpStartTlsError::Eof),
+                Some(data) => {
+                    trace!("read SMTP bytes: {}", escape_byte_string(data));
+                    self.buf.extend_from_slice(data);
+                }
+                None => {}
+            }
+
+            if !Response::is_complete(&self.buf) {
+                self.wants_read = true;
+                continue;
+            }
+
+            return match Response::parse(&self.buf) {
+                Ok(response) => {
+                    if response.code == ReplyCode::SERVICE_READY {
+                        let _ = mem::take(&mut self.buf);
+                        SmtpStartTlsResult::WantsStartTls(Vec::new())
+                    } else {
+                        let code = response.code.code();
+                        let message = response.text().to_string();
+                        SmtpStartTlsResult::Err(SmtpStartTlsError::Rejected { code, message })
+                    }
+                }
+                Err(errors) => {
+                    let reason = errors
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+
+                    SmtpStartTlsResult::Err(SmtpStartTlsError::ParseResponse(reason))
+                }
+            };
+        }
     }
 }

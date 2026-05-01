@@ -1,13 +1,13 @@
 # I/O SMTP [![Documentation](https://img.shields.io/docsrs/io-smtp?style=flat&logo=docs.rs&logoColor=white)](https://docs.rs/io-smtp/latest/io_smtp) [![Matrix](https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white)](https://matrix.to/#/#pimalaya:matrix.org) [![Mastodon](https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white)](https://fosstodon.org/@pimalaya)
 
-**I/O-free** SMTP client library written in Rust, based on [io-socket](https://github.com/pimalaya/io-socket)
+**I/O-free** SMTP client library written in Rust.
 
 ## Table of contents
 
 - [RFC coverage](#rfc-coverage)
 - [Examples](#examples)
   - [Send EHLO via SMTP (blocking)](#send-ehlo-via-smtp-blocking)
-  - [Send a message via SMTP (async)](#send-a-message-via-smtp-async)
+  - [Send a message via SMTP](#send-a-message-via-smtp)
 - [More examples](#more-examples)
 - [License](#license)
 - [Social](#social)
@@ -45,67 +45,85 @@ This library implements SMTP as I/O-agnostic coroutines — no sockets, no async
 ### Send EHLO via SMTP (blocking)
 
 ```rust,ignore
-use std::net::TcpStream;
+use std::{io::{Read, Write}, net::TcpStream};
 
 use io_smtp::rfc5321::{
     ehlo::{SmtpEhlo, SmtpEhloResult},
     greeting::{GetSmtpGreeting, GetSmtpGreetingResult},
     types::domain::Domain,
 };
-use io_socket::runtimes::std_stream::handle;
 
 let mut stream = TcpStream::connect("smtp.example.com:25").unwrap();
 let domain = Domain::parse(b"localhost").unwrap();
+let mut buf = [0u8; 4096];
 
 // Read greeting
 let mut coroutine = GetSmtpGreeting::new();
-let mut arg = None;
+let mut chunk: Vec<u8>;
+let mut arg: Option<&[u8]> = None;
 
 loop {
     match coroutine.resume(arg.take()) {
         GetSmtpGreetingResult::Ok { .. } => break,
-        GetSmtpGreetingResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
-        GetSmtpGreetingResult::Err { err } => panic!("{err}"),
+        GetSmtpGreetingResult::WantsRead => {
+            let n = stream.read(&mut buf).unwrap();
+            chunk = buf[..n].to_vec();
+            arg = Some(&chunk);
+        }
+        GetSmtpGreetingResult::Err(err) => panic!("{err}"),
     }
 }
 
 // Send EHLO
 let mut coroutine = SmtpEhlo::new(domain.into());
-let mut arg = None;
+let mut chunk: Vec<u8>;
+let mut arg: Option<&[u8]> = None;
 
 let capabilities = loop {
     match coroutine.resume(arg.take()) {
-        SmtpEhloResult::Ok { capabilities } => break capabilities,
-        SmtpEhloResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
-        SmtpEhloResult::Err { err } => panic!("{err}"),
+        SmtpEhloResult::Ok { capabilities, .. } => break capabilities,
+        SmtpEhloResult::WantsWrite(bytes) => stream.write_all(&bytes).unwrap(),
+        SmtpEhloResult::WantsRead => {
+            let n = stream.read(&mut buf).unwrap();
+            chunk = buf[..n].to_vec();
+            arg = Some(&chunk);
+        }
+        SmtpEhloResult::Err(err) => panic!("{err}"),
     }
 };
 
 println!("Server capabilities: {capabilities:?}");
 ```
 
-### Send a message via SMTP (async)
+### Send a message via SMTP
 
 ```rust,ignore
+use std::{io::{Read, Write}, net::TcpStream};
+
 use io_smtp::send::{SmtpMessageSend, SmtpMessageSendResult};
 use io_smtp::rfc5321::types::{forward_path::ForwardPath, reverse_path::ReversePath};
-use io_socket::runtimes::tokio_stream::handle;
-use tokio::net::TcpStream;
 
-let mut stream = TcpStream::connect("smtp.example.com:25").await.unwrap();
+let mut stream = TcpStream::connect("smtp.example.com:25").unwrap();
+let mut buf = [0u8; 4096];
 
 let from: ReversePath = "<sender@example.com>".parse().unwrap();
 let to: ForwardPath = "<recipient@example.com>".parse().unwrap();
 let message = b"From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: Test\r\n\r\nHello!".to_vec();
 
 let mut coroutine = SmtpMessageSend::new(from, [to], message);
-let mut arg = None;
+let mut chunk: Vec<u8>;
+let mut arg: Option<&[u8]> = None;
 
 loop {
     match coroutine.resume(arg.take()) {
         SmtpMessageSendResult::Ok => break,
-        SmtpMessageSendResult::Io { input } => arg = Some(handle(&mut stream, input).await.unwrap()),
-        SmtpMessageSendResult::Err { err } => panic!("{err}"),
+        SmtpMessageSendResult::WantsWrite(bytes) => stream.write_all(&bytes).unwrap(),
+        SmtpMessageSendResult::WantsRead => {
+            let n = stream.read(&mut buf).unwrap();
+            chunk = buf[..n].to_vec();
+            arg = Some(&chunk);
+        }
+        SmtpMessageSendResult::Err(err) => panic!("{err}"),
     }
 }
 ```

@@ -1,91 +1,96 @@
 //! I/O-free coroutine to read the greeting from an SMTP server.
 
+use core::mem;
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
 
 use bounded_static::IntoBoundedStatic;
-use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
-use crate::{read::*, rfc5321::types::greeting::Greeting, utils::escape_byte_string};
+use crate::{rfc5321::types::greeting::Greeting, utils::escape_byte_string};
 
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
 pub enum GetSmtpGreetingError {
-    #[error(transparent)]
-    Io(#[from] SmtpReadError),
+    #[error("Reached unexpected EOF")]
+    Eof,
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
 }
 
-/// Output emitted when the coroutine terminates its progression.
+/// Result returned by [`GetSmtpGreeting::resume`].
+#[derive(Debug)]
 pub enum GetSmtpGreetingResult {
-    Ok { greeting: Greeting<'static> },
-    Io { input: SocketInput },
-    Err { err: GetSmtpGreetingError },
+    Ok {
+        greeting: Greeting<'static>,
+        remaining: Vec<u8>,
+    },
+    WantsRead,
+    Err(GetSmtpGreetingError),
 }
 
 /// I/O-free coroutine to read the greeting from an SMTP server.
+#[derive(Debug, Default)]
 pub struct GetSmtpGreeting {
-    io: SmtpRead,
-    buffer: Vec<u8>,
+    wants_read: bool,
+    buf: Vec<u8>,
 }
 
 impl GetSmtpGreeting {
     /// Creates a new coroutine.
     pub fn new() -> Self {
-        Self {
-            io: SmtpRead::new(),
-            buffer: Vec::new(),
-        }
+        Self::default()
     }
 
-    /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> GetSmtpGreetingResult {
+    /// Advances the coroutine.
+    ///
+    /// Pass [`None`] when there is no data to provide (initial call).
+    /// Pass `Some(data)` with bytes read from the socket after a
+    /// [`GetSmtpGreetingResult::WantsRead`]. Pass `Some(&[])` to
+    /// signal EOF.
+    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> GetSmtpGreetingResult {
         loop {
-            match self.io.resume(arg.take()) {
-                SmtpReadResult::Io { input } => return GetSmtpGreetingResult::Io { input },
-                SmtpReadResult::Err { err } => {
-                    let err = err.into();
-                    return GetSmtpGreetingResult::Err { err };
-                }
-                SmtpReadResult::Ok { bytes } => {
-                    trace!("read SMTP bytes: {}", escape_byte_string(&bytes));
-                    self.buffer.extend_from_slice(&bytes);
-
-                    if !Greeting::is_complete(&self.buffer) {
-                        self.io = SmtpRead::new();
-                        continue;
-                    }
-
-                    match Greeting::parse(&self.buffer) {
-                        Ok(greeting) => {
-                            return GetSmtpGreetingResult::Ok {
-                                greeting: greeting.into_static(),
-                            };
-                        }
-                        Err(errors) => {
-                            let reason = errors
-                                .iter()
-                                .map(|e| e.to_string())
-                                .collect::<Vec<_>>()
-                                .join("; ");
-
-                            let err = GetSmtpGreetingError::ParseResponse(reason);
-                            return GetSmtpGreetingResult::Err { err };
-                        }
-                    }
-                }
+            if mem::take(&mut self.wants_read) {
+                return GetSmtpGreetingResult::WantsRead;
             }
-        }
-    }
-}
 
-impl Default for GetSmtpGreeting {
-    fn default() -> Self {
-        Self::new()
+            match arg.take() {
+                Some(&[]) => return GetSmtpGreetingResult::Err(GetSmtpGreetingError::Eof),
+                Some(data) => {
+                    trace!("read SMTP bytes: {}", escape_byte_string(data));
+                    self.buf.extend_from_slice(data);
+                }
+                None => {}
+            }
+
+            if !Greeting::is_complete(&self.buf) {
+                self.wants_read = true;
+                continue;
+            }
+
+            return match Greeting::parse(&self.buf) {
+                Ok(greeting) => {
+                    let greeting = greeting.into_static();
+                    let _ = mem::take(&mut self.buf);
+                    GetSmtpGreetingResult::Ok {
+                        greeting,
+                        remaining: Vec::new(),
+                    }
+                }
+                Err(errors) => {
+                    let reason = errors
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+
+                    GetSmtpGreetingResult::Err(GetSmtpGreetingError::ParseResponse(reason))
+                }
+            };
+        }
     }
 }

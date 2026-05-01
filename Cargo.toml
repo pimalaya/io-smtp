@@ -13,12 +13,11 @@ documentation = "https://docs.rs/io-smtp"
 repository = "https://github.com/pimalaya/io-smtp"
 
 [features]
-default = []
+default = ["scram"]
 scram = ["dep:hmac", "dep:pbkdf2", "dep:sha2"]
 
 [dev-dependencies]
 env_logger = "0.11"
-io-socket = { version = "0.0.1", default-features = false, features = ["std-stream"] }
 rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-platform-verifier = "0.7"
 
@@ -28,12 +27,8 @@ bounded-static = { version = "0.8", default-features = false, features = ["alloc
 bounded-static-derive = { version = "0.8", default-features = false }
 chumsky = { version = "1.0.0-alpha.7", default-features = false }
 hmac = { version = "0.13", optional = true, default-features = false }
-io-socket = { version = "0.0.1", default-features = false }
 log = { version = "0.4", default-features = false }
 pbkdf2 = { version = "0.13.0-rc.10", optional = true, default-features = false, features = ["hmac"] }
 secrecy = { version = "0.10", default-features = false }
 sha2 = { version = "0.11", optional = true, default-features = false }
 thiserror = { version = "2", default-features = false }
-
-[patch.crates-io]
-io-socket.git = "https://github.com/pimalaya/io-socket"

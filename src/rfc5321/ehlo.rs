@@ -1,5 +1,7 @@
 //! I/O-free coroutine to send SMTP EHLO command.
 
+use core::mem;
+
 use alloc::{
     borrow::Cow,
     string::{String, ToString},
@@ -7,15 +9,12 @@ use alloc::{
 };
 
 use bounded_static::IntoBoundedStatic;
-use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
-    read::*,
     rfc5321::types::{ehlo_domain::EhloDomain, ehlo_response::EhloResponse},
     utils::escape_byte_string,
-    write::*,
 };
 
 /// The EHLO command (RFC 5321 §4.1.1.1).
@@ -36,41 +35,36 @@ impl<'a> From<SmtpEhloCommand<'a>> for Vec<u8> {
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
 pub enum SmtpEhloError {
-    #[error(transparent)]
-    Write(#[from] SmtpWriteError),
-    #[error(transparent)]
-    Read(#[from] SmtpReadError),
+    #[error("Reached unexpected EOF")]
+    Eof,
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
 }
 
-/// Output emitted when the coroutine terminates its progression.
+/// Result returned by [`SmtpEhlo::resume`].
+#[derive(Debug)]
 pub enum SmtpEhloResult {
+    /// The coroutine has successfully terminated.
+    ///
+    /// `capabilities` are the raw capability strings from the EHLO
+    /// response (e.g. `"AUTH PLAIN LOGIN"`, `"SIZE 10240000"`). Each
+    /// entry is the full capability line after the initial domain
+    /// greeting line. Parse mechanism-specific parameters using the
+    /// relevant RFC module.
     Ok {
-        /// Raw capability strings from the EHLO response (e.g. `"AUTH
-        /// PLAIN LOGIN"`, `"SIZE 10240000"`).  Each entry is the full
-        /// capability line after the initial domain/greeting line.
-        /// Parse mechanism-specific parameters using the relevant RFC
-        /// module.
         capabilities: Vec<Cow<'static, str>>,
+        remaining: Vec<u8>,
     },
-    Io {
-        input: SocketInput,
-    },
-    Err {
-        err: SmtpEhloError,
-    },
-}
-
-enum State {
-    Write(SmtpWrite),
-    Read(SmtpRead),
+    WantsRead,
+    WantsWrite(Vec<u8>),
+    Err(SmtpEhloError),
 }
 
 /// I/O-free coroutine to send SMTP EHLO command.
 pub struct SmtpEhlo {
-    state: State,
-    buffer: Vec<u8>,
+    wants_read: bool,
+    wants_write: Option<Vec<u8>>,
+    buf: Vec<u8>,
 }
 
 impl SmtpEhlo {
@@ -78,61 +72,59 @@ impl SmtpEhlo {
     pub fn new(domain: EhloDomain<'_>) -> Self {
         trace!("sending EHLO command");
 
+        let bytes = SmtpEhloCommand { domain }.into();
+
         Self {
-            state: State::Write(SmtpWrite::new(SmtpEhloCommand { domain })),
-            buffer: Vec::new(),
+            wants_read: false,
+            wants_write: Some(bytes),
+            buf: Vec::new(),
         }
     }
 
-    /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpEhloResult {
+    /// Advances the coroutine.
+    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpEhloResult {
         loop {
-            match &mut self.state {
-                State::Write(w) => match w.resume(arg.take()) {
-                    SmtpWriteResult::Ok => {
-                        self.state = State::Read(SmtpRead::new());
-                        continue;
-                    }
-                    SmtpWriteResult::Io { input } => return SmtpEhloResult::Io { input },
-                    SmtpWriteResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpEhloResult::Err { err };
-                    }
-                },
-                State::Read(r) => match r.resume(arg.take()) {
-                    SmtpReadResult::Io { input } => return SmtpEhloResult::Io { input },
-                    SmtpReadResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpEhloResult::Err { err };
-                    }
-                    SmtpReadResult::Ok { bytes } => {
-                        trace!("read bytes: {}", escape_byte_string(&bytes));
-                        self.buffer.extend_from_slice(&bytes);
-
-                        if !EhloResponse::is_complete(&self.buffer) {
-                            self.state = State::Read(SmtpRead::new());
-                            continue;
-                        }
-
-                        match EhloResponse::parse(&self.buffer) {
-                            Ok(response) => {
-                                let capabilities = response.into_static().capabilities;
-                                return SmtpEhloResult::Ok { capabilities };
-                            }
-                            Err(errors) => {
-                                let reason = errors
-                                    .iter()
-                                    .map(|e| e.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("; ");
-
-                                let err = SmtpEhloError::ParseResponse(reason);
-                                return SmtpEhloResult::Err { err };
-                            }
-                        }
-                    }
-                },
+            if let Some(bytes) = self.wants_write.take() {
+                return SmtpEhloResult::WantsWrite(bytes);
             }
+
+            if mem::take(&mut self.wants_read) {
+                return SmtpEhloResult::WantsRead;
+            }
+
+            match arg.take() {
+                Some(&[]) => return SmtpEhloResult::Err(SmtpEhloError::Eof),
+                Some(data) => {
+                    trace!("read SMTP bytes: {}", escape_byte_string(data));
+                    self.buf.extend_from_slice(data);
+                }
+                None => {}
+            }
+
+            if !EhloResponse::is_complete(&self.buf) {
+                self.wants_read = true;
+                continue;
+            }
+
+            return match EhloResponse::parse(&self.buf) {
+                Ok(response) => {
+                    let capabilities = response.into_static().capabilities;
+                    let _ = mem::take(&mut self.buf);
+                    SmtpEhloResult::Ok {
+                        capabilities,
+                        remaining: Vec::new(),
+                    }
+                }
+                Err(errors) => {
+                    let reason = errors
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+
+                    SmtpEhloResult::Err(SmtpEhloError::ParseResponse(reason))
+                }
+            };
         }
     }
 }

@@ -4,21 +4,20 @@
 //! [`crate::rfc5321::ehlo`] (`EHLO`) for any modern server. Fall back
 //! to HELO only when the server rejects EHLO with 500 or 502.
 
+use core::mem;
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
 
 use bounded_static::IntoBoundedStatic;
-use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use thiserror::Error;
 
 use crate::{
-    read::*,
     rfc5321::types::{domain::Domain, reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
-    write::*,
 };
 
 /// The HELO command (RFC 5321 §4.1.1.1).
@@ -40,26 +39,21 @@ impl<'a> From<SmtpHeloCommand<'a>> for Vec<u8> {
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
 pub enum SmtpHeloError {
-    #[error(transparent)]
-    Write(#[from] SmtpWriteError),
-    #[error(transparent)]
-    Read(#[from] SmtpReadError),
+    #[error("Reached unexpected EOF")]
+    Eof,
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
     #[error("HELO rejected: {code} {message}")]
     Rejected { code: u16, message: String },
 }
 
-/// Output emitted when the coroutine terminates its progression.
+/// Result returned by [`SmtpHelo::resume`].
+#[derive(Debug)]
 pub enum SmtpHeloResult {
     Ok,
-    Io { input: SocketInput },
-    Err { err: SmtpHeloError },
-}
-
-enum State {
-    Write(SmtpWrite),
-    Read(SmtpRead),
+    WantsRead,
+    WantsWrite(Vec<u8>),
+    Err(SmtpHeloError),
 }
 
 /// I/O-free coroutine to send SMTP HELO command.
@@ -67,8 +61,9 @@ enum State {
 /// HELO is the legacy handshake. It does not negotiate extensions. If the
 /// server supports ESMTP, use [`crate::rfc5321::ehlo::SmtpEhlo`] instead.
 pub struct SmtpHelo {
-    state: State,
-    buffer: Vec<u8>,
+    wants_read: bool,
+    wants_write: Option<Vec<u8>>,
+    buf: Vec<u8>,
 }
 
 impl SmtpHelo {
@@ -76,69 +71,63 @@ impl SmtpHelo {
     pub fn new(domain: Domain<'_>) -> Self {
         trace!("sending HELO command");
 
+        let bytes = SmtpHeloCommand {
+            domain: domain.into_static(),
+        }
+        .into();
+
         Self {
-            state: State::Write(SmtpWrite::new(SmtpHeloCommand {
-                domain: domain.into_static(),
-            })),
-            buffer: Vec::new(),
+            wants_read: false,
+            wants_write: Some(bytes),
+            buf: Vec::new(),
         }
     }
 
-    /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpHeloResult {
+    /// Advances the coroutine.
+    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpHeloResult {
         loop {
-            match &mut self.state {
-                State::Write(w) => match w.resume(arg.take()) {
-                    SmtpWriteResult::Ok => {
-                        self.state = State::Read(SmtpRead::new());
-                        continue;
-                    }
-                    SmtpWriteResult::Io { input } => return SmtpHeloResult::Io { input },
-                    SmtpWriteResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpHeloResult::Err { err };
-                    }
-                },
-                State::Read(r) => match r.resume(arg.take()) {
-                    SmtpReadResult::Io { input } => return SmtpHeloResult::Io { input },
-                    SmtpReadResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpHeloResult::Err { err };
-                    }
-                    SmtpReadResult::Ok { bytes } => {
-                        trace!("read bytes: {}", escape_byte_string(&bytes));
-                        self.buffer.extend_from_slice(&bytes);
-
-                        if !Response::is_complete(&self.buffer) {
-                            self.state = State::Read(SmtpRead::new());
-                            continue;
-                        }
-
-                        match Response::parse(&self.buffer) {
-                            Ok(response) => {
-                                if response.code == ReplyCode::OK {
-                                    return SmtpHeloResult::Ok;
-                                }
-
-                                let message = response.text().to_string();
-                                let code = response.code.code();
-                                let err = SmtpHeloError::Rejected { code, message };
-                                return SmtpHeloResult::Err { err };
-                            }
-                            Err(errors) => {
-                                let reason = errors
-                                    .iter()
-                                    .map(|e| e.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("; ");
-
-                                let err = SmtpHeloError::ParseResponse(reason);
-                                return SmtpHeloResult::Err { err };
-                            }
-                        }
-                    }
-                },
+            if let Some(bytes) = self.wants_write.take() {
+                return SmtpHeloResult::WantsWrite(bytes);
             }
+
+            if mem::take(&mut self.wants_read) {
+                return SmtpHeloResult::WantsRead;
+            }
+
+            match arg.take() {
+                Some(&[]) => return SmtpHeloResult::Err(SmtpHeloError::Eof),
+                Some(data) => {
+                    trace!("read SMTP bytes: {}", escape_byte_string(data));
+                    self.buf.extend_from_slice(data);
+                }
+                None => {}
+            }
+
+            if !Response::is_complete(&self.buf) {
+                self.wants_read = true;
+                continue;
+            }
+
+            return match Response::parse(&self.buf) {
+                Ok(response) => {
+                    if response.code == ReplyCode::OK {
+                        SmtpHeloResult::Ok
+                    } else {
+                        let code = response.code.code();
+                        let message = response.text().to_string();
+                        SmtpHeloResult::Err(SmtpHeloError::Rejected { code, message })
+                    }
+                }
+                Err(errors) => {
+                    let reason = errors
+                        .iter()
+                        .map(|e| e.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+
+                    SmtpHeloResult::Err(SmtpHeloError::ParseResponse(reason))
+                }
+            };
         }
     }
 }

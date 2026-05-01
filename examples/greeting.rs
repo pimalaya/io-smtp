@@ -1,7 +1,11 @@
-use std::{env, net::TcpStream, sync::Arc};
+use std::{
+    env,
+    io::{Read, Write},
+    net::TcpStream,
+    sync::Arc,
+};
 
 use io_smtp::rfc5321::greeting::{GetSmtpGreeting, GetSmtpGreetingResult};
-use io_socket::runtimes::std_stream::handle;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
 use rustls_platform_verifier::ConfigVerifierExt;
 
@@ -21,15 +25,22 @@ fn main() {
     let mut stream = StreamOwned::new(conn, tcp);
 
     let mut coroutine = GetSmtpGreeting::new();
-    let mut arg = None;
+    let mut buf = [0u8; 4096];
+    let mut chunk: Vec<u8>;
+    let mut arg: Option<&[u8]> = None;
 
     let greeting = loop {
         match coroutine.resume(arg.take()) {
-            GetSmtpGreetingResult::Ok { greeting } => break greeting,
-            GetSmtpGreetingResult::Io { input } => arg = Some(handle(&mut stream, input).unwrap()),
-            GetSmtpGreetingResult::Err { err } => panic!("{err}"),
+            GetSmtpGreetingResult::Ok { greeting, .. } => break greeting,
+            GetSmtpGreetingResult::WantsRead => {
+                let n = stream.read(&mut buf).unwrap();
+                chunk = buf[..n].to_vec();
+                arg = Some(&chunk);
+            }
+            GetSmtpGreetingResult::Err(err) => panic!("{err}"),
         }
     };
 
+    let _ = stream.flush();
     println!("greeting: {greeting:#?}");
 }

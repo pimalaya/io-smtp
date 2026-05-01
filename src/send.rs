@@ -3,13 +3,12 @@
 use alloc::{collections::VecDeque, vec::Vec};
 
 use bounded_static::IntoBoundedStatic;
-use io_socket::io::{SocketInput, SocketOutput};
 use thiserror::Error;
 
 use crate::rfc5321::{
-    data::*,
-    mail::*,
-    rcpt::*,
+    data::{SmtpData, SmtpDataError, SmtpDataResult},
+    mail::{SmtpMail, SmtpMailError, SmtpMailResult},
+    rcpt::{SmtpRcpt, SmtpRcptError, SmtpRcptResult},
     types::{forward_path::ForwardPath, reverse_path::ReversePath},
 };
 
@@ -24,19 +23,20 @@ pub enum SmtpMessageSendError {
     Data(#[from] SmtpDataError),
 }
 
+/// Result returned by [`SmtpMessageSend::resume`].
+#[derive(Debug)]
+pub enum SmtpMessageSendResult {
+    Ok,
+    WantsRead,
+    WantsWrite(Vec<u8>),
+    Err(SmtpMessageSendError),
+}
+
 enum State {
     MailFrom(SmtpMail),
     PrepareRcptTo,
     RcptTo(SmtpRcpt),
     Data(SmtpData),
-}
-
-/// Output emitted when the coroutine terminates its progression.
-#[derive(Debug)]
-pub enum SmtpMessageSendResult {
-    Ok,
-    Io { input: SocketInput },
-    Err { err: SmtpMessageSendError },
 }
 
 /// I/O-free coroutine to send a complete SMTP message.
@@ -66,53 +66,49 @@ impl SmtpMessageSend {
         }
     }
 
-    /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpMessageSendResult {
+    /// Advances the coroutine.
+    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpMessageSendResult {
         loop {
             match &mut self.state {
-                State::MailFrom(coroutine) => {
-                    match coroutine.resume(arg.take()) {
-                        SmtpMailResult::Io { input } => {
-                            break SmtpMessageSendResult::Io { input };
-                        }
-                        SmtpMailResult::Ok => (),
-                        SmtpMailResult::Err { err } => {
-                            break SmtpMessageSendResult::Err { err: err.into() };
-                        }
-                    };
-
-                    self.state = State::PrepareRcptTo;
-                }
+                State::MailFrom(mail) => match mail.resume(arg.take()) {
+                    SmtpMailResult::Ok => self.state = State::PrepareRcptTo,
+                    SmtpMailResult::WantsRead => return SmtpMessageSendResult::WantsRead,
+                    SmtpMailResult::WantsWrite(bytes) => {
+                        return SmtpMessageSendResult::WantsWrite(bytes);
+                    }
+                    SmtpMailResult::Err(err) => {
+                        return SmtpMessageSendResult::Err(SmtpMessageSendError::MailFrom(err));
+                    }
+                },
                 State::PrepareRcptTo => {
                     self.state = match self.forward_paths.pop_front() {
                         Some(path) => State::RcptTo(SmtpRcpt::new(path)),
-                        None => State::Data(SmtpData::new(self.message.take().unwrap())),
-                    };
-                }
-                State::RcptTo(coroutine) => {
-                    match coroutine.resume(arg.take()) {
-                        SmtpRcptResult::Io { input } => {
-                            break SmtpMessageSendResult::Io { input };
-                        }
-                        SmtpRcptResult::Ok => (),
-                        SmtpRcptResult::Err { err } => {
-                            break SmtpMessageSendResult::Err { err: err.into() };
-                        }
-                    };
-
-                    self.state = State::PrepareRcptTo;
-                }
-                State::Data(coroutine) => {
-                    match coroutine.resume(arg.take()) {
-                        SmtpDataResult::Io { input } => {
-                            break SmtpMessageSendResult::Io { input };
-                        }
-                        SmtpDataResult::Ok => break SmtpMessageSendResult::Ok,
-                        SmtpDataResult::Err { err } => {
-                            break SmtpMessageSendResult::Err { err: err.into() };
+                        None => {
+                            let body = self.message.take().expect("message taken twice");
+                            State::Data(SmtpData::new(body))
                         }
                     };
                 }
+                State::RcptTo(rcpt) => match rcpt.resume(arg.take()) {
+                    SmtpRcptResult::Ok => self.state = State::PrepareRcptTo,
+                    SmtpRcptResult::WantsRead => return SmtpMessageSendResult::WantsRead,
+                    SmtpRcptResult::WantsWrite(bytes) => {
+                        return SmtpMessageSendResult::WantsWrite(bytes);
+                    }
+                    SmtpRcptResult::Err(err) => {
+                        return SmtpMessageSendResult::Err(SmtpMessageSendError::RcptTo(err));
+                    }
+                },
+                State::Data(data) => match data.resume(arg.take()) {
+                    SmtpDataResult::Ok => return SmtpMessageSendResult::Ok,
+                    SmtpDataResult::WantsRead => return SmtpMessageSendResult::WantsRead,
+                    SmtpDataResult::WantsWrite(bytes) => {
+                        return SmtpMessageSendResult::WantsWrite(bytes);
+                    }
+                    SmtpDataResult::Err(err) => {
+                        return SmtpMessageSendResult::Err(SmtpMessageSendError::Data(err));
+                    }
+                },
             }
         }
     }

@@ -5,26 +5,25 @@
 //! then the password, each base64-encoded. Prefer PLAIN or
 //! SCRAM-SHA-256 when the server supports them.
 
+use core::mem;
+
 use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
 
 use bounded_static::IntoBoundedStatic;
-use io_socket::io::{SocketInput, SocketOutput};
 use log::trace;
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
 use crate::{
-    read::*,
     rfc4954::auth_data::SmtpAuthData,
     rfc5321::{
-        ehlo::*,
+        ehlo::{SmtpEhlo, SmtpEhloError, SmtpEhloResult},
         types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
-    write::*,
 };
 
 /// The AUTH LOGIN command.
@@ -45,10 +44,8 @@ pub const LOGIN: &str = "LOGIN";
 /// Errors that can occur during AUTH LOGIN.
 #[derive(Debug, Error)]
 pub enum SmtpLoginError {
-    #[error(transparent)]
-    Write(#[from] SmtpWriteError),
-    #[error(transparent)]
-    Read(#[from] SmtpReadError),
+    #[error("Reached unexpected EOF")]
+    Eof,
     #[error("Parse SMTP response error: {0}")]
     ParseResponse(String),
     #[error("AUTH LOGIN rejected: {code} {message}")]
@@ -57,20 +54,23 @@ pub enum SmtpLoginError {
     Ehlo(#[from] SmtpEhloError),
 }
 
-/// Output emitted when the coroutine terminates.
+/// Result returned by [`SmtpLogin::resume`].
+#[derive(Debug)]
 pub enum SmtpLoginResult {
     Ok,
-    Io { input: SocketInput },
-    Err { err: SmtpLoginError },
+    WantsRead,
+    WantsWrite(Vec<u8>),
+    Err(SmtpLoginError),
 }
 
 enum State {
-    AuthWrite(SmtpWrite),
-    AuthRead(SmtpRead),
-    UsernameWrite(SmtpWrite),
-    UsernameRead(SmtpRead),
-    PasswordWrite(SmtpWrite),
-    PasswordRead(SmtpRead),
+    /// Awaiting the 334 reply that asks for the username.
+    AwaitUsernameChallenge,
+    /// Awaiting the 334 reply that asks for the password.
+    AwaitPasswordChallenge,
+    /// Awaiting the 235 reply that confirms authentication.
+    AwaitFinal,
+    /// Auth succeeded; refreshing capabilities via EHLO.
     Ehlo(SmtpEhlo),
 }
 
@@ -78,10 +78,12 @@ enum State {
 /// capabilities via EHLO.
 pub struct SmtpLogin {
     state: State,
+    wants_read: bool,
+    wants_write: Option<Vec<u8>>,
     domain: Option<EhloDomain<'static>>,
-    username_bytes: Vec<u8>,
-    password_bytes: Vec<u8>,
-    buffer: Vec<u8>,
+    username_bytes: Option<Vec<u8>>,
+    password_bytes: Option<Vec<u8>>,
+    buf: Vec<u8>,
 }
 
 impl SmtpLogin {
@@ -94,204 +96,141 @@ impl SmtpLogin {
             SmtpAuthData::r#continue(password.expose_secret().as_bytes()).into();
 
         Self {
-            state: State::AuthWrite(SmtpWrite::new(SmtpLoginCommand)),
+            state: State::AwaitUsernameChallenge,
+            wants_read: false,
+            wants_write: Some(SmtpLoginCommand.into()),
             domain: Some(domain.into_static()),
-            username_bytes,
-            password_bytes,
-            buffer: Vec::new(),
+            username_bytes: Some(username_bytes),
+            password_bytes: Some(password_bytes),
+            buf: Vec::new(),
         }
     }
 
-    /// Makes the coroutine progress.
-    pub fn resume(&mut self, mut arg: Option<SocketOutput>) -> SmtpLoginResult {
+    /// Advances the coroutine.
+    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpLoginResult {
         loop {
+            if let Some(bytes) = self.wants_write.take() {
+                return SmtpLoginResult::WantsWrite(bytes);
+            }
+
+            if mem::take(&mut self.wants_read) {
+                return SmtpLoginResult::WantsRead;
+            }
+
             match &mut self.state {
-                State::AuthWrite(w) => match w.resume(arg.take()) {
-                    SmtpWriteResult::Ok => {
-                        self.state = State::AuthRead(SmtpRead::new());
-                        continue;
+                State::AwaitUsernameChallenge => {
+                    if let Some(reason) = self.feed_response(arg.take()) {
+                        return reason;
                     }
-                    SmtpWriteResult::Io { input } => {
-                        return SmtpLoginResult::Io { input };
-                    }
-                    SmtpWriteResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpLoginResult::Err { err };
-                    }
-                },
-                State::AuthRead(r) => match r.resume(arg.take()) {
-                    SmtpReadResult::Io { input } => {
-                        return SmtpLoginResult::Io { input };
-                    }
-                    SmtpReadResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpLoginResult::Err { err };
-                    }
-                    SmtpReadResult::Ok { bytes } => {
-                        trace!("read bytes: {}", escape_byte_string(&bytes));
-                        self.buffer.extend_from_slice(&bytes);
 
-                        if !Response::is_complete(&self.buffer) {
-                            self.state = State::AuthRead(SmtpRead::new());
-                            continue;
+                    let response = match Response::parse(&self.buf) {
+                        Ok(response) => response.into_static(),
+                        Err(errors) => {
+                            return SmtpLoginResult::Err(SmtpLoginError::ParseResponse(
+                                join_errors(errors),
+                            ));
                         }
+                    };
 
-                        match Response::parse(&self.buffer) {
-                            Ok(response) => {
-                                let response = response.into_static();
-                                if response.code == ReplyCode::AUTH_CONTINUE {
-                                    self.buffer.clear();
-                                    let username = core::mem::take(&mut self.username_bytes);
-                                    self.state = State::UsernameWrite(SmtpWrite::new(username));
-                                    continue;
-                                }
+                    if response.code != ReplyCode::AUTH_CONTINUE {
+                        let code = response.code.code();
+                        let message = response.text().to_string();
+                        return SmtpLoginResult::Err(SmtpLoginError::Rejected { code, message });
+                    }
 
-                                let message = response.text().to_string();
-                                let code = response.code.code();
-                                let err = SmtpLoginError::Rejected { code, message };
-                                return SmtpLoginResult::Err { err };
-                            }
-                            Err(errors) => {
-                                let reason = errors
-                                    .iter()
-                                    .map(|e| e.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("; ");
+                    self.buf.clear();
+                    self.state = State::AwaitPasswordChallenge;
+                    let bytes = self.username_bytes.take().expect("username taken twice");
+                    return SmtpLoginResult::WantsWrite(bytes);
+                }
+                State::AwaitPasswordChallenge => {
+                    if let Some(reason) = self.feed_response(arg.take()) {
+                        return reason;
+                    }
 
-                                let err = SmtpLoginError::ParseResponse(reason);
-                                return SmtpLoginResult::Err { err };
-                            }
+                    let response = match Response::parse(&self.buf) {
+                        Ok(response) => response.into_static(),
+                        Err(errors) => {
+                            return SmtpLoginResult::Err(SmtpLoginError::ParseResponse(
+                                join_errors(errors),
+                            ));
                         }
-                    }
-                },
-                State::UsernameWrite(w) => match w.resume(arg.take()) {
-                    SmtpWriteResult::Ok => {
-                        self.state = State::UsernameRead(SmtpRead::new());
-                        continue;
-                    }
-                    SmtpWriteResult::Io { input } => {
-                        return SmtpLoginResult::Io { input };
-                    }
-                    SmtpWriteResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpLoginResult::Err { err };
-                    }
-                },
-                State::UsernameRead(r) => match r.resume(arg.take()) {
-                    SmtpReadResult::Io { input } => {
-                        return SmtpLoginResult::Io { input };
-                    }
-                    SmtpReadResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpLoginResult::Err { err };
-                    }
-                    SmtpReadResult::Ok { bytes } => {
-                        trace!("read bytes: {}", escape_byte_string(&bytes));
-                        self.buffer.extend_from_slice(&bytes);
+                    };
 
-                        if !Response::is_complete(&self.buffer) {
-                            self.state = State::UsernameRead(SmtpRead::new());
-                            continue;
+                    if response.code != ReplyCode::AUTH_CONTINUE {
+                        let code = response.code.code();
+                        let message = response.text().to_string();
+                        return SmtpLoginResult::Err(SmtpLoginError::Rejected { code, message });
+                    }
+
+                    self.buf.clear();
+                    self.state = State::AwaitFinal;
+                    let bytes = self.password_bytes.take().expect("password taken twice");
+                    return SmtpLoginResult::WantsWrite(bytes);
+                }
+                State::AwaitFinal => {
+                    if let Some(reason) = self.feed_response(arg.take()) {
+                        return reason;
+                    }
+
+                    let response = match Response::parse(&self.buf) {
+                        Ok(response) => response.into_static(),
+                        Err(errors) => {
+                            return SmtpLoginResult::Err(SmtpLoginError::ParseResponse(
+                                join_errors(errors),
+                            ));
                         }
+                    };
 
-                        match Response::parse(&self.buffer) {
-                            Ok(response) => {
-                                let response = response.into_static();
-                                if response.code == ReplyCode::AUTH_CONTINUE {
-                                    self.buffer.clear();
-                                    let password = core::mem::take(&mut self.password_bytes);
-                                    self.state = State::PasswordWrite(SmtpWrite::new(password));
-                                    continue;
-                                }
+                    if response.code != ReplyCode::AUTH_SUCCESSFUL {
+                        let code = response.code.code();
+                        let message = response.text().to_string();
+                        return SmtpLoginResult::Err(SmtpLoginError::Rejected { code, message });
+                    }
 
-                                let message = response.text().to_string();
-                                let code = response.code.code();
-                                let err = SmtpLoginError::Rejected { code, message };
-                                return SmtpLoginResult::Err { err };
-                            }
-                            Err(errors) => {
-                                let reason = errors
-                                    .iter()
-                                    .map(|e| e.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("; ");
-
-                                let err = SmtpLoginError::ParseResponse(reason);
-                                return SmtpLoginResult::Err { err };
-                            }
-                        }
-                    }
-                },
-                State::PasswordWrite(w) => match w.resume(arg.take()) {
-                    SmtpWriteResult::Ok => {
-                        self.state = State::PasswordRead(SmtpRead::new());
-                        continue;
-                    }
-                    SmtpWriteResult::Io { input } => {
-                        return SmtpLoginResult::Io { input };
-                    }
-                    SmtpWriteResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpLoginResult::Err { err };
-                    }
-                },
-                State::PasswordRead(r) => match r.resume(arg.take()) {
-                    SmtpReadResult::Io { input } => {
-                        return SmtpLoginResult::Io { input };
-                    }
-                    SmtpReadResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpLoginResult::Err { err };
-                    }
-                    SmtpReadResult::Ok { bytes } => {
-                        trace!("read bytes: {}", escape_byte_string(&bytes));
-                        self.buffer.extend_from_slice(&bytes);
-
-                        if !Response::is_complete(&self.buffer) {
-                            self.state = State::PasswordRead(SmtpRead::new());
-                            continue;
-                        }
-
-                        match Response::parse(&self.buffer) {
-                            Ok(response) => {
-                                let response = response.into_static();
-                                if response.code == ReplyCode::AUTH_SUCCESSFUL {
-                                    let domain = self.domain.take().unwrap();
-                                    self.state = State::Ehlo(SmtpEhlo::new(domain));
-                                    continue;
-                                }
-
-                                let message = response.text().to_string();
-                                let code = response.code.code();
-                                let err = SmtpLoginError::Rejected { code, message };
-                                return SmtpLoginResult::Err { err };
-                            }
-                            Err(errors) => {
-                                let reason = errors
-                                    .iter()
-                                    .map(|e| e.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("; ");
-
-                                let err = SmtpLoginError::ParseResponse(reason);
-                                return SmtpLoginResult::Err { err };
-                            }
-                        }
-                    }
-                },
+                    self.buf.clear();
+                    let domain = self.domain.take().expect("domain taken twice");
+                    self.state = State::Ehlo(SmtpEhlo::new(domain));
+                }
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpEhloResult::Io { input } => {
-                        return SmtpLoginResult::Io { input };
+                    SmtpEhloResult::Ok { .. } => return SmtpLoginResult::Ok,
+                    SmtpEhloResult::WantsRead => return SmtpLoginResult::WantsRead,
+                    SmtpEhloResult::WantsWrite(bytes) => {
+                        return SmtpLoginResult::WantsWrite(bytes);
                     }
-                    SmtpEhloResult::Ok { .. } => {
-                        return SmtpLoginResult::Ok;
-                    }
-                    SmtpEhloResult::Err { err } => {
-                        let err = err.into();
-                        return SmtpLoginResult::Err { err };
+                    SmtpEhloResult::Err(err) => {
+                        return SmtpLoginResult::Err(SmtpLoginError::Ehlo(err));
                     }
                 },
             }
         }
     }
+
+    /// Feed the read argument into the buffer and return the terminal
+    /// result the caller should propagate (EOF or "want more bytes").
+    /// Returns [`None`] when the buffer is ready to parse.
+    fn feed_response(&mut self, arg: Option<&[u8]>) -> Option<SmtpLoginResult> {
+        match arg {
+            Some(&[]) => return Some(SmtpLoginResult::Err(SmtpLoginError::Eof)),
+            Some(data) => {
+                trace!("read SMTP bytes: {}", escape_byte_string(data));
+                self.buf.extend_from_slice(data);
+            }
+            None => {}
+        }
+
+        if !Response::is_complete(&self.buf) {
+            return Some(SmtpLoginResult::WantsRead);
+        }
+
+        None
+    }
+}
+
+fn join_errors<E: ToString>(errors: impl IntoIterator<Item = E>) -> String {
+    errors
+        .into_iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
