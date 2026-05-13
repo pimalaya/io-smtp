@@ -14,7 +14,15 @@ repository = "https://github.com/pimalaya/io-smtp"
 
 [features]
 default = ["scram"]
+std = []
+client = ["std"]
 scram = ["dep:hmac", "dep:pbkdf2", "dep:sha2"]
+
+# TLS — implies `client` and pulls pimalaya-stream as the transport.
+rustls-ring = ["client", "dep:anyhow", "dep:pimalaya-stream", "dep:url", "pimalaya-stream?/std", "pimalaya-stream?/rustls-ring"]
+rustls-aws  = ["client", "dep:anyhow", "dep:pimalaya-stream", "dep:url", "pimalaya-stream?/std", "pimalaya-stream?/rustls-aws"]
+native-tls  = ["client", "dep:anyhow", "dep:pimalaya-stream", "dep:url", "pimalaya-stream?/std", "pimalaya-stream?/native-tls"]
+vendored = ["pimalaya-stream?/vendored"]
 
 [dev-dependencies]
 env_logger = "0.11"
@@ -22,6 +30,7 @@ rustls = { version = "0.23", default-features = false, features = ["logging", "r
 rustls-platform-verifier = "0.7"
 
 [dependencies]
+anyhow = { version = "1", optional = true }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 bounded-static = { version = "0.8", default-features = false, features = ["alloc"] }
 bounded-static-derive = { version = "0.8", default-features = false }
@@ -29,6 +38,11 @@ chumsky = { version = "1.0.0-alpha.7", default-features = false }
 hmac = { version = "0.13", optional = true, default-features = false }
 log = { version = "0.4", default-features = false }
 pbkdf2 = { version = "0.13.0-rc.10", optional = true, default-features = false, features = ["hmac"] }
+pimalaya-stream = { version = "0.0.1", default-features = false, optional = true }
 secrecy = { version = "0.10", default-features = false }
 sha2 = { version = "0.11", optional = true, default-features = false }
 thiserror = { version = "2", default-features = false }
+url = { version = "2.2", default-features = false, optional = true }
+
+[patch.crates-io]
+pimalaya-stream = { path = "../stream" }

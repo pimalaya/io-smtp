@@ -1,10 +1,12 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![doc = include_str!("../README.md")]
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 #[macro_use]
 extern crate alloc;
 
+#[cfg(feature = "client")]
+pub mod client;
 pub mod login;
 pub mod rfc1870;
 pub mod rfc3207;
