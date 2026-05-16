@@ -1,57 +1,44 @@
 use std::{
     env,
     io::{Read, Write},
-    net::TcpStream,
-    sync::Arc,
 };
 
 use io_smtp::{
-    rfc4616::plain::{SmtpPlain, SmtpPlainResult},
+    login::*,
     rfc5321::{
-        ehlo::{SmtpEhlo, SmtpEhloResult},
-        greeting::{GetSmtpGreeting, GetSmtpGreetingResult},
+        ehlo::*,
+        greeting::*,
         types::{domain::Domain, ehlo_domain::EhloDomain},
     },
 };
-use rustls::{ClientConfig, ClientConnection, StreamOwned};
-use rustls_platform_verifier::ConfigVerifierExt;
+use pimalaya_stream::{std::stream::StreamStd, tls::Tls};
 use secrecy::SecretString;
-
-fn read_chunk<S: Read>(stream: &mut S, buf: &mut [u8]) -> Vec<u8> {
-    let n = stream.read(buf).unwrap();
-    buf[..n].to_vec()
-}
 
 fn main() {
     env_logger::init();
 
     let host = env::var("HOST").expect("HOST env var");
-    let port: u16 = env::var("PORT")
+    let port = env::var("PORT")
         .expect("PORT env var")
         .parse()
         .expect("PORT u16");
     let user = env::var("USER").expect("USER env var");
     let pass = env::var("PASS").expect("PASS env var");
 
-    let tcp = TcpStream::connect((host.as_str(), port)).unwrap();
-    let server_name = rustls::pki_types::ServerName::try_from(host.clone()).unwrap();
-    let config = ClientConfig::with_platform_verifier().unwrap();
-    let conn = ClientConnection::new(Arc::new(config), server_name).unwrap();
-    let mut stream = StreamOwned::new(conn, tcp);
-
-    let mut buf = [0u8; 4096];
+    let tls = Tls::default();
+    let mut stream = StreamStd::connect_tls(&host, port, &tls).unwrap();
+    let mut buf = [0u8; 16 * 1024];
 
     // Read greeting.
     let mut coroutine = GetSmtpGreeting::new();
-    let mut chunk: Vec<u8>;
     let mut arg: Option<&[u8]> = None;
 
     let greeting = loop {
         match coroutine.resume(arg.take()) {
             GetSmtpGreetingResult::Ok { greeting, .. } => break greeting,
             GetSmtpGreetingResult::WantsRead => {
-                chunk = read_chunk(&mut stream, &mut buf);
-                arg = Some(&chunk);
+                let n = stream.read(&mut buf).unwrap();
+                arg = Some(&buf[..n]);
             }
             GetSmtpGreetingResult::Err(err) => panic!("{err}"),
         }
@@ -59,43 +46,47 @@ fn main() {
 
     println!("greeting: {greeting:#?}");
 
-    // Send EHLO.
-    let domain: EhloDomain<'static> = Domain::parse(b"localhost").unwrap().into();
+    // Initial EHLO.
+    let domain: EhloDomain<'_> = Domain::parse(b"localhost").unwrap().into();
     let mut coroutine = SmtpEhlo::new(domain.clone());
-    let mut chunk: Vec<u8>;
     let mut arg: Option<&[u8]> = None;
 
     let capabilities = loop {
         match coroutine.resume(arg.take()) {
             SmtpEhloResult::Ok { capabilities, .. } => break capabilities,
-            SmtpEhloResult::WantsWrite(bytes) => stream.write_all(&bytes).unwrap(),
             SmtpEhloResult::WantsRead => {
-                chunk = read_chunk(&mut stream, &mut buf);
-                arg = Some(&chunk);
+                let n = stream.read(&mut buf).unwrap();
+                arg = Some(&buf[..n]);
+            }
+            SmtpEhloResult::WantsWrite(bytes) => {
+                stream.write_all(&bytes).unwrap();
+                arg = None;
             }
             SmtpEhloResult::Err(err) => panic!("{err}"),
         }
     };
 
-    println!("capabilities: {capabilities:#?}");
+    println!("capabilities pre auth: {capabilities:#?}");
 
-    // AUTH PLAIN.
+    // AUTH LOGIN.
     let password = SecretString::from(pass);
-    let mut coroutine = SmtpPlain::new(&user, &password, domain);
-    let mut chunk: Vec<u8>;
+    let mut coroutine = SmtpLogin::new(&user, &password, domain);
     let mut arg: Option<&[u8]> = None;
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpPlainResult::Ok => break,
-            SmtpPlainResult::WantsWrite(bytes) => stream.write_all(&bytes).unwrap(),
-            SmtpPlainResult::WantsRead => {
-                chunk = read_chunk(&mut stream, &mut buf);
-                arg = Some(&chunk);
+            SmtpLoginResult::Ok => break,
+            SmtpLoginResult::WantsRead => {
+                let n = stream.read(&mut buf).unwrap();
+                arg = Some(&buf[..n]);
             }
-            SmtpPlainResult::Err(err) => panic!("{err}"),
+            SmtpLoginResult::WantsWrite(bytes) => {
+                stream.write_all(&bytes).unwrap();
+                arg = None;
+            }
+            SmtpLoginResult::Err(err) => panic!("{err}"),
         }
     }
 
-    println!("AUTH PLAIN successful!");
+    println!("AUTH LOGIN succeeded");
 }

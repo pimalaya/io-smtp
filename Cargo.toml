@@ -1,33 +1,33 @@
 [package]
 name = "io-smtp"
-description = "I/O-free SMTP client library"
+description = "SMTP client library"
 version = "0.0.1"
 authors = ["Clément DOUIN <pimalaya.org@posteo.net>"]
 edition = "2024"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 categories = ["email", "no-std"]
-keywords = ["smtp", "io-free", "coroutine", "no-std", "sans-io"]
+keywords = ["email", "smtp", "client", "std", "io-free"]
 homepage = "https://pimalaya.org"
-documentation = "https://docs.rs/io-smtp"
+documentation = "https://docs.rs/io-smtp/latest/io_smtp"
 repository = "https://github.com/pimalaya/io-smtp"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
-default = ["scram"]
+default = ["rustls-ring"]
 std = []
 client = ["std"]
-scram = ["dep:hmac", "dep:pbkdf2", "dep:sha2"]
-
-# TLS — implies `client` and pulls pimalaya-stream as the transport.
-rustls-ring = ["client", "dep:anyhow", "dep:pimalaya-stream", "dep:url", "pimalaya-stream?/std", "pimalaya-stream?/rustls-ring"]
-rustls-aws  = ["client", "dep:anyhow", "dep:pimalaya-stream", "dep:url", "pimalaya-stream?/std", "pimalaya-stream?/rustls-aws"]
-native-tls  = ["client", "dep:anyhow", "dep:pimalaya-stream", "dep:url", "pimalaya-stream?/std", "pimalaya-stream?/native-tls"]
+scram = ["dep:hmac", "dep:pbkdf2", "dep:rand", "dep:sha2"]
+rustls-ring = ["client", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:url"]
+rustls-aws  = ["client", "pimalaya-stream/rustls-aws", "dep:anyhow", "dep:url"]
+native-tls  = ["client", "pimalaya-stream/native-tls", "dep:anyhow", "dep:url"]
 vendored = ["pimalaya-stream?/vendored"]
 
 [dev-dependencies]
 env_logger = "0.11"
-rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
-rustls-platform-verifier = "0.7"
 
 [dependencies]
 anyhow = { version = "1", optional = true }
@@ -39,10 +39,11 @@ hmac = { version = "0.13", optional = true, default-features = false }
 log = { version = "0.4", default-features = false }
 pbkdf2 = { version = "0.13.0-rc.10", optional = true, default-features = false, features = ["hmac"] }
 pimalaya-stream = { version = "0.0.1", default-features = false, optional = true }
+rand = { version = "0.8", optional = true }
 secrecy = { version = "0.10", default-features = false }
 sha2 = { version = "0.11", optional = true, default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2.2", default-features = false, optional = true }
 
 [patch.crates-io]
-pimalaya-stream = { path = "../stream" }
+pimalaya-stream.git = "https://github.com/pimalaya/stream"

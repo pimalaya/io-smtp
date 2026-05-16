@@ -4,7 +4,7 @@ use std::{
 };
 
 use io_smtp::{
-    rfc3207::starttls::*,
+    rfc4616::plain::*,
     rfc5321::{
         ehlo::*,
         greeting::*,
@@ -12,6 +12,7 @@ use io_smtp::{
     },
 };
 use pimalaya_stream::{std::stream::StreamStd, tls::Tls};
+use secrecy::SecretString;
 
 fn main() {
     env_logger::init();
@@ -21,8 +22,11 @@ fn main() {
         .expect("PORT env var")
         .parse()
         .expect("PORT u16");
+    let user = env::var("USER").expect("USER env var");
+    let pass = env::var("PASS").expect("PASS env var");
 
-    let mut stream = StreamStd::connect_tcp(&host, port).unwrap();
+    let tls = Tls::default();
+    let mut stream = StreamStd::connect_tls(&host, port, &tls).unwrap();
     let mut buf = [0u8; 16 * 1024];
 
     // Read greeting.
@@ -42,7 +46,7 @@ fn main() {
 
     println!("greeting: {greeting:#?}");
 
-    // Initial EHLO over plain TCP.
+    // Initial EHLO.
     let domain: EhloDomain<'_> = Domain::parse(b"localhost").unwrap().into();
     let mut coroutine = SmtpEhlo::new(domain.clone());
     let mut arg: Option<&[u8]> = None;
@@ -62,56 +66,27 @@ fn main() {
         }
     };
 
-    println!("capabilities pre STARTTLS: {capabilities:#?}");
+    println!("capabilities pre auth: {capabilities:#?}");
 
-    // STARTTLS handshake.
-    let mut coroutine = SmtpStartTls::new();
+    // AUTH PLAIN.
+    let password = SecretString::from(pass);
+    let mut coroutine = SmtpPlain::new(&user, &password, domain);
     let mut arg: Option<&[u8]> = None;
 
-    let preread = loop {
+    loop {
         match coroutine.resume(arg.take()) {
-            SmtpStartTlsResult::WantsStartTls(remaining) => break remaining,
-            SmtpStartTlsResult::WantsRead => {
+            SmtpPlainResult::Ok => break,
+            SmtpPlainResult::WantsRead => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpStartTlsResult::WantsWrite(bytes) => {
+            SmtpPlainResult::WantsWrite(bytes) => {
                 stream.write_all(&bytes).unwrap();
                 arg = None;
             }
-            SmtpStartTlsResult::Err(err) => panic!("{err}"),
+            SmtpPlainResult::Err(err) => panic!("{err}"),
         }
-    };
-
-    if !preread.is_empty() {
-        eprintln!(
-            "warning: {} bytes pre-read before TLS upgrade (possible injection)",
-            preread.len()
-        );
     }
 
-    // Upgrade to TLS.
-    let tls = Tls::default();
-    let mut stream = stream.upgrade_tls(&tls).unwrap();
-
-    // EHLO again over TLS.
-    let mut coroutine = SmtpEhlo::new(domain);
-    let mut arg: Option<&[u8]> = None;
-
-    let capabilities = loop {
-        match coroutine.resume(arg.take()) {
-            SmtpEhloResult::Ok { capabilities, .. } => break capabilities,
-            SmtpEhloResult::WantsRead => {
-                let n = stream.read(&mut buf).unwrap();
-                arg = Some(&buf[..n]);
-            }
-            SmtpEhloResult::WantsWrite(bytes) => {
-                stream.write_all(&bytes).unwrap();
-                arg = None;
-            }
-            SmtpEhloResult::Err(err) => panic!("{err}"),
-        }
-    };
-
-    println!("capabilities post STARTTLS: {capabilities:#?}");
+    println!("AUTH PLAIN succeeded");
 }

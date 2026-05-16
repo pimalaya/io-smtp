@@ -3,11 +3,9 @@
 //! Each test drives the raw coroutine loop against a live SMTP
 //! server using blocking [`std::net`] I/O.
 
-use std::{
-    io::{Read, Write},
-    net::TcpStream,
-    sync::Arc,
-};
+#![allow(dead_code)]
+
+use std::io::{Read, Write};
 
 use io_smtp::{
     login::{SmtpLogin, SmtpLoginResult},
@@ -28,8 +26,7 @@ use io_smtp::{
     },
     send::{SmtpMessageSend, SmtpMessageSendResult},
 };
-use rustls::{ClientConfig, ClientConnection, StreamOwned, pki_types::ServerName};
-use rustls_platform_verifier::ConfigVerifierExt;
+use pimalaya_stream::{std::stream::StreamStd, tls::Tls};
 use secrecy::SecretString;
 
 /// Auth mechanism to use for a test run.
@@ -51,7 +48,7 @@ pub enum Auth {
 /// ```
 pub fn run_smtp(host: &str, auth: Auth, email: &str) {
     let _ = env_logger::try_init();
-    let stream = TcpStream::connect((host, 25)).expect("TCP connect");
+    let stream = StreamStd::connect_tcp(host, 25).expect("TCP connect");
     run(stream, auth, email)
 }
 
@@ -67,12 +64,7 @@ pub fn run_smtp(host: &str, auth: Auth, email: &str) {
 /// ```
 pub fn run_smtps(host: &str, port: u16, auth: Auth, email: &str) {
     let _ = env_logger::try_init();
-    let tcp = TcpStream::connect((host, port)).expect("TCP connect");
-    let server_name = ServerName::try_from(host.to_owned()).expect("valid server name");
-    let config = ClientConfig::with_platform_verifier().expect("TLS config");
-    let conn = ClientConnection::new(Arc::new(config), server_name).expect("TLS handshake");
-    let stream = StreamOwned::new(conn, tcp);
-
+    let stream = StreamStd::connect_tls(host, port, &Tls::default()).expect("TLS connect");
     run(stream, auth, email)
 }
 

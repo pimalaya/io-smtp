@@ -16,6 +16,7 @@ pub mod rfc4616;
 pub mod rfc4954;
 pub mod rfc5321;
 pub mod rfc7628;
+#[cfg(feature = "scram")]
 pub mod rfc7677;
 pub mod send;
 pub mod utils;
