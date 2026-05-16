@@ -2,6 +2,8 @@
 //! Mechanisms for OAuth.
 //!
 //! Provides the OAUTHBEARER SASL mechanism for authenticating SMTP sessions
-//! using OAuth 2.0 bearer tokens.
+//! using OAuth 2.0 bearer tokens. The Google-specific XOAUTH2 predecessor is
+//! grouped here as well.
 
 pub mod oauthbearer;
+pub mod xoauth2;

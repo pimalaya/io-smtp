@@ -22,7 +22,7 @@ SMTP client library, written in Rust
   - Light client (requires `client` feature): `SmtpClientStd::new(stream)` wraps a connected `Read + Write` stream and exposes one method per coroutine. You still own TCP / TLS / STARTTLS.
   - Full std client (requires `rustls-ring`, `rustls-aws`, or `native-tls` feature): `SmtpClientStd::connect(url, tls, starttls, domain, sasl)` opens `smtp://` / `smtps://` URLs via [pimalaya/stream](https://github.com/pimalaya/stream), reads the greeting, sends the initial EHLO, drives the optional STARTTLS upgrade with a fresh EHLO over TLS, and runs the chosen SASL mechanism, returning a ready-to-use authenticated client.
 - **SASL mechanisms**:
-  - `LOGIN`, `PLAIN` and `OAUTHBEARER` built-in
+  - `LOGIN`, `PLAIN`, `ANONYMOUS`, `XOAUTH2` and `OAUTHBEARER` built-in
   - `SCRAM-SHA-256` (requires `scram` feature)
 
 *The `io-smtp` library is written in [Rust](https://www.rust-lang.org/), and relies on [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to enable or disable functionalities. Default features can be found in the `features` section of the [`Cargo.toml`](https://github.com/pimalaya/io-smtp/blob/master/Cargo.toml), or on [docs.rs](https://docs.rs/crate/io-smtp/latest/features).*
@@ -38,16 +38,18 @@ This library implements SMTP as I/O-agnostic coroutines: no sockets, no async ru
 | [3207]  | STARTTLS: upgrade a plain connection to TLS                                      |
 | [3461]  | DSN: `RET`, `ENVID`, `NOTIFY`, `ORCPT` ESMTP parameters for MAIL FROM / RCPT TO  |
 | [3463]  | Enhanced status codes: `EnhancedStatusCode` type                                 |
+| [4505]  | ANONYMOUS: SASL ANONYMOUS mechanism                                              |
 | [4616]  | PLAIN: SASL PLAIN authentication mechanism                                       |
 | [4954]  | AUTH: SASL exchange protocol                                                     |
 | [5321]  | SMTP: greeting, EHLO, HELO, MAIL FROM, RCPT TO, DATA, NOOP, RSET, QUIT           |
-| [7628]  | OAUTHBEARER: OAuth 2.0 bearer token SASL mechanism                               |
+| [7628]  | OAUTHBEARER: OAuth 2.0 bearer token SASL mechanism; also XOAUTH2                 |
 | [7677]  | SCRAM-SHA-256: SASL SCRAM-SHA-256 mechanism (feature `scram`)                    |
 
 [1870]: https://www.rfc-editor.org/rfc/rfc1870
 [3207]: https://www.rfc-editor.org/rfc/rfc3207
 [3461]: https://www.rfc-editor.org/rfc/rfc3461
 [3463]: https://www.rfc-editor.org/rfc/rfc3463
+[4505]: https://www.rfc-editor.org/rfc/rfc4505
 [4616]: https://www.rfc-editor.org/rfc/rfc4616
 [4954]: https://www.rfc-editor.org/rfc/rfc4954
 [5321]: https://www.rfc-editor.org/rfc/rfc5321

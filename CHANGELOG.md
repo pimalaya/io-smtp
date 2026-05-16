@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New `rfc4505` module exposing the `ANONYMOUS` SASL mechanism via
+  `SmtpAnonymous` (single-shot `AUTH ANONYMOUS [<trace>]` + EHLO
+  refresh).
+- New `rfc7628::xoauth2` module exposing Google's pre-standard
+  `XOAUTH2` mechanism via `SmtpXOAuth2` (same `334`-error
+  acknowledgement dance as `OAUTHBEARER`).
 - New `client` feature gating a standard, blocking std client:
   `SmtpClientStd::new(stream)` wraps any `Read + Write` and exposes
   one method per SMTP coroutine (greeting, ehlo, helo, starttls,
@@ -18,8 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Behind these, `SmtpClientStd::connect(url, tls, starttls, domain,
   sasl)` handles `smtp://` / `smtps://` URLs end-to-end: TCP / TLS
   setup, greeting, EHLO, optional STARTTLS upgrade with a fresh EHLO
-  over TLS, and the chosen SASL mechanism (`SaslLogin`, `SaslPlain`,
-  `SaslOauthbearer`, `SaslScramSha256` behind `scram`).
+  over TLS, and the chosen SASL mechanism (`SaslAnonymous`,
+  `SaslLogin`, `SaslPlain`, `SaslOauthbearer`, `SaslXoauth2`,
+  `SaslScramSha256` behind `scram`).
 
 ### Changed
 
