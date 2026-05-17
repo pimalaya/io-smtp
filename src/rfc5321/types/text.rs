@@ -38,14 +38,13 @@ impl AsRef<str> for Text<'_> {
 }
 
 pub(crate) mod parsers {
-    use alloc::borrow::Cow;
     use core::str::from_utf8;
+
+    use alloc::borrow::Cow;
 
     use chumsky::prelude::*;
 
-    use crate::utils::parsers::Extra;
-
-    use super::Text;
+    use crate::{rfc5321::types::text::Text, utils::parsers::Extra};
 
     /// SMTP text string parser.
     ///

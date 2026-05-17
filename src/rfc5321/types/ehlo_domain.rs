@@ -7,7 +7,7 @@ use core::{
 
 use bounded_static_derive::ToStatic;
 
-use super::{address_literal::AddressLiteral, domain::Domain};
+use crate::rfc5321::types::{address_literal::AddressLiteral, domain::Domain};
 
 /// The domain identifier used in EHLO/HELO commands.
 ///

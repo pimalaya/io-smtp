@@ -4,7 +4,7 @@ use core::fmt;
 
 use bounded_static_derive::ToStatic;
 
-use super::{ehlo_domain::EhloDomain, local_part::LocalPart};
+use crate::rfc5321::types::{ehlo_domain::EhloDomain, local_part::LocalPart};
 
 /// A full email address: local-part@domain.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]

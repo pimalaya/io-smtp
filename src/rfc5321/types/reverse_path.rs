@@ -4,7 +4,7 @@ use core::fmt;
 
 use bounded_static_derive::ToStatic;
 
-use super::mailbox::Mailbox;
+use crate::rfc5321::types::mailbox::Mailbox;
 
 /// The reverse path for MAIL FROM (can be null <>).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic, Default)]

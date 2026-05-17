@@ -6,7 +6,7 @@
 //! - RFC 5802: Salted Challenge Response Authentication Mechanism (SCRAM)
 //! - RFC 7677: SCRAM-SHA-256 and SCRAM-SHA-256-PLUS SASL Mechanisms
 
-use core::mem;
+use core::{mem, str::from_utf8};
 
 use alloc::{
     borrow::Cow,
@@ -205,7 +205,7 @@ impl SmtpScramSha256 {
                         }
                     };
 
-                    let server_first = match core::str::from_utf8(&server_first_bytes) {
+                    let server_first = match from_utf8(&server_first_bytes) {
                         Ok(s) => s,
                         Err(e) => {
                             return SmtpScramSha256Result::Err(
@@ -267,7 +267,7 @@ impl SmtpScramSha256 {
                     let text = response.text().0.trim_start();
                     let text = strip_enhanced_status(text);
                     if let Ok(server_final_bytes) = base64.decode(text.as_bytes()) {
-                        if let Ok(server_final) = core::str::from_utf8(&server_final_bytes) {
+                        if let Ok(server_final) = from_utf8(&server_final_bytes) {
                             if let Some(v) = server_final.strip_prefix("v=") {
                                 if let Ok(server_sig) = base64.decode(v.as_bytes()) {
                                     if server_sig != self.expected_server_sig {
@@ -339,7 +339,7 @@ impl SmtpScramSha256 {
             })
             .unwrap_or(&[]);
 
-        let client_nonce_str = core::str::from_utf8(client_nonce).unwrap_or("");
+        let client_nonce_str = from_utf8(client_nonce).unwrap_or("");
         if !combined_nonce.starts_with(client_nonce_str) {
             return Err(SmtpScramSha256Error::NonceMismatch);
         }

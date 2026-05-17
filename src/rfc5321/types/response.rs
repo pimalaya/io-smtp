@@ -1,10 +1,11 @@
 //! Module dedicated to the SMTP response.
 
 use alloc::vec::Vec;
+
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
 
-use super::{reply_code::ReplyCode, text::Text, vec1::Vec1};
+use crate::rfc5321::types::{reply_code::ReplyCode, text::Text, vec1::Vec1};
 
 /// A complete SMTP response (possibly multi-line).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]
@@ -72,14 +73,15 @@ pub(crate) mod parsers {
 
     use chumsky::prelude::*;
 
-    use crate::rfc5321::types::{
-        reply_code::parsers::reply_code as reply_code_parser,
-        text::{Text, parsers::text as text_parser},
-        vec1::Vec1,
+    use crate::{
+        rfc5321::types::{
+            reply_code::parsers::reply_code as reply_code_parser,
+            response::Response,
+            text::{Text, parsers::text as text_parser},
+            vec1::Vec1,
+        },
+        utils::parsers::{Extra, crlf, sp},
     };
-    use crate::utils::parsers::{Extra, crlf, sp};
-
-    use super::Response;
 
     /// SMTP response parser.
     ///

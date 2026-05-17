@@ -13,6 +13,12 @@ use thiserror::Error;
 
 use crate::{rfc5321::types::greeting::Greeting, utils::escape_byte_string};
 
+/// Output of [`SmtpClientStd::greeting`]: the parsed greeting line plus
+/// any bytes read past it that the caller may need to re-feed.
+///
+/// [`SmtpClientStd::greeting`]: crate::client::SmtpClientStd::greeting
+pub type SmtpGreetingOutput = (Greeting<'static>, Vec<u8>);
+
 /// Errors that can occur during the coroutine progression.
 #[derive(Debug, Error)]
 pub enum GetSmtpGreetingError {

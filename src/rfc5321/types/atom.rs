@@ -34,14 +34,13 @@ impl<'a> Deref for Atom<'a> {
 }
 
 pub(crate) mod parsers {
-    use alloc::borrow::Cow;
     use core::str::from_utf8;
+
+    use alloc::borrow::Cow;
 
     use chumsky::prelude::*;
 
-    use crate::utils::parsers::Extra;
-
-    use super::Atom;
+    use crate::{rfc5321::types::atom::Atom, utils::parsers::Extra};
 
     /// SMTP atom parser.
     ///

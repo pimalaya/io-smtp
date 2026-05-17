@@ -38,14 +38,13 @@ impl AsRef<str> for Domain<'_> {
 }
 
 pub(crate) mod parsers {
-    use alloc::borrow::Cow;
     use core::str::from_utf8;
+
+    use alloc::borrow::Cow;
 
     use chumsky::prelude::*;
 
-    use crate::utils::parsers::Extra;
-
-    use super::Domain;
+    use crate::{rfc5321::types::domain::Domain, utils::parsers::Extra};
 
     /// SMTP domain parser.
     ///

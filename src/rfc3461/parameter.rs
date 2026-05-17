@@ -15,6 +15,8 @@
 //! let coroutine = SmtpRcpt::with_params(forward_path, params);
 //! ```
 
+use core::ops::BitOr;
+
 use alloc::{borrow::Cow, string::String, vec::Vec};
 
 use crate::rfc5321::types::{atom::Atom, parameter::Parameter};
@@ -119,7 +121,7 @@ impl DsnNotify {
     }
 }
 
-impl core::ops::BitOr for DsnNotify {
+impl BitOr for DsnNotify {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self {
         Self(self.0 | rhs.0)

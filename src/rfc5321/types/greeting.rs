@@ -1,12 +1,13 @@
 //! Module dedicated to the SMTP greeting.
 
-use alloc::vec::Vec;
 use core::fmt;
+
+use alloc::vec::Vec;
 
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
 
-use super::{domain::Domain, text::Text};
+use crate::rfc5321::types::{domain::Domain, text::Text};
 
 /// Server greeting sent upon connection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]
@@ -67,11 +68,9 @@ pub(crate) mod parsers {
     use chumsky::prelude::*;
 
     use crate::{
-        rfc5321::types::{domain::parsers::domain, text::parsers::text},
+        rfc5321::types::{domain::parsers::domain, greeting::Greeting, text::parsers::text},
         utils::parsers::{Extra, crlf, sp},
     };
-
-    use super::Greeting;
 
     /// SMTP greeting parser.
     ///

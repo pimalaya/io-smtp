@@ -331,9 +331,10 @@ pub mod parsers {
     #[cfg(test)]
     mod tests {
         use alloc::string::String;
+
         use chumsky::prelude::*;
 
-        use super::{Extra, format_rich_errors, tag_no_case};
+        use crate::utils::parsers::{Extra, format_rich_errors, tag_no_case};
 
         fn parse_errors<'src, P, O>(parser: P, input: &'src [u8]) -> String
         where

@@ -1,7 +1,8 @@
 //! Module dedicated to the non-empty vector.
 
+use core::fmt::{self, Debug, Formatter};
+
 use alloc::{vec::IntoIter, vec::Vec};
-use core::fmt::{Debug, Formatter};
 
 use bounded_static_derive::ToStatic;
 
@@ -10,7 +11,7 @@ use bounded_static_derive::ToStatic;
 pub struct Vec1<T>(pub(crate) Vec<T>);
 
 impl<T: Debug> Debug for Vec1<T> {
-    fn fmt(&self, f: &mut Formatter) -> core::fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         self.0.fmt(f)?;
         write!(f, "+")
     }

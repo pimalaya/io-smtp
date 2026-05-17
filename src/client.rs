@@ -26,13 +26,10 @@
     feature = "rustls-ring",
     feature = "native-tls"
 ))]
-use std::string::{String, ToString};
-use std::{
-    io::{self, Read, Write},
-    vec::Vec,
-};
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use std::io::{self, Read, Write};
 
-use alloc::borrow::Cow;
 use secrecy::SecretString;
 use thiserror::Error;
 
@@ -78,7 +75,7 @@ use crate::{
         rcpt::*,
         rset::*,
         types::{
-            domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath, greeting::Greeting,
+            domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath,
             parameter::Parameter, reverse_path::ReversePath,
         },
     },
@@ -170,16 +167,8 @@ pub enum SmtpClientStdError {
     StartTlsOverTls,
 }
 
-/// Output of [`SmtpClientStd::greeting`]: the parsed greeting line
-/// plus any bytes read past it that the caller may need to re-feed.
-pub type SmtpGreetingOutput = (Greeting<'static>, Vec<u8>);
-
-/// Output of [`SmtpClientStd::ehlo`]: the raw capability strings (one
-/// entry per EHLO continuation line) plus any bytes read past the
-/// final reply line.
-pub type SmtpEhloOutput = (Vec<Cow<'static, str>>, Vec<u8>);
-
 /// Std-blocking SMTP client wrapping a single `Read + Write` stream.
+#[derive(Debug)]
 pub struct SmtpClientStd<S: Read + Write> {
     stream: S,
 }

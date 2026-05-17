@@ -278,9 +278,7 @@ impl fmt::Display for ReplyCode {
 pub(crate) mod parsers {
     use chumsky::prelude::*;
 
-    use crate::utils::parsers::Extra;
-
-    use super::ReplyCode;
+    use crate::{rfc5321::types::reply_code::ReplyCode, utils::parsers::Extra};
 
     /// SMTP reply code parser.
     ///

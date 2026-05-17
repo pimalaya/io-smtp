@@ -5,7 +5,7 @@ use alloc::{borrow::Cow, vec::Vec};
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
 
-use super::{domain::Domain, text::Text};
+use crate::rfc5321::types::{domain::Domain, text::Text};
 
 /// EHLO response containing server capabilities.
 ///
@@ -75,19 +75,19 @@ impl EhloResponse<'_> {
 }
 
 pub(crate) mod parsers {
-    use alloc::{borrow::Cow, vec::Vec};
     use core::str::from_utf8;
+
+    use alloc::{borrow::Cow, vec::Vec};
 
     use chumsky::prelude::*;
 
     use crate::{
         rfc5321::types::{
-            domain::parsers::domain as domain_parser, text::parsers::text as text_parser,
+            domain::parsers::domain as domain_parser, ehlo_response::EhloResponse,
+            text::parsers::text as text_parser,
         },
         utils::parsers::{Extra, crlf, sp},
     };
-
-    use super::EhloResponse;
 
     /// Parses a single EHLO capability line as a raw string.
     pub(crate) fn capability<'a>() -> impl Parser<'a, &'a [u8], Cow<'a, str>, Extra<'a>> + Clone {

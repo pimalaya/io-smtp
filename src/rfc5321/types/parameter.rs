@@ -1,11 +1,12 @@
 //! Module dedicated to the SMTP parameter.
 
-use alloc::borrow::Cow;
 use core::fmt;
+
+use alloc::borrow::Cow;
 
 use bounded_static_derive::ToStatic;
 
-use super::atom::Atom;
+use crate::rfc5321::types::atom::Atom;
 
 /// An ESMTP parameter (keyword[=value]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]

@@ -17,6 +17,13 @@ use crate::{
     utils::escape_byte_string,
 };
 
+/// Output of [`SmtpClientStd::ehlo`]: the raw capability strings (one
+/// entry per EHLO continuation line) plus any bytes read past the
+/// final reply line.
+///
+/// [`SmtpClientStd::ehlo`]: crate::client::SmtpClientStd::ehlo
+pub type SmtpEhloOutput = (Vec<Cow<'static, str>>, Vec<u8>);
+
 /// The EHLO command (RFC 5321 §4.1.1.1).
 pub struct SmtpEhloCommand<'a> {
     /// The client's domain or address literal.

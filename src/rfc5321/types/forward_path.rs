@@ -4,7 +4,7 @@ use core::fmt;
 
 use bounded_static_derive::ToStatic;
 
-use super::mailbox::Mailbox;
+use crate::rfc5321::types::mailbox::Mailbox;
 
 /// The forward path for RCPT TO.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]
