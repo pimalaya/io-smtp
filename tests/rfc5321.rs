@@ -4,11 +4,11 @@
 //! response buffers. No network connection is made.
 
 use io_smtp::rfc5321::{
-    ehlo::{SmtpEhlo, SmtpEhloResult},
-    greeting::{GetSmtpGreeting, GetSmtpGreetingResult},
-    noop::{SmtpNoop, SmtpNoopResult},
-    quit::{SmtpQuit, SmtpQuitResult},
-    rset::{SmtpRset, SmtpRsetResult},
+    ehlo::*,
+    greeting::*,
+    noop::*,
+    quit::*,
+    rset::*,
     types::{domain::Domain, ehlo_domain::EhloDomain},
 };
 
