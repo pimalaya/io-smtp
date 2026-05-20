@@ -221,6 +221,7 @@ pub mod parsers {
             RichPattern::Identifier(s) => s.clone(),
             RichPattern::Any => "any byte".to_string(),
             RichPattern::SomethingElse => "something else".to_string(),
+            _ => "unknown pattern".to_string(),
         }
     }
 
