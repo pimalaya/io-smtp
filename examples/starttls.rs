@@ -4,6 +4,7 @@ use std::{
 };
 
 use io_smtp::{
+    coroutine::*,
     rfc3207::starttls::*,
     rfc5321::{
         ehlo::*,
@@ -31,12 +32,13 @@ fn main() {
 
     let greeting = loop {
         match coroutine.resume(arg.take()) {
-            GetSmtpGreetingResult::Ok { greeting, .. } => break greeting,
-            GetSmtpGreetingResult::WantsRead => {
+            SmtpCoroutineState::Done((greeting, _)) => break greeting,
+            SmtpCoroutineState::WantsRead => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            GetSmtpGreetingResult::Err(err) => panic!("{err}"),
+            SmtpCoroutineState::WantsWrite(_) => arg = None,
+            SmtpCoroutineState::Err(err) => panic!("{err}"),
         }
     };
 
@@ -49,22 +51,22 @@ fn main() {
 
     let capabilities = loop {
         match coroutine.resume(arg.take()) {
-            SmtpEhloResult::Ok { capabilities, .. } => break capabilities,
-            SmtpEhloResult::WantsRead => {
+            SmtpCoroutineState::Done((capabilities, _)) => break capabilities,
+            SmtpCoroutineState::WantsRead => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpEhloResult::WantsWrite(bytes) => {
+            SmtpCoroutineState::WantsWrite(bytes) => {
                 stream.write_all(&bytes).unwrap();
                 arg = None;
             }
-            SmtpEhloResult::Err(err) => panic!("{err}"),
+            SmtpCoroutineState::Err(err) => panic!("{err}"),
         }
     };
 
     println!("capabilities pre STARTTLS: {capabilities:#?}");
 
-    // STARTTLS handshake.
+    // STARTTLS handshake (exempt coroutine: keeps its own result enum).
     let mut coroutine = SmtpStartTls::new();
     let mut arg: Option<&[u8]> = None;
 
@@ -100,16 +102,16 @@ fn main() {
 
     let capabilities = loop {
         match coroutine.resume(arg.take()) {
-            SmtpEhloResult::Ok { capabilities, .. } => break capabilities,
-            SmtpEhloResult::WantsRead => {
+            SmtpCoroutineState::Done((capabilities, _)) => break capabilities,
+            SmtpCoroutineState::WantsRead => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpEhloResult::WantsWrite(bytes) => {
+            SmtpCoroutineState::WantsWrite(bytes) => {
                 stream.write_all(&bytes).unwrap();
                 arg = None;
             }
-            SmtpEhloResult::Err(err) => panic!("{err}"),
+            SmtpCoroutineState::Err(err) => panic!("{err}"),
         }
     };
 

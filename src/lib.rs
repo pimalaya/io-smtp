@@ -9,6 +9,7 @@ extern crate std;
 
 #[cfg(feature = "client")]
 pub mod client;
+pub mod coroutine;
 pub mod login;
 pub mod rfc1870;
 pub mod rfc3207;

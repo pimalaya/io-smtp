@@ -1,6 +1,6 @@
 use std::{env, io::Read};
 
-use io_smtp::rfc5321::greeting::*;
+use io_smtp::{coroutine::*, rfc5321::greeting::*};
 use pimalaya_stream::{std::stream::StreamStd, tls::Tls};
 
 fn main() {
@@ -21,12 +21,13 @@ fn main() {
 
     let greeting = loop {
         match coroutine.resume(arg.take()) {
-            GetSmtpGreetingResult::Ok { greeting, .. } => break greeting,
-            GetSmtpGreetingResult::WantsRead => {
+            SmtpCoroutineState::Done((greeting, _)) => break greeting,
+            SmtpCoroutineState::WantsRead => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            GetSmtpGreetingResult::Err(err) => panic!("{err}"),
+            SmtpCoroutineState::WantsWrite(_) => arg = None,
+            SmtpCoroutineState::Err(err) => panic!("{err}"),
         }
     };
 

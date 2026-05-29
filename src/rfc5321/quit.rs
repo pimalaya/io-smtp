@@ -11,6 +11,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
+    coroutine::{SmtpCoroutine, SmtpCoroutineState},
     rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
 };
@@ -33,15 +34,6 @@ pub enum SmtpQuitError {
     ParseResponse(String),
     #[error("QUIT rejected: {code} {message}")]
     Rejected { code: u16, message: String },
-}
-
-/// Result returned by [`SmtpQuit::resume`].
-#[derive(Debug)]
-pub enum SmtpQuitResult {
-    Ok,
-    WantsRead,
-    WantsWrite(Vec<u8>),
-    Err(SmtpQuitError),
 }
 
 /// I/O-free coroutine to send SMTP QUIT command.
@@ -68,20 +60,24 @@ impl SmtpQuit {
             buf: Vec::new(),
         }
     }
+}
 
-    /// Advances the coroutine.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpQuitResult {
+impl SmtpCoroutine for SmtpQuit {
+    type Output = ();
+    type Error = SmtpQuitError;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpQuitResult::WantsWrite(bytes);
+                return SmtpCoroutineState::WantsWrite(bytes);
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpQuitResult::WantsRead;
+                return SmtpCoroutineState::WantsRead;
             }
 
             match arg.take() {
-                Some(&[]) => return SmtpQuitResult::Err(SmtpQuitError::Eof),
+                Some(&[]) => return SmtpCoroutineState::Err(SmtpQuitError::Eof),
                 Some(data) => {
                     trace!("read SMTP bytes: {}", escape_byte_string(data));
                     self.buf.extend_from_slice(data);
@@ -97,11 +93,11 @@ impl SmtpQuit {
             return match Response::parse(&self.buf) {
                 Ok(response) => {
                     if response.code == ReplyCode::SERVICE_CLOSING {
-                        SmtpQuitResult::Ok
+                        SmtpCoroutineState::Done(())
                     } else {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        SmtpQuitResult::Err(SmtpQuitError::Rejected { code, message })
+                        SmtpCoroutineState::Err(SmtpQuitError::Rejected { code, message })
                     }
                 }
                 Err(errors) => {
@@ -111,7 +107,7 @@ impl SmtpQuit {
                         .collect::<Vec<_>>()
                         .join("; ");
 
-                    SmtpQuitResult::Err(SmtpQuitError::ParseResponse(reason))
+                    SmtpCoroutineState::Err(SmtpQuitError::ParseResponse(reason))
                 }
             };
         }

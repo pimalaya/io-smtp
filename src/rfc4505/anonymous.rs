@@ -29,9 +29,10 @@ use secrecy::SecretBox;
 use thiserror::Error;
 
 use crate::{
+    coroutine::{SmtpCoroutine, SmtpCoroutineState},
     rfc4954::auth::SmtpAuthCommand,
     rfc5321::{
-        ehlo::{SmtpEhlo, SmtpEhloError, SmtpEhloResult},
+        ehlo::{SmtpEhlo, SmtpEhloError},
         types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
@@ -51,15 +52,6 @@ pub enum SmtpAnonymousError {
     Rejected { code: u16, message: String },
     #[error(transparent)]
     Ehlo(#[from] SmtpEhloError),
-}
-
-/// Result returned by [`SmtpAnonymous::resume`].
-#[derive(Debug)]
-pub enum SmtpAnonymousResult {
-    Ok,
-    WantsRead,
-    WantsWrite(Vec<u8>),
-    Err(SmtpAnonymousError),
 }
 
 enum State {
@@ -108,22 +100,26 @@ impl SmtpAnonymous {
             buf: Vec::new(),
         }
     }
+}
 
-    /// Advances the coroutine.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpAnonymousResult {
+impl SmtpCoroutine for SmtpAnonymous {
+    type Output = ();
+    type Error = SmtpAnonymousError;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpAnonymousResult::WantsWrite(bytes);
+                return SmtpCoroutineState::WantsWrite(bytes);
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpAnonymousResult::WantsRead;
+                return SmtpCoroutineState::WantsRead;
             }
 
             match &mut self.state {
                 State::AwaitAuth => {
                     match arg.take() {
-                        Some(&[]) => return SmtpAnonymousResult::Err(SmtpAnonymousError::Eof),
+                        Some(&[]) => return SmtpCoroutineState::Err(SmtpAnonymousError::Eof),
                         Some(data) => {
                             trace!("read SMTP bytes: {}", escape_byte_string(data));
                             self.buf.extend_from_slice(data);
@@ -145,7 +141,7 @@ impl SmtpAnonymous {
                                 .collect::<Vec<_>>()
                                 .join("; ");
 
-                            return SmtpAnonymousResult::Err(SmtpAnonymousError::ParseResponse(
+                            return SmtpCoroutineState::Err(SmtpAnonymousError::ParseResponse(
                                 reason,
                             ));
                         }
@@ -154,7 +150,7 @@ impl SmtpAnonymous {
                     if response.code != ReplyCode::AUTH_SUCCESSFUL {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        return SmtpAnonymousResult::Err(SmtpAnonymousError::Rejected {
+                        return SmtpCoroutineState::Err(SmtpAnonymousError::Rejected {
                             code,
                             message,
                         });
@@ -165,13 +161,13 @@ impl SmtpAnonymous {
                     self.state = State::Ehlo(SmtpEhlo::new(domain));
                 }
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpEhloResult::Ok { .. } => return SmtpAnonymousResult::Ok,
-                    SmtpEhloResult::WantsRead => return SmtpAnonymousResult::WantsRead,
-                    SmtpEhloResult::WantsWrite(bytes) => {
-                        return SmtpAnonymousResult::WantsWrite(bytes);
+                    SmtpCoroutineState::Done(_) => return SmtpCoroutineState::Done(()),
+                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
+                    SmtpCoroutineState::WantsWrite(bytes) => {
+                        return SmtpCoroutineState::WantsWrite(bytes);
                     }
-                    SmtpEhloResult::Err(err) => {
-                        return SmtpAnonymousResult::Err(SmtpAnonymousError::Ehlo(err));
+                    SmtpCoroutineState::Err(err) => {
+                        return SmtpCoroutineState::Err(SmtpAnonymousError::Ehlo(err));
                     }
                 },
             }

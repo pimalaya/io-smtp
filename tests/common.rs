@@ -8,23 +8,24 @@
 use std::io::{Read, Write};
 
 use io_smtp::{
-    login::{SmtpLogin, SmtpLoginResult},
-    rfc4616::plain::{SmtpPlain, SmtpPlainResult},
+    coroutine::*,
+    login::SmtpLogin,
+    rfc4616::plain::SmtpPlain,
     rfc5321::{
-        ehlo::{SmtpEhlo, SmtpEhloResult},
-        greeting::{GetSmtpGreeting, GetSmtpGreetingResult},
-        helo::{SmtpHelo, SmtpHeloResult},
-        mail::{SmtpMail, SmtpMailResult},
-        noop::{SmtpNoop, SmtpNoopResult},
-        quit::{SmtpQuit, SmtpQuitResult},
-        rcpt::{SmtpRcpt, SmtpRcptResult},
-        rset::{SmtpRset, SmtpRsetResult},
+        ehlo::SmtpEhlo,
+        greeting::GetSmtpGreeting,
+        helo::SmtpHelo,
+        mail::SmtpMail,
+        noop::SmtpNoop,
+        quit::SmtpQuit,
+        rcpt::SmtpRcpt,
+        rset::SmtpRset,
         types::{
             domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath,
             local_part::LocalPart, mailbox::Mailbox, reverse_path::ReversePath,
         },
     },
-    send::{SmtpMessageSend, SmtpMessageSendResult},
+    send::SmtpMessageSend,
 };
 use pimalaya_stream::{std::stream::StreamStd, tls::Tls};
 use secrecy::SecretString;
@@ -87,12 +88,13 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            GetSmtpGreetingResult::Ok { .. } => break,
-            GetSmtpGreetingResult::WantsRead => {
+            SmtpCoroutineState::Done(_) => break,
+            SmtpCoroutineState::WantsRead => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            GetSmtpGreetingResult::Err(err) => panic!("GREETING: {err}"),
+            SmtpCoroutineState::WantsWrite(_) => arg = None,
+            SmtpCoroutineState::Err(err) => panic!("GREETING: {err}"),
         }
     }
 
@@ -104,13 +106,13 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpHeloResult::Ok => break,
-            SmtpHeloResult::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpHeloResult::WantsRead => {
+            SmtpCoroutineState::Done(()) => break,
+            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
+            SmtpCoroutineState::WantsRead => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpHeloResult::Err(err) => panic!("HELO: {err}"),
+            SmtpCoroutineState::Err(err) => panic!("HELO: {err}"),
         }
     }
 
@@ -122,13 +124,13 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpEhloResult::Ok { .. } => break,
-            SmtpEhloResult::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpEhloResult::WantsRead => {
+            SmtpCoroutineState::Done(_) => break,
+            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
+            SmtpCoroutineState::WantsRead => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpEhloResult::Err(err) => panic!("EHLO: {err}"),
+            SmtpCoroutineState::Err(err) => panic!("EHLO: {err}"),
         }
     }
 
@@ -144,13 +146,15 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
             loop {
                 match coroutine.resume(arg.take()) {
-                    SmtpPlainResult::Ok => break,
-                    SmtpPlainResult::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-                    SmtpPlainResult::WantsRead => {
+                    SmtpCoroutineState::Done(()) => break,
+                    SmtpCoroutineState::WantsWrite(bytes) => {
+                        stream.write_all(&bytes).expect("write")
+                    }
+                    SmtpCoroutineState::WantsRead => {
                         chunk = read_chunk(&mut stream, &mut buf);
                         arg = Some(&chunk);
                     }
-                    SmtpPlainResult::Err(err) => panic!("AUTH PLAIN: {err}"),
+                    SmtpCoroutineState::Err(err) => panic!("AUTH PLAIN: {err}"),
                 }
             }
         }
@@ -162,13 +166,15 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
             loop {
                 match coroutine.resume(arg.take()) {
-                    SmtpLoginResult::Ok => break,
-                    SmtpLoginResult::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-                    SmtpLoginResult::WantsRead => {
+                    SmtpCoroutineState::Done(()) => break,
+                    SmtpCoroutineState::WantsWrite(bytes) => {
+                        stream.write_all(&bytes).expect("write")
+                    }
+                    SmtpCoroutineState::WantsRead => {
                         chunk = read_chunk(&mut stream, &mut buf);
                         arg = Some(&chunk);
                     }
-                    SmtpLoginResult::Err(err) => panic!("AUTH LOGIN: {err}"),
+                    SmtpCoroutineState::Err(err) => panic!("AUTH LOGIN: {err}"),
                 }
             }
         }
@@ -182,13 +188,13 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpNoopResult::Ok => break,
-            SmtpNoopResult::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpNoopResult::WantsRead => {
+            SmtpCoroutineState::Done(()) => break,
+            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
+            SmtpCoroutineState::WantsRead => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpNoopResult::Err(err) => panic!("NOOP: {err}"),
+            SmtpCoroutineState::Err(err) => panic!("NOOP: {err}"),
         }
     }
 
@@ -211,13 +217,13 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpMailResult::Ok => break,
-            SmtpMailResult::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpMailResult::WantsRead => {
+            SmtpCoroutineState::Done(()) => break,
+            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
+            SmtpCoroutineState::WantsRead => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpMailResult::Err(err) => panic!("MAIL FROM (aborted): {err}"),
+            SmtpCoroutineState::Err(err) => panic!("MAIL FROM (aborted): {err}"),
         }
     }
 
@@ -227,13 +233,13 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpRcptResult::Ok => break,
-            SmtpRcptResult::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpRcptResult::WantsRead => {
+            SmtpCoroutineState::Done(()) => break,
+            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
+            SmtpCoroutineState::WantsRead => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpRcptResult::Err(err) => panic!("RCPT TO (aborted): {err}"),
+            SmtpCoroutineState::Err(err) => panic!("RCPT TO (aborted): {err}"),
         }
     }
 
@@ -243,13 +249,13 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpRsetResult::Ok => break,
-            SmtpRsetResult::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpRsetResult::WantsRead => {
+            SmtpCoroutineState::Done(()) => break,
+            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
+            SmtpCoroutineState::WantsRead => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpRsetResult::Err(err) => panic!("RSET: {err}"),
+            SmtpCoroutineState::Err(err) => panic!("RSET: {err}"),
         }
     }
 
@@ -273,13 +279,13 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpMessageSendResult::Ok => break,
-            SmtpMessageSendResult::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpMessageSendResult::WantsRead => {
+            SmtpCoroutineState::Done(()) => break,
+            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
+            SmtpCoroutineState::WantsRead => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpMessageSendResult::Err(err) => panic!("send message: {err}"),
+            SmtpCoroutineState::Err(err) => panic!("send message: {err}"),
         }
     }
 
@@ -291,13 +297,13 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpQuitResult::Ok => break,
-            SmtpQuitResult::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpQuitResult::WantsRead => {
+            SmtpCoroutineState::Done(()) => break,
+            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
+            SmtpCoroutineState::WantsRead => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpQuitResult::Err(err) => panic!("QUIT: {err}"),
+            SmtpCoroutineState::Err(err) => panic!("QUIT: {err}"),
         }
     }
 }

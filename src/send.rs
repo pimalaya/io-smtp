@@ -5,11 +5,14 @@ use alloc::{collections::VecDeque, vec::Vec};
 use bounded_static::IntoBoundedStatic;
 use thiserror::Error;
 
-use crate::rfc5321::{
-    data::{SmtpData, SmtpDataError, SmtpDataResult},
-    mail::{SmtpMail, SmtpMailError, SmtpMailResult},
-    rcpt::{SmtpRcpt, SmtpRcptError, SmtpRcptResult},
-    types::{forward_path::ForwardPath, reverse_path::ReversePath},
+use crate::{
+    coroutine::{SmtpCoroutine, SmtpCoroutineState},
+    rfc5321::{
+        data::{SmtpData, SmtpDataError},
+        mail::{SmtpMail, SmtpMailError},
+        rcpt::{SmtpRcpt, SmtpRcptError},
+        types::{forward_path::ForwardPath, reverse_path::ReversePath},
+    },
 };
 
 /// Errors that can occur during the coroutine progression.
@@ -21,15 +24,6 @@ pub enum SmtpMessageSendError {
     RcptTo(#[from] SmtpRcptError),
     #[error(transparent)]
     Data(#[from] SmtpDataError),
-}
-
-/// Result returned by [`SmtpMessageSend::resume`].
-#[derive(Debug)]
-pub enum SmtpMessageSendResult {
-    Ok,
-    WantsRead,
-    WantsWrite(Vec<u8>),
-    Err(SmtpMessageSendError),
 }
 
 enum State {
@@ -65,19 +59,23 @@ impl SmtpMessageSend {
             message: Some(message),
         }
     }
+}
 
-    /// Advances the coroutine.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpMessageSendResult {
+impl SmtpCoroutine for SmtpMessageSend {
+    type Output = ();
+    type Error = SmtpMessageSendError;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
         loop {
             match &mut self.state {
                 State::MailFrom(mail) => match mail.resume(arg.take()) {
-                    SmtpMailResult::Ok => self.state = State::PrepareRcptTo,
-                    SmtpMailResult::WantsRead => return SmtpMessageSendResult::WantsRead,
-                    SmtpMailResult::WantsWrite(bytes) => {
-                        return SmtpMessageSendResult::WantsWrite(bytes);
+                    SmtpCoroutineState::Done(()) => self.state = State::PrepareRcptTo,
+                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
+                    SmtpCoroutineState::WantsWrite(bytes) => {
+                        return SmtpCoroutineState::WantsWrite(bytes);
                     }
-                    SmtpMailResult::Err(err) => {
-                        return SmtpMessageSendResult::Err(SmtpMessageSendError::MailFrom(err));
+                    SmtpCoroutineState::Err(err) => {
+                        return SmtpCoroutineState::Err(SmtpMessageSendError::MailFrom(err));
                     }
                 },
                 State::PrepareRcptTo => {
@@ -90,23 +88,23 @@ impl SmtpMessageSend {
                     };
                 }
                 State::RcptTo(rcpt) => match rcpt.resume(arg.take()) {
-                    SmtpRcptResult::Ok => self.state = State::PrepareRcptTo,
-                    SmtpRcptResult::WantsRead => return SmtpMessageSendResult::WantsRead,
-                    SmtpRcptResult::WantsWrite(bytes) => {
-                        return SmtpMessageSendResult::WantsWrite(bytes);
+                    SmtpCoroutineState::Done(()) => self.state = State::PrepareRcptTo,
+                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
+                    SmtpCoroutineState::WantsWrite(bytes) => {
+                        return SmtpCoroutineState::WantsWrite(bytes);
                     }
-                    SmtpRcptResult::Err(err) => {
-                        return SmtpMessageSendResult::Err(SmtpMessageSendError::RcptTo(err));
+                    SmtpCoroutineState::Err(err) => {
+                        return SmtpCoroutineState::Err(SmtpMessageSendError::RcptTo(err));
                     }
                 },
                 State::Data(data) => match data.resume(arg.take()) {
-                    SmtpDataResult::Ok => return SmtpMessageSendResult::Ok,
-                    SmtpDataResult::WantsRead => return SmtpMessageSendResult::WantsRead,
-                    SmtpDataResult::WantsWrite(bytes) => {
-                        return SmtpMessageSendResult::WantsWrite(bytes);
+                    SmtpCoroutineState::Done(()) => return SmtpCoroutineState::Done(()),
+                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
+                    SmtpCoroutineState::WantsWrite(bytes) => {
+                        return SmtpCoroutineState::WantsWrite(bytes);
                     }
-                    SmtpDataResult::Err(err) => {
-                        return SmtpMessageSendResult::Err(SmtpMessageSendError::Data(err));
+                    SmtpCoroutineState::Err(err) => {
+                        return SmtpCoroutineState::Err(SmtpMessageSendError::Data(err));
                     }
                 },
             }

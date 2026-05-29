@@ -35,9 +35,10 @@ use secrecy::{ExposeSecret, SecretBox, SecretString};
 use thiserror::Error;
 
 use crate::{
+    coroutine::{SmtpCoroutine, SmtpCoroutineState},
     rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
     rfc5321::{
-        ehlo::{SmtpEhlo, SmtpEhloError, SmtpEhloResult},
+        ehlo::{SmtpEhlo, SmtpEhloError},
         types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
@@ -57,15 +58,6 @@ pub enum SmtpXoauth2Error {
     Rejected { code: u16, message: String },
     #[error(transparent)]
     Ehlo(#[from] SmtpEhloError),
-}
-
-/// Result returned by [`SmtpXOAuth2::resume`].
-#[derive(Debug)]
-pub enum SmtpXoauth2Result {
-    Ok,
-    WantsRead,
-    WantsWrite(Vec<u8>),
-    Err(SmtpXoauth2Error),
 }
 
 enum State {
@@ -114,22 +106,26 @@ impl SmtpXoauth2 {
             buf: Vec::new(),
         }
     }
+}
 
-    /// Advances the coroutine.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpXoauth2Result {
+impl SmtpCoroutine for SmtpXoauth2 {
+    type Output = ();
+    type Error = SmtpXoauth2Error;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpXoauth2Result::WantsWrite(bytes);
+                return SmtpCoroutineState::WantsWrite(bytes);
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpXoauth2Result::WantsRead;
+                return SmtpCoroutineState::WantsRead;
             }
 
             match &mut self.state {
                 State::AwaitInitial => {
                     match arg.take() {
-                        Some(&[]) => return SmtpXoauth2Result::Err(SmtpXoauth2Error::Eof),
+                        Some(&[]) => return SmtpCoroutineState::Err(SmtpXoauth2Error::Eof),
                         Some(data) => {
                             trace!("read SMTP bytes: {}", escape_byte_string(data));
                             self.buf.extend_from_slice(data);
@@ -151,7 +147,9 @@ impl SmtpXoauth2 {
                                 .collect::<Vec<_>>()
                                 .join("; ");
 
-                            return SmtpXoauth2Result::Err(SmtpXoauth2Error::ParseResponse(reason));
+                            return SmtpCoroutineState::Err(SmtpXoauth2Error::ParseResponse(
+                                reason,
+                            ));
                         }
                     };
 
@@ -171,17 +169,17 @@ impl SmtpXoauth2 {
                         self.buf.clear();
                         self.state = State::AwaitError;
                         let ack: Vec<u8> = SmtpAuthData::r#continue(vec![0x01u8]).into();
-                        return SmtpXoauth2Result::WantsWrite(ack);
+                        return SmtpCoroutineState::WantsWrite(ack);
                     }
 
                     let code = response.code.code();
                     let message = response.text().to_string();
-                    return SmtpXoauth2Result::Err(SmtpXoauth2Error::Rejected { code, message });
+                    return SmtpCoroutineState::Err(SmtpXoauth2Error::Rejected { code, message });
                 }
 
                 State::AwaitError => {
                     match arg.take() {
-                        Some(&[]) => return SmtpXoauth2Result::Err(SmtpXoauth2Error::Eof),
+                        Some(&[]) => return SmtpCoroutineState::Err(SmtpXoauth2Error::Eof),
                         Some(data) => {
                             trace!("read SMTP bytes: {}", escape_byte_string(data));
                             self.buf.extend_from_slice(data);
@@ -199,20 +197,20 @@ impl SmtpXoauth2 {
                         .take()
                         .unwrap_or_else(|| "authentication failed".into());
 
-                    return SmtpXoauth2Result::Err(SmtpXoauth2Error::Rejected {
+                    return SmtpCoroutineState::Err(SmtpXoauth2Error::Rejected {
                         code: 535,
                         message,
                     });
                 }
 
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpEhloResult::Ok { .. } => return SmtpXoauth2Result::Ok,
-                    SmtpEhloResult::WantsRead => return SmtpXoauth2Result::WantsRead,
-                    SmtpEhloResult::WantsWrite(bytes) => {
-                        return SmtpXoauth2Result::WantsWrite(bytes);
+                    SmtpCoroutineState::Done(_) => return SmtpCoroutineState::Done(()),
+                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
+                    SmtpCoroutineState::WantsWrite(bytes) => {
+                        return SmtpCoroutineState::WantsWrite(bytes);
                     }
-                    SmtpEhloResult::Err(err) => {
-                        return SmtpXoauth2Result::Err(SmtpXoauth2Error::Ehlo(err));
+                    SmtpCoroutineState::Err(err) => {
+                        return SmtpCoroutineState::Err(SmtpXoauth2Error::Ehlo(err));
                     }
                 },
             }

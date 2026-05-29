@@ -13,6 +13,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
+    coroutine::{SmtpCoroutine, SmtpCoroutineState},
     rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
 };
@@ -48,15 +49,6 @@ pub enum SmtpNoopError {
     Rejected { code: u16, message: String },
 }
 
-/// Result returned by [`SmtpNoop::resume`].
-#[derive(Debug)]
-pub enum SmtpNoopResult {
-    Ok,
-    WantsRead,
-    WantsWrite(Vec<u8>),
-    Err(SmtpNoopError),
-}
-
 /// I/O-free coroutine to send SMTP NOOP command.
 pub struct SmtpNoop {
     wants_read: bool,
@@ -83,20 +75,24 @@ impl SmtpNoop {
             buf: Vec::new(),
         }
     }
+}
 
-    /// Advances the coroutine.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpNoopResult {
+impl SmtpCoroutine for SmtpNoop {
+    type Output = ();
+    type Error = SmtpNoopError;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpNoopResult::WantsWrite(bytes);
+                return SmtpCoroutineState::WantsWrite(bytes);
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpNoopResult::WantsRead;
+                return SmtpCoroutineState::WantsRead;
             }
 
             match arg.take() {
-                Some(&[]) => return SmtpNoopResult::Err(SmtpNoopError::Eof),
+                Some(&[]) => return SmtpCoroutineState::Err(SmtpNoopError::Eof),
                 Some(data) => {
                     trace!("read SMTP bytes: {}", escape_byte_string(data));
                     self.buf.extend_from_slice(data);
@@ -113,11 +109,11 @@ impl SmtpNoop {
                 Ok(response) => {
                     let response = response.into_static();
                     if response.code == ReplyCode::OK {
-                        SmtpNoopResult::Ok
+                        SmtpCoroutineState::Done(())
                     } else {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        SmtpNoopResult::Err(SmtpNoopError::Rejected { code, message })
+                        SmtpCoroutineState::Err(SmtpNoopError::Rejected { code, message })
                     }
                 }
                 Err(errors) => {
@@ -127,7 +123,7 @@ impl SmtpNoop {
                         .collect::<Vec<_>>()
                         .join("; ");
 
-                    SmtpNoopResult::Err(SmtpNoopError::ParseResponse(reason))
+                    SmtpCoroutineState::Err(SmtpNoopError::ParseResponse(reason))
                 }
             };
         }

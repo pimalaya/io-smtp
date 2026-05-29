@@ -24,9 +24,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
+    coroutine::{SmtpCoroutine, SmtpCoroutineState},
     rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
     rfc5321::{
-        ehlo::{SmtpEhlo, SmtpEhloError, SmtpEhloResult},
+        ehlo::{SmtpEhlo, SmtpEhloError},
         types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
@@ -54,15 +55,6 @@ pub enum SmtpScramSha256Error {
     ServerSignatureMismatch,
     #[error(transparent)]
     Ehlo(#[from] SmtpEhloError),
-}
-
-/// Result returned by [`SmtpScramSha256::resume`].
-#[derive(Debug)]
-pub enum SmtpScramSha256Result {
-    Ok,
-    WantsRead,
-    WantsWrite(Vec<u8>),
-    Err(SmtpScramSha256Error),
 }
 
 enum State {
@@ -141,161 +133,6 @@ impl SmtpScramSha256 {
             domain: Some(domain.into_static()),
             expected_server_sig: Vec::new(),
             buf: Vec::new(),
-        }
-    }
-
-    /// Advances the coroutine.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpScramSha256Result {
-        loop {
-            if let Some(bytes) = self.wants_write.take() {
-                return SmtpScramSha256Result::WantsWrite(bytes);
-            }
-
-            if mem::take(&mut self.wants_read) {
-                return SmtpScramSha256Result::WantsRead;
-            }
-
-            match &mut self.state {
-                State::AwaitServerFirst => {
-                    match arg.take() {
-                        Some(&[]) => return SmtpScramSha256Result::Err(SmtpScramSha256Error::Eof),
-                        Some(data) => {
-                            trace!("read SMTP bytes: {}", escape_byte_string(data));
-                            self.buf.extend_from_slice(data);
-                        }
-                        None => {}
-                    }
-
-                    if !Response::is_complete(&self.buf) {
-                        self.wants_read = true;
-                        continue;
-                    }
-
-                    let response = match Response::parse(&self.buf) {
-                        Ok(response) => response.into_static(),
-                        Err(errors) => {
-                            let reason = errors
-                                .iter()
-                                .map(|e| e.to_string())
-                                .collect::<Vec<_>>()
-                                .join("; ");
-
-                            return SmtpScramSha256Result::Err(
-                                SmtpScramSha256Error::ParseResponse(reason),
-                            );
-                        }
-                    };
-
-                    if response.code != ReplyCode::AUTH_CONTINUE {
-                        let code = response.code.code();
-                        let message = response.text().to_string();
-                        return SmtpScramSha256Result::Err(SmtpScramSha256Error::Rejected {
-                            code,
-                            message,
-                        });
-                    }
-
-                    let server_first_b64 = response.text().0.trim_start();
-                    let server_first_bytes = match base64.decode(server_first_b64.as_bytes()) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            return SmtpScramSha256Result::Err(
-                                SmtpScramSha256Error::ParseServerFirst(e.to_string()),
-                            );
-                        }
-                    };
-
-                    let server_first = match from_utf8(&server_first_bytes) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            return SmtpScramSha256Result::Err(
-                                SmtpScramSha256Error::ParseServerFirst(e.to_string()),
-                            );
-                        }
-                    };
-
-                    let client_final_bytes = match self.compute_client_final(server_first) {
-                        Ok(bytes) => bytes,
-                        Err(err) => return SmtpScramSha256Result::Err(err),
-                    };
-
-                    self.buf.clear();
-                    self.state = State::AwaitServerFinal;
-                    return SmtpScramSha256Result::WantsWrite(client_final_bytes);
-                }
-
-                State::AwaitServerFinal => {
-                    match arg.take() {
-                        Some(&[]) => return SmtpScramSha256Result::Err(SmtpScramSha256Error::Eof),
-                        Some(data) => {
-                            trace!("read SMTP bytes: {}", escape_byte_string(data));
-                            self.buf.extend_from_slice(data);
-                        }
-                        None => {}
-                    }
-
-                    if !Response::is_complete(&self.buf) {
-                        self.wants_read = true;
-                        continue;
-                    }
-
-                    let response = match Response::parse(&self.buf) {
-                        Ok(response) => response.into_static(),
-                        Err(errors) => {
-                            let reason = errors
-                                .iter()
-                                .map(|e| e.to_string())
-                                .collect::<Vec<_>>()
-                                .join("; ");
-
-                            return SmtpScramSha256Result::Err(
-                                SmtpScramSha256Error::ParseResponse(reason),
-                            );
-                        }
-                    };
-
-                    if response.code != ReplyCode::AUTH_SUCCESSFUL {
-                        let code = response.code.code();
-                        let message = response.text().to_string();
-                        return SmtpScramSha256Result::Err(SmtpScramSha256Error::Rejected {
-                            code,
-                            message,
-                        });
-                    }
-
-                    // Verify server signature if present in 235 text
-                    let text = response.text().0.trim_start();
-                    let text = strip_enhanced_status(text);
-                    if let Ok(server_final_bytes) = base64.decode(text.as_bytes()) {
-                        if let Ok(server_final) = from_utf8(&server_final_bytes) {
-                            if let Some(v) = server_final.strip_prefix("v=") {
-                                if let Ok(server_sig) = base64.decode(v.as_bytes()) {
-                                    if server_sig != self.expected_server_sig {
-                                        return SmtpScramSha256Result::Err(
-                                            SmtpScramSha256Error::ServerSignatureMismatch,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    self.buf.clear();
-                    let domain = self.domain.take().expect("domain taken twice");
-                    self.state = State::Ehlo(SmtpEhlo::new(domain));
-                }
-
-                State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpEhloResult::Ok { .. } => return SmtpScramSha256Result::Ok,
-                    SmtpEhloResult::WantsRead => return SmtpScramSha256Result::WantsRead,
-                    SmtpEhloResult::WantsWrite(bytes) => {
-                        return SmtpScramSha256Result::WantsWrite(bytes);
-                    }
-                    SmtpEhloResult::Err(err) => {
-                        return SmtpScramSha256Result::Err(SmtpScramSha256Error::Ehlo(err));
-                    }
-                },
-            }
         }
     }
 
@@ -398,6 +235,165 @@ impl SmtpScramSha256 {
 
         // Wrap as SMTP authenticate data (base64-encodes the payload)
         Ok(SmtpAuthData::r#continue(client_final.as_slice()).into())
+    }
+}
+
+impl SmtpCoroutine for SmtpScramSha256 {
+    type Output = ();
+    type Error = SmtpScramSha256Error;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
+        loop {
+            if let Some(bytes) = self.wants_write.take() {
+                return SmtpCoroutineState::WantsWrite(bytes);
+            }
+
+            if mem::take(&mut self.wants_read) {
+                return SmtpCoroutineState::WantsRead;
+            }
+
+            match &mut self.state {
+                State::AwaitServerFirst => {
+                    match arg.take() {
+                        Some(&[]) => return SmtpCoroutineState::Err(SmtpScramSha256Error::Eof),
+                        Some(data) => {
+                            trace!("read SMTP bytes: {}", escape_byte_string(data));
+                            self.buf.extend_from_slice(data);
+                        }
+                        None => {}
+                    }
+
+                    if !Response::is_complete(&self.buf) {
+                        self.wants_read = true;
+                        continue;
+                    }
+
+                    let response = match Response::parse(&self.buf) {
+                        Ok(response) => response.into_static(),
+                        Err(errors) => {
+                            let reason = errors
+                                .iter()
+                                .map(|e| e.to_string())
+                                .collect::<Vec<_>>()
+                                .join("; ");
+
+                            return SmtpCoroutineState::Err(SmtpScramSha256Error::ParseResponse(
+                                reason,
+                            ));
+                        }
+                    };
+
+                    if response.code != ReplyCode::AUTH_CONTINUE {
+                        let code = response.code.code();
+                        let message = response.text().to_string();
+                        return SmtpCoroutineState::Err(SmtpScramSha256Error::Rejected {
+                            code,
+                            message,
+                        });
+                    }
+
+                    let server_first_b64 = response.text().0.trim_start();
+                    let server_first_bytes = match base64.decode(server_first_b64.as_bytes()) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            return SmtpCoroutineState::Err(
+                                SmtpScramSha256Error::ParseServerFirst(e.to_string()),
+                            );
+                        }
+                    };
+
+                    let server_first = match from_utf8(&server_first_bytes) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return SmtpCoroutineState::Err(
+                                SmtpScramSha256Error::ParseServerFirst(e.to_string()),
+                            );
+                        }
+                    };
+
+                    let client_final_bytes = match self.compute_client_final(server_first) {
+                        Ok(bytes) => bytes,
+                        Err(err) => return SmtpCoroutineState::Err(err),
+                    };
+
+                    self.buf.clear();
+                    self.state = State::AwaitServerFinal;
+                    return SmtpCoroutineState::WantsWrite(client_final_bytes);
+                }
+
+                State::AwaitServerFinal => {
+                    match arg.take() {
+                        Some(&[]) => return SmtpCoroutineState::Err(SmtpScramSha256Error::Eof),
+                        Some(data) => {
+                            trace!("read SMTP bytes: {}", escape_byte_string(data));
+                            self.buf.extend_from_slice(data);
+                        }
+                        None => {}
+                    }
+
+                    if !Response::is_complete(&self.buf) {
+                        self.wants_read = true;
+                        continue;
+                    }
+
+                    let response = match Response::parse(&self.buf) {
+                        Ok(response) => response.into_static(),
+                        Err(errors) => {
+                            let reason = errors
+                                .iter()
+                                .map(|e| e.to_string())
+                                .collect::<Vec<_>>()
+                                .join("; ");
+
+                            return SmtpCoroutineState::Err(SmtpScramSha256Error::ParseResponse(
+                                reason,
+                            ));
+                        }
+                    };
+
+                    if response.code != ReplyCode::AUTH_SUCCESSFUL {
+                        let code = response.code.code();
+                        let message = response.text().to_string();
+                        return SmtpCoroutineState::Err(SmtpScramSha256Error::Rejected {
+                            code,
+                            message,
+                        });
+                    }
+
+                    // Verify server signature if present in 235 text
+                    let text = response.text().0.trim_start();
+                    let text = strip_enhanced_status(text);
+                    if let Ok(server_final_bytes) = base64.decode(text.as_bytes()) {
+                        if let Ok(server_final) = from_utf8(&server_final_bytes) {
+                            if let Some(v) = server_final.strip_prefix("v=") {
+                                if let Ok(server_sig) = base64.decode(v.as_bytes()) {
+                                    if server_sig != self.expected_server_sig {
+                                        return SmtpCoroutineState::Err(
+                                            SmtpScramSha256Error::ServerSignatureMismatch,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    self.buf.clear();
+                    let domain = self.domain.take().expect("domain taken twice");
+                    self.state = State::Ehlo(SmtpEhlo::new(domain));
+                }
+
+                State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
+                    SmtpCoroutineState::Done(_) => return SmtpCoroutineState::Done(()),
+                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
+                    SmtpCoroutineState::WantsWrite(bytes) => {
+                        return SmtpCoroutineState::WantsWrite(bytes);
+                    }
+                    SmtpCoroutineState::Err(err) => {
+                        return SmtpCoroutineState::Err(SmtpScramSha256Error::Ehlo(err));
+                    }
+                },
+            }
+        }
     }
 }
 

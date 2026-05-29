@@ -60,6 +60,7 @@ use url::Url;
 #[cfg(feature = "scram")]
 use crate::rfc7677::scram_sha256::*;
 use crate::{
+    coroutine::*,
     login::*,
     rfc3207::starttls::*,
     rfc4505::anonymous::*,
@@ -173,31 +174,6 @@ pub struct SmtpClientStd<S: Read + Write> {
     stream: S,
 }
 
-/// Drive a coroutine whose `Result` enum is unit-shaped on success
-/// (`Ok`, `WantsRead`, `WantsWrite(Vec<u8>)`, `Err(<error>)`).
-macro_rules! coroutine {
-    ($self:ident, $coroutine:expr, $Result:ident) => {{
-        let mut buf = [0u8; READ_BUFFER_SIZE];
-        let mut arg: Option<&[u8]> = None;
-        let mut coroutine = $coroutine;
-
-        loop {
-            match coroutine.resume(arg) {
-                $Result::Ok => return Ok(()),
-                $Result::WantsRead => {
-                    let n = $self.stream.read(&mut buf)?;
-                    arg = Some(&buf[..n]);
-                }
-                $Result::WantsWrite(bytes) => {
-                    $self.stream.write_all(&bytes)?;
-                    arg = None;
-                }
-                $Result::Err(err) => return Err(err.into()),
-            }
-        }
-    }};
-}
-
 impl<S: Read + Write> SmtpClientStd<S> {
     /// Builds a client around `stream`. The caller is responsible for
     /// opening the connection (TCP, TLS handshake if needed, STARTTLS
@@ -225,6 +201,34 @@ impl<S: Read + Write> SmtpClientStd<S> {
         self.stream
     }
 
+    /// Drives any [`SmtpCoroutine`] against this client's stream until
+    /// it terminates. Each command method on [`SmtpClientStd`] is a
+    /// one-liner around `run`; downstream callers can also use it to
+    /// drive custom coroutines.
+    pub fn run<C>(&mut self, mut coroutine: C) -> Result<C::Output, SmtpClientStdError>
+    where
+        C: SmtpCoroutine,
+        SmtpClientStdError: From<C::Error>,
+    {
+        let mut buf = [0u8; READ_BUFFER_SIZE];
+        let mut arg: Option<&[u8]> = None;
+
+        loop {
+            match coroutine.resume(arg.take()) {
+                SmtpCoroutineState::Done(out) => return Ok(out),
+                SmtpCoroutineState::WantsRead => {
+                    let n = self.stream.read(&mut buf)?;
+                    arg = Some(&buf[..n]);
+                }
+                SmtpCoroutineState::WantsWrite(bytes) => {
+                    self.stream.write_all(&bytes)?;
+                    arg = None;
+                }
+                SmtpCoroutineState::Err(err) => return Err(err.into()),
+            }
+        }
+    }
+
     // ---- Session lifecycle -----------------------------------------------
 
     /// Runs [`GetSmtpGreeting`]: reads the initial server greeting.
@@ -233,49 +237,13 @@ impl<S: Read + Write> SmtpClientStd<S> {
     /// [`new`]: SmtpClientStd::new
     /// [`connect`]: SmtpClientStd::connect
     pub fn greeting(&mut self) -> Result<SmtpGreetingOutput, SmtpClientStdError> {
-        let mut coroutine = GetSmtpGreeting::new();
-        let mut buf = [0u8; READ_BUFFER_SIZE];
-        let mut arg: Option<&[u8]> = None;
-
-        loop {
-            match coroutine.resume(arg) {
-                GetSmtpGreetingResult::Ok {
-                    greeting,
-                    remaining,
-                } => return Ok((greeting, remaining)),
-                GetSmtpGreetingResult::WantsRead => {
-                    let n = self.stream.read(&mut buf)?;
-                    arg = Some(&buf[..n]);
-                }
-                GetSmtpGreetingResult::Err(err) => return Err(err.into()),
-            }
-        }
+        self.run(GetSmtpGreeting::new())
     }
 
     /// Runs [`SmtpEhlo`] (`EHLO <domain>`, RFC 5321 §4.1.1.1). Returns
     /// the raw capability lines reported by the server.
     pub fn ehlo(&mut self, domain: EhloDomain<'_>) -> Result<SmtpEhloOutput, SmtpClientStdError> {
-        let mut coroutine = SmtpEhlo::new(domain);
-        let mut buf = [0u8; READ_BUFFER_SIZE];
-        let mut arg: Option<&[u8]> = None;
-
-        loop {
-            match coroutine.resume(arg) {
-                SmtpEhloResult::Ok {
-                    capabilities,
-                    remaining,
-                } => return Ok((capabilities, remaining)),
-                SmtpEhloResult::WantsRead => {
-                    let n = self.stream.read(&mut buf)?;
-                    arg = Some(&buf[..n]);
-                }
-                SmtpEhloResult::WantsWrite(bytes) => {
-                    self.stream.write_all(&bytes)?;
-                    arg = None;
-                }
-                SmtpEhloResult::Err(err) => return Err(err.into()),
-            }
-        }
+        self.run(SmtpEhlo::new(domain))
     }
 
     /// Runs [`SmtpHelo`] (`HELO <domain>`, RFC 5321 §4.1.1.1). Use
@@ -284,7 +252,7 @@ impl<S: Read + Write> SmtpClientStd<S> {
     ///
     /// [`ehlo`]: SmtpClientStd::ehlo
     pub fn helo(&mut self, domain: Domain<'_>) -> Result<(), SmtpClientStdError> {
-        coroutine!(self, SmtpHelo::new(domain), SmtpHeloResult);
+        self.run(SmtpHelo::new(domain))
     }
 
     /// Runs [`SmtpStartTls`] (`STARTTLS`, RFC 3207). On success the
@@ -320,7 +288,7 @@ impl<S: Read + Write> SmtpClientStd<S> {
 
     /// Runs [`SmtpQuit`] (`QUIT`, RFC 5321 §4.1.1.10).
     pub fn quit(&mut self) -> Result<(), SmtpClientStdError> {
-        coroutine!(self, SmtpQuit::new(), SmtpQuitResult);
+        self.run(SmtpQuit::new())
     }
 
     // ---- Authentication --------------------------------------------------
@@ -335,7 +303,7 @@ impl<S: Read + Write> SmtpClientStd<S> {
         trace: Option<&str>,
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        coroutine!(self, SmtpAnonymous::new(trace, domain), SmtpAnonymousResult);
+        self.run(SmtpAnonymous::new(trace, domain))
     }
 
     /// Runs [`SmtpLogin`] (`AUTH LOGIN`, legacy SASL mechanism).
@@ -351,11 +319,7 @@ impl<S: Read + Write> SmtpClientStd<S> {
         password: &SecretString,
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        coroutine!(
-            self,
-            SmtpLogin::new(login, password, domain),
-            SmtpLoginResult
-        );
+        self.run(SmtpLogin::new(login, password, domain))
     }
 
     /// Runs [`SmtpPlain`] (`AUTH PLAIN`, RFC 4616). Refreshes the
@@ -367,14 +331,10 @@ impl<S: Read + Write> SmtpClientStd<S> {
         password: &SecretString,
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        coroutine!(
-            self,
-            SmtpPlain::new(login, password, domain),
-            SmtpPlainResult
-        );
+        self.run(SmtpPlain::new(login, password, domain))
     }
 
-    /// Runs [`SmtpOAuthBearer`] (`AUTH OAUTHBEARER`, RFC 7628).
+    /// Runs [`SmtpOauthbearer`] (`AUTH OAUTHBEARER`, RFC 7628).
     /// Refreshes the capability list with an `EHLO` after a successful
     /// authentication. The `token` is an OAuth 2.0 bearer access
     /// token: the connection **must** be TLS-protected before calling
@@ -385,14 +345,10 @@ impl<S: Read + Write> SmtpClientStd<S> {
         username: Option<&str>,
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        coroutine!(
-            self,
-            SmtpOauthbearer::new(token, username, domain),
-            SmtpOauthbearerResult
-        );
+        self.run(SmtpOauthbearer::new(token, username, domain))
     }
 
-    /// Runs [`SmtpXOAuth2`] (`AUTH XOAUTH2`, Google's pre-standard
+    /// Runs [`SmtpXoauth2`] (`AUTH XOAUTH2`, Google's pre-standard
     /// OAuth 2.0 SASL mechanism). Refreshes the capability list with
     /// an `EHLO` after a successful authentication. The `token` is an
     /// OAuth 2.0 bearer access token: the connection **must** be
@@ -406,11 +362,7 @@ impl<S: Read + Write> SmtpClientStd<S> {
         token: &SecretString,
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        coroutine!(
-            self,
-            SmtpXoauth2::new(username, token, domain),
-            SmtpXoauth2Result
-        );
+        self.run(SmtpXoauth2::new(username, token, domain))
     }
 
     /// Runs [`SmtpScramSha256`] (`AUTH SCRAM-SHA-256`, RFC 7677).
@@ -426,11 +378,7 @@ impl<S: Read + Write> SmtpClientStd<S> {
         nonce: &[u8],
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        coroutine!(
-            self,
-            SmtpScramSha256::new(username, password, nonce, domain),
-            SmtpScramSha256Result
-        );
+        self.run(SmtpScramSha256::new(username, password, nonce, domain))
     }
 
     // ---- Mail transaction ------------------------------------------------
@@ -438,7 +386,7 @@ impl<S: Read + Write> SmtpClientStd<S> {
     /// Runs [`SmtpMail`] (`MAIL FROM:<reverse-path>`, RFC 5321
     /// §4.1.1.2).
     pub fn mail(&mut self, reverse_path: ReversePath<'_>) -> Result<(), SmtpClientStdError> {
-        coroutine!(self, SmtpMail::new(reverse_path), SmtpMailResult);
+        self.run(SmtpMail::new(reverse_path))
     }
 
     /// Runs [`SmtpMail::with_params`]: same as [`mail`] but appends
@@ -450,17 +398,13 @@ impl<S: Read + Write> SmtpClientStd<S> {
         reverse_path: ReversePath<'_>,
         parameters: Vec<Parameter<'_>>,
     ) -> Result<(), SmtpClientStdError> {
-        coroutine!(
-            self,
-            SmtpMail::with_params(reverse_path, parameters),
-            SmtpMailResult
-        );
+        self.run(SmtpMail::with_params(reverse_path, parameters))
     }
 
     /// Runs [`SmtpRcpt`] (`RCPT TO:<forward-path>`, RFC 5321
     /// §4.1.1.3).
     pub fn rcpt(&mut self, forward_path: ForwardPath<'_>) -> Result<(), SmtpClientStdError> {
-        coroutine!(self, SmtpRcpt::new(forward_path), SmtpRcptResult);
+        self.run(SmtpRcpt::new(forward_path))
     }
 
     /// Runs [`SmtpRcpt::with_params`]: same as [`rcpt`] but appends
@@ -472,28 +416,24 @@ impl<S: Read + Write> SmtpClientStd<S> {
         forward_path: ForwardPath<'_>,
         parameters: Vec<Parameter<'_>>,
     ) -> Result<(), SmtpClientStdError> {
-        coroutine!(
-            self,
-            SmtpRcpt::with_params(forward_path, parameters),
-            SmtpRcptResult
-        );
+        self.run(SmtpRcpt::with_params(forward_path, parameters))
     }
 
     /// Runs [`SmtpData`] (`DATA` + body terminator, RFC 5321
     /// §4.1.1.4). The coroutine handles dot-stuffing automatically.
     pub fn data(&mut self, message: Vec<u8>) -> Result<(), SmtpClientStdError> {
-        coroutine!(self, SmtpData::new(message), SmtpDataResult);
+        self.run(SmtpData::new(message))
     }
 
     /// Runs [`SmtpRset`] (`RSET`, RFC 5321 §4.1.1.5). Aborts the
     /// current mail transaction.
     pub fn rset(&mut self) -> Result<(), SmtpClientStdError> {
-        coroutine!(self, SmtpRset::new(), SmtpRsetResult);
+        self.run(SmtpRset::new())
     }
 
     /// Runs [`SmtpNoop`] (`NOOP`, RFC 5321 §4.1.1.9).
     pub fn noop(&mut self) -> Result<(), SmtpClientStdError> {
-        coroutine!(self, SmtpNoop::new(), SmtpNoopResult);
+        self.run(SmtpNoop::new())
     }
 
     // ---- High-level helpers ----------------------------------------------
@@ -506,11 +446,7 @@ impl<S: Read + Write> SmtpClientStd<S> {
         forward_paths: impl IntoIterator<Item = ForwardPath<'a>>,
         message: Vec<u8>,
     ) -> Result<(), SmtpClientStdError> {
-        coroutine!(
-            self,
-            SmtpMessageSend::new(reverse_path, forward_paths, message),
-            SmtpMessageSendResult
-        );
+        self.run(SmtpMessageSend::new(reverse_path, forward_paths, message))
     }
 }
 

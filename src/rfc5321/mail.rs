@@ -12,6 +12,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
+    coroutine::{SmtpCoroutine, SmtpCoroutineState},
     rfc5321::types::{
         parameter::Parameter, reply_code::ReplyCode, response::Response, reverse_path::ReversePath,
     },
@@ -49,15 +50,6 @@ pub enum SmtpMailError {
     ParseResponse(String),
     #[error("MAIL FROM rejected: {code} {message}")]
     Rejected { code: u16, message: String },
-}
-
-/// Result returned by [`SmtpMail::resume`].
-#[derive(Debug)]
-pub enum SmtpMailResult {
-    Ok,
-    WantsRead,
-    WantsWrite(Vec<u8>),
-    Err(SmtpMailError),
 }
 
 /// I/O-free coroutine to send SMTP MAIL FROM command.
@@ -101,20 +93,24 @@ impl SmtpMail {
             buf: Vec::new(),
         }
     }
+}
 
-    /// Advances the coroutine.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpMailResult {
+impl SmtpCoroutine for SmtpMail {
+    type Output = ();
+    type Error = SmtpMailError;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpMailResult::WantsWrite(bytes);
+                return SmtpCoroutineState::WantsWrite(bytes);
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpMailResult::WantsRead;
+                return SmtpCoroutineState::WantsRead;
             }
 
             match arg.take() {
-                Some(&[]) => return SmtpMailResult::Err(SmtpMailError::Eof),
+                Some(&[]) => return SmtpCoroutineState::Err(SmtpMailError::Eof),
                 Some(data) => {
                     trace!("read SMTP bytes: {}", escape_byte_string(data));
                     self.buf.extend_from_slice(data);
@@ -131,11 +127,11 @@ impl SmtpMail {
                 Ok(response) => {
                     let response = response.into_static();
                     if response.code == ReplyCode::OK {
-                        SmtpMailResult::Ok
+                        SmtpCoroutineState::Done(())
                     } else {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        SmtpMailResult::Err(SmtpMailError::Rejected { code, message })
+                        SmtpCoroutineState::Err(SmtpMailError::Rejected { code, message })
                     }
                 }
                 Err(errors) => {
@@ -145,7 +141,7 @@ impl SmtpMail {
                         .collect::<Vec<_>>()
                         .join("; ");
 
-                    SmtpMailResult::Err(SmtpMailError::ParseResponse(reason))
+                    SmtpCoroutineState::Err(SmtpMailError::ParseResponse(reason))
                 }
             };
         }

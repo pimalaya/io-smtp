@@ -3,35 +3,41 @@
 //! All tests drive SMTP coroutines against pre-crafted in-memory
 //! response buffers. No network connection is made.
 
-use io_smtp::rfc5321::{
-    ehlo::*,
-    greeting::*,
-    noop::*,
-    quit::*,
-    rset::*,
-    types::{domain::Domain, ehlo_domain::EhloDomain},
+use io_smtp::{
+    coroutine::*,
+    rfc5321::{
+        ehlo::*,
+        greeting::*,
+        noop::*,
+        quit::*,
+        rset::*,
+        types::{domain::Domain, ehlo_domain::EhloDomain},
+    },
 };
 
-fn run_greeting(response: &[u8]) -> GetSmtpGreetingResult {
+fn run_greeting(response: &[u8]) -> SmtpCoroutineState<SmtpGreetingOutput, GetSmtpGreetingError> {
     let mut coroutine = GetSmtpGreeting::new();
     let mut arg: Option<&[u8]> = None;
 
     loop {
         match coroutine.resume(arg.take()) {
-            GetSmtpGreetingResult::WantsRead => arg = Some(response),
+            SmtpCoroutineState::WantsRead => arg = Some(response),
             any => return any,
         }
     }
 }
 
-fn run_ehlo(response: &[u8], domain: EhloDomain<'_>) -> SmtpEhloResult {
+fn run_ehlo(
+    response: &[u8],
+    domain: EhloDomain<'_>,
+) -> SmtpCoroutineState<SmtpEhloOutput, SmtpEhloError> {
     let mut coroutine = SmtpEhlo::new(domain);
     let mut arg: Option<&[u8]> = None;
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpEhloResult::WantsWrite(_) => arg = None,
-            SmtpEhloResult::WantsRead => arg = Some(response),
+            SmtpCoroutineState::WantsWrite(_) => arg = None,
+            SmtpCoroutineState::WantsRead => arg = Some(response),
             any => return any,
         }
     }
@@ -42,7 +48,7 @@ fn greeting_220() {
     let response = b"220 smtp.example.com ESMTP ready\r\n";
 
     match run_greeting(response) {
-        GetSmtpGreetingResult::Ok { greeting, .. } => {
+        SmtpCoroutineState::Done((greeting, _)) => {
             assert_eq!(greeting.domain.0.as_ref(), "smtp.example.com");
         }
         any => panic!("unexpected result: {any:?}"),
@@ -59,17 +65,17 @@ fn greeting_incomplete_rejected() {
 
     let result = loop {
         match coroutine.resume(arg.take()) {
-            GetSmtpGreetingResult::WantsRead if !sent => {
+            SmtpCoroutineState::WantsRead if !sent => {
                 sent = true;
                 arg = Some(b"220 smtp.example.com");
             }
-            GetSmtpGreetingResult::WantsRead => arg = Some(b""),
+            SmtpCoroutineState::WantsRead => arg = Some(b""),
             any => break any,
         }
     };
 
     match result {
-        GetSmtpGreetingResult::Err(_) => {}
+        SmtpCoroutineState::Err(_) => {}
         any => panic!("expected error for incomplete greeting, got: {any:?}"),
     }
 }
@@ -80,7 +86,7 @@ fn ehlo_single_line() {
     let domain = EhloDomain::Domain(Domain("localhost".into()));
 
     match run_ehlo(response, domain) {
-        SmtpEhloResult::Ok { capabilities, .. } => assert!(capabilities.is_empty()),
+        SmtpCoroutineState::Done((capabilities, _)) => assert!(capabilities.is_empty()),
         any => panic!("unexpected result: {any:?}"),
     }
 }
@@ -94,7 +100,7 @@ fn ehlo_with_capabilities() {
     let domain = EhloDomain::Domain(Domain("localhost".into()));
 
     match run_ehlo(response, domain) {
-        SmtpEhloResult::Ok { capabilities, .. } => assert_eq!(capabilities.len(), 3),
+        SmtpCoroutineState::Done((capabilities, _)) => assert_eq!(capabilities.len(), 3),
         any => panic!("unexpected result: {any:?}"),
     }
 }
@@ -107,13 +113,16 @@ fn noop_ok() {
 
     let result = loop {
         match coroutine.resume(arg.take()) {
-            SmtpNoopResult::WantsWrite(_) => arg = None,
-            SmtpNoopResult::WantsRead => arg = Some(response),
+            SmtpCoroutineState::WantsWrite(_) => arg = None,
+            SmtpCoroutineState::WantsRead => arg = Some(response),
             any => break any,
         }
     };
 
-    assert!(matches!(result, SmtpNoopResult::Ok));
+    assert!(matches!(
+        result,
+        SmtpCoroutineState::<(), SmtpNoopError>::Done(())
+    ));
 }
 
 #[test]
@@ -124,13 +133,16 @@ fn quit_ok() {
 
     let result = loop {
         match coroutine.resume(arg.take()) {
-            SmtpQuitResult::WantsWrite(_) => arg = None,
-            SmtpQuitResult::WantsRead => arg = Some(response),
+            SmtpCoroutineState::WantsWrite(_) => arg = None,
+            SmtpCoroutineState::WantsRead => arg = Some(response),
             any => break any,
         }
     };
 
-    assert!(matches!(result, SmtpQuitResult::Ok));
+    assert!(matches!(
+        result,
+        SmtpCoroutineState::<(), SmtpQuitError>::Done(())
+    ));
 }
 
 #[test]
@@ -141,11 +153,14 @@ fn rset_ok() {
 
     let result = loop {
         match coroutine.resume(arg.take()) {
-            SmtpRsetResult::WantsWrite(_) => arg = None,
-            SmtpRsetResult::WantsRead => arg = Some(response),
+            SmtpCoroutineState::WantsWrite(_) => arg = None,
+            SmtpCoroutineState::WantsRead => arg = Some(response),
             any => break any,
         }
     };
 
-    assert!(matches!(result, SmtpRsetResult::Ok));
+    assert!(matches!(
+        result,
+        SmtpCoroutineState::<(), SmtpRsetError>::Done(())
+    ));
 }

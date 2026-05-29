@@ -15,9 +15,10 @@ use secrecy::{ExposeSecret, SecretBox, SecretString};
 use thiserror::Error;
 
 use crate::{
+    coroutine::{SmtpCoroutine, SmtpCoroutineState},
     rfc4954::auth::SmtpAuthCommand,
     rfc5321::{
-        ehlo::{SmtpEhlo, SmtpEhloError, SmtpEhloResult},
+        ehlo::{SmtpEhlo, SmtpEhloError},
         types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
@@ -37,15 +38,6 @@ pub enum SmtpPlainError {
     Rejected { code: u16, message: String },
     #[error(transparent)]
     Ehlo(#[from] SmtpEhloError),
-}
-
-/// Result returned by [`SmtpPlain::resume`].
-#[derive(Debug)]
-pub enum SmtpPlainResult {
-    Ok,
-    WantsRead,
-    WantsWrite(Vec<u8>),
-    Err(SmtpPlainError),
 }
 
 enum State {
@@ -95,22 +87,26 @@ impl SmtpPlain {
             buf: Vec::new(),
         }
     }
+}
 
-    /// Advances the coroutine.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpPlainResult {
+impl SmtpCoroutine for SmtpPlain {
+    type Output = ();
+    type Error = SmtpPlainError;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpPlainResult::WantsWrite(bytes);
+                return SmtpCoroutineState::WantsWrite(bytes);
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpPlainResult::WantsRead;
+                return SmtpCoroutineState::WantsRead;
             }
 
             match &mut self.state {
                 State::AwaitAuth => {
                     match arg.take() {
-                        Some(&[]) => return SmtpPlainResult::Err(SmtpPlainError::Eof),
+                        Some(&[]) => return SmtpCoroutineState::Err(SmtpPlainError::Eof),
                         Some(data) => {
                             trace!("read SMTP bytes: {}", escape_byte_string(data));
                             self.buf.extend_from_slice(data);
@@ -132,14 +128,14 @@ impl SmtpPlain {
                                 .collect::<Vec<_>>()
                                 .join("; ");
 
-                            return SmtpPlainResult::Err(SmtpPlainError::ParseResponse(reason));
+                            return SmtpCoroutineState::Err(SmtpPlainError::ParseResponse(reason));
                         }
                     };
 
                     if response.code != ReplyCode::AUTH_SUCCESSFUL {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        return SmtpPlainResult::Err(SmtpPlainError::Rejected { code, message });
+                        return SmtpCoroutineState::Err(SmtpPlainError::Rejected { code, message });
                     }
 
                     self.buf.clear();
@@ -147,13 +143,13 @@ impl SmtpPlain {
                     self.state = State::Ehlo(SmtpEhlo::new(domain));
                 }
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpEhloResult::Ok { .. } => return SmtpPlainResult::Ok,
-                    SmtpEhloResult::WantsRead => return SmtpPlainResult::WantsRead,
-                    SmtpEhloResult::WantsWrite(bytes) => {
-                        return SmtpPlainResult::WantsWrite(bytes);
+                    SmtpCoroutineState::Done(_) => return SmtpCoroutineState::Done(()),
+                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
+                    SmtpCoroutineState::WantsWrite(bytes) => {
+                        return SmtpCoroutineState::WantsWrite(bytes);
                     }
-                    SmtpEhloResult::Err(err) => {
-                        return SmtpPlainResult::Err(SmtpPlainError::Ehlo(err));
+                    SmtpCoroutineState::Err(err) => {
+                        return SmtpCoroutineState::Err(SmtpPlainError::Ehlo(err));
                     }
                 },
             }

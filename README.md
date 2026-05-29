@@ -2,34 +2,43 @@
 
 SMTP client library, written in Rust
 
+This library is composed of 3 feature-gated layers:
+
+- Low-level **I/O-free** coroutines: these `no_std`-compatible state machines contain the whole SMTP logic and can be used anywhere
+- Mid-level **light client**: a standard, blocking SMTP client using a `Stream: Read + Write`
+- High-level **full client**: light client + TCP connections and TLS negotiations handled for you
+
 ## Table of contents
 
 - [Features](#features)
 - [RFC coverage](#rfc-coverage)
+- [Usage](#usage)
+  - [I/O-free coroutines](#io-free-coroutines)
+  - [Light client](#light-client)
+  - [Full client](#full-client)
 - [Examples](#examples)
-  - [As a no-std coroutine library](#as-a-no-std-coroutine-library)
-  - [As a light std client (BYO stream)](#as-a-light-std-client-byo-stream)
-  - [As a full std client (TCP + TLS)](#as-a-full-std-client-tcp--tls)
-- [More examples](#more-examples)
+- [AI disclosure](#ai-disclosure)
 - [License](#license)
 - [Social](#social)
 - [Sponsoring](#sponsoring)
 
 ## Features
 
-- **I/O-free** coroutines: every SMTP command is exposed as a `resume(arg: Option<&[u8]>)` state machine. No sockets, no async runtime, no `std` required. Drive against any blocking, async, or fuzz harness.
-- **Standard, blocking client**:
-  - Light client (requires `client` feature): `SmtpClientStd::new(stream)` wraps a connected `Read + Write` stream and exposes one method per coroutine. You still own TCP / TLS / STARTTLS.
-  - Full std client (requires `rustls-ring`, `rustls-aws`, or `native-tls` feature): `SmtpClientStd::connect(url, tls, starttls, domain, sasl)` opens `smtp://` / `smtps://` URLs via [pimalaya/stream](https://github.com/pimalaya/stream), reads the greeting, sends the initial EHLO, drives the optional STARTTLS upgrade with a fresh EHLO over TLS, and runs the chosen SASL mechanism, returning a ready-to-use authenticated client.
+- **I/O-free** coroutines: `no_std` state machines; no sockets, no async runtime, no `std` required, drive against any blocking, async, or fuzz harness.
+- Light standard, blocking client (requires `client` feature)
+- Full standard, blocking client with **TLS** support:
+  - [Rustls](https://crates.io/crates/rustls) with ring crypto (requires `rustls-ring` feature)
+  - [Rustls](https://crates.io/crates/rustls) with aws crypto (requires `rustls-aws` feature)
+  - [Native TLS](https://crates.io/crates/native-tls) (requires `native-tls` feature)
 - **SASL mechanisms**:
-  - `LOGIN`, `PLAIN`, `ANONYMOUS`, `XOAUTH2` and `OAUTHBEARER` built-in
+  - `ANONYMOUS`, `LOGIN`, `PLAIN`, `XOAUTH2` and `OAUTHBEARER` built-in
   - `SCRAM-SHA-256` (requires `scram` feature)
+- SMTP extensions: `STARTTLS`, `AUTH`, `SIZE`, `DSN`, `ENHANCEDSTATUSCODES` (see [RFC coverage](#rfc-coverage))
 
-*The `io-smtp` library is written in [Rust](https://www.rust-lang.org/), and relies on [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to enable or disable functionalities. Default features can be found in the `features` section of the [`Cargo.toml`](https://github.com/pimalaya/io-smtp/blob/master/Cargo.toml), or on [docs.rs](https://docs.rs/crate/io-smtp/latest/features).*
+> [!TIP]
+> I/O SMTP is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support. The default feature set is declared in [Cargo.toml](./Cargo.toml) or on [docs.rs](https://docs.rs/crate/io-smtp/latest/features).
 
 ## RFC coverage
-
-This library implements SMTP as I/O-agnostic coroutines: no sockets, no async runtime, no `std` required.
 
 | Module  | What it covers                                                                   |
 |---------|----------------------------------------------------------------------------------|
@@ -56,18 +65,20 @@ This library implements SMTP as I/O-agnostic coroutines: no sockets, no async ru
 [7628]: https://www.rfc-editor.org/rfc/rfc7628
 [7677]: https://www.rfc-editor.org/rfc/rfc7677
 
-## Examples
+## Usage
 
-`io-smtp` can be consumed three ways, depending on how much of the I/O stack you want to own. Each mode is gated by cargo features.
+I/O-SMTP can be consumed three ways, depending on how much of the I/O stack you want to own. Each mode is gated by cargo features.
 
-Whichever mode you pick, every coroutine exposes `resume(arg: Option<&[u8]>)` returning a result enum with four shapes:
+Whichever mode you pick, every standard-shape coroutine implements the `SmtpCoroutine` trait. Its `resume(Option<&[u8]>)` method returns an `SmtpCoroutineState<Output, Error>` with four shapes:
 
 - `WantsRead`: caller reads more bytes from the socket and feeds them back on the next call. Pass `Some(&[])` to signal EOF.
 - `WantsWrite(Vec<u8>)`: caller writes these bytes to the socket. The next call typically passes `None`.
-- `Ok { … }` (or unit `Ok`): terminal success.
-- `Err(…)`: terminal failure.
+- `Done(Output)`: terminal success carrying the coroutine's `Output` associated type.
+- `Err(Error)`: terminal failure carrying the coroutine's `Error` associated type.
 
-### As a no-std coroutine library
+`SmtpStartTls` is the one exempt coroutine: it keeps its own `SmtpStartTlsResult` enum because it carries an extra `WantsStartTls(Vec<u8>)` mid-progression variant signalling the TLS upgrade.
+
+### I/O-free coroutines
 
 No features required: works in `#![no_std]`, no sockets, no async runtime. You own the loop and the bytes; the library only produces command bytes and consumes server responses.
 
@@ -76,22 +87,23 @@ Read the SMTP greeting against a blocking TCP socket (the same shape works under
 ```rust,ignore
 use std::{io::Read, net::TcpStream};
 
-use io_smtp::rfc5321::greeting::*;
+use io_smtp::{coroutine::*, rfc5321::greeting::*};
 
 let mut stream = TcpStream::connect("smtp.example.com:25").unwrap();
-let mut buf = [0u8; 4 * 1024];
+let mut buf = [0u8; 16 * 1024];
 
 let mut coroutine = GetSmtpGreeting::new();
 let mut arg: Option<&[u8]> = None;
 
 let greeting = loop {
     match coroutine.resume(arg.take()) {
-        GetSmtpGreetingResult::Ok { greeting, .. } => break greeting,
-        GetSmtpGreetingResult::WantsRead => {
+        SmtpCoroutineState::Done((greeting, _)) => break greeting,
+        SmtpCoroutineState::WantsRead => {
             let n = stream.read(&mut buf).unwrap();
             arg = Some(&buf[..n]);
         }
-        GetSmtpGreetingResult::Err(err) => panic!("{err}"),
+        SmtpCoroutineState::WantsWrite(_) => unreachable!(),
+        SmtpCoroutineState::Err(err) => panic!("{err}"),
     }
 };
 
@@ -103,29 +115,32 @@ Drive a multi-step command (EHLO) the same way:
 ```rust,ignore
 use std::{io::{Read, Write}, net::TcpStream};
 
-use io_smtp::rfc5321::{
-    ehlo::*,
-    types::{domain::Domain, ehlo_domain::EhloDomain},
+use io_smtp::{
+    coroutine::*,
+    rfc5321::{
+        ehlo::*,
+        types::{domain::Domain, ehlo_domain::EhloDomain},
+    },
 };
 
 # let mut stream = TcpStream::connect("smtp.example.com:25").unwrap();
-# let mut buf = [0u8; 4 * 1024];
+# let mut buf = [0u8; 16 * 1024];
 let domain: EhloDomain<'_> = Domain::parse(b"localhost").unwrap().into();
 let mut coroutine = SmtpEhlo::new(domain);
 let mut arg: Option<&[u8]> = None;
 
 let capabilities = loop {
     match coroutine.resume(arg.take()) {
-        SmtpEhloResult::Ok { capabilities, .. } => break capabilities,
-        SmtpEhloResult::WantsRead => {
+        SmtpCoroutineState::Done((capabilities, _)) => break capabilities,
+        SmtpCoroutineState::WantsRead => {
             let n = stream.read(&mut buf).unwrap();
             arg = Some(&buf[..n]);
         }
-        SmtpEhloResult::WantsWrite(bytes) => {
+        SmtpCoroutineState::WantsWrite(bytes) => {
             stream.write_all(&bytes).unwrap();
             arg = None;
         }
-        SmtpEhloResult::Err(err) => panic!("{err}"),
+        SmtpCoroutineState::Err(err) => panic!("{err}"),
     }
 };
 
@@ -134,7 +149,7 @@ for line in capabilities {
 }
 ```
 
-### As a light std client (BYO stream)
+### Light client
 
 Enable the `client` feature. `SmtpClientStd::new(stream)` wraps any blocking `Read + Write` and exposes one method per SMTP command. You still open the TCP socket, run TLS / STARTTLS yourself, and hand over a ready-to-talk stream; the client takes it from there.
 
@@ -164,13 +179,13 @@ for line in capabilities {
 }
 ```
 
-### As a full std client (TCP + TLS)
+### Full client
 
 Enable one of the TLS feature flags: `rustls-ring` (default), `rustls-aws`, or `native-tls`. `SmtpClientStd::connect(url, tls, starttls, domain, sasl)` opens `smtp://` (plain TCP) or `smtps://` (implicit TLS) via [pimalaya/stream](https://github.com/pimalaya/stream), reads the greeting, sends the initial EHLO, drives the optional STARTTLS upgrade plus a fresh EHLO over TLS, then runs the chosen SASL mechanism, returning a ready-to-use authenticated client.
 
 ```toml,ignore
 [dependencies]
-io-smtp = "0.0.1" # rustls-ring is enabled by default
+io-smtp = { version = "0.0.1", default-features = false, features = ["rustls-ring"] }
 ```
 
 ```rust,ignore
@@ -207,13 +222,35 @@ client.quit()?;
 
 The `sasl` argument is `Option<impl Into<Sasl>>`, so any of the per-mechanism structs (`SaslLogin`, `SaslPlain`, `SaslOauthbearer`, `SaslScramSha256` behind the `scram` feature) can be passed in `Some(...)` directly without wrapping in a `Sasl` variant. `SaslAnonymous` and `SaslXoauth2` are not supported by SMTP.
 
-*See complete examples at [./examples](https://github.com/pimalaya/io-smtp/blob/master/examples).*
+## Examples
 
-## More examples
+See complete examples at [./examples](https://github.com/pimalaya/io-smtp/blob/master/examples).
 
-Have a look at projects built on top of this library:
+Have also a look at real-world projects built on top of this library:
 
-- [himalaya](https://github.com/pimalaya/himalaya): CLI to manage emails
+- [Himalaya CLI](https://github.com/pimalaya/himalaya): CLI to manage emails
+- [Himalaya TUI](https://github.com/pimalaya/himalaya-tui): TUI to manage emails
+- [Sirup](https://github.com/pimalaya/sirup): CLI to spawn pre-authenticated IMAP/SMTP sessions and expose them via Unix sockets
+
+## AI disclosure
+
+This project is developed with AI assistance. This section documents how, so users and downstream packagers can make informed decisions.
+
+- **Tools**: Claude Code (Anthropic), Opus 4.7, invoked locally with a persistent project-scoped memory and a small set of repo-specific rules.
+
+- **Used for**: Refactors, mechanical multi-file edits, boilerplate (feature gates, error enums, derive macros, trait impls), test scaffolding, doc polish, exploratory design conversations.
+
+- **Not used for**: Engineering, critical code, git manipulation (commit, merge, rebase…), real-world tests.
+
+- **Verification**: Every AI-assisted change is read, compiled, tested, and formatted before commit (`nix develop --command cargo check / cargo test / cargo
+fmt`). Behavioural correctness is verified against the relevant RFC or upstream spec, not assumed from the model output. Tests are never adjusted to fit
+AI-generated code; the code is adjusted to fit correct behaviour.
+
+- **Limitations**: AI models occasionally produce code that compiles and passes tests but is subtly wrong: off-by-one errors, missed edge cases, plausible
+but nonexistent APIs, stale RFC references. The verification workflow catches most of this; it does not catch all of it. Bug reports are welcome and taken
+seriously.
+
+- **Last reviewed**: 29/05/2026
 
 ## License
 

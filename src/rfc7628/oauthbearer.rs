@@ -32,9 +32,10 @@ use secrecy::{ExposeSecret, SecretBox, SecretString};
 use thiserror::Error;
 
 use crate::{
+    coroutine::{SmtpCoroutine, SmtpCoroutineState},
     rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
     rfc5321::{
-        ehlo::{SmtpEhlo, SmtpEhloError, SmtpEhloResult},
+        ehlo::{SmtpEhlo, SmtpEhloError},
         types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, response::Response},
     },
     utils::escape_byte_string,
@@ -54,15 +55,6 @@ pub enum SmtpOauthbearerError {
     Rejected { code: u16, message: String },
     #[error(transparent)]
     Ehlo(#[from] SmtpEhloError),
-}
-
-/// Result returned by [`SmtpOAuthBearer::resume`].
-#[derive(Debug)]
-pub enum SmtpOauthbearerResult {
-    Ok,
-    WantsRead,
-    WantsWrite(Vec<u8>),
-    Err(SmtpOauthbearerError),
 }
 
 enum State {
@@ -114,22 +106,26 @@ impl SmtpOauthbearer {
             buf: Vec::new(),
         }
     }
+}
 
-    /// Advances the coroutine.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpOauthbearerResult {
+impl SmtpCoroutine for SmtpOauthbearer {
+    type Output = ();
+    type Error = SmtpOauthbearerError;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpOauthbearerResult::WantsWrite(bytes);
+                return SmtpCoroutineState::WantsWrite(bytes);
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpOauthbearerResult::WantsRead;
+                return SmtpCoroutineState::WantsRead;
             }
 
             match &mut self.state {
                 State::AwaitInitial => {
                     match arg.take() {
-                        Some(&[]) => return SmtpOauthbearerResult::Err(SmtpOauthbearerError::Eof),
+                        Some(&[]) => return SmtpCoroutineState::Err(SmtpOauthbearerError::Eof),
                         Some(data) => {
                             trace!("read SMTP bytes: {}", escape_byte_string(data));
                             self.buf.extend_from_slice(data);
@@ -151,9 +147,9 @@ impl SmtpOauthbearer {
                                 .collect::<Vec<_>>()
                                 .join("; ");
 
-                            return SmtpOauthbearerResult::Err(
-                                SmtpOauthbearerError::ParseResponse(reason),
-                            );
+                            return SmtpCoroutineState::Err(SmtpOauthbearerError::ParseResponse(
+                                reason,
+                            ));
                         }
                     };
 
@@ -173,12 +169,12 @@ impl SmtpOauthbearer {
                         self.buf.clear();
                         self.state = State::AwaitError;
                         let ack: Vec<u8> = SmtpAuthData::r#continue(vec![0x01u8]).into();
-                        return SmtpOauthbearerResult::WantsWrite(ack);
+                        return SmtpCoroutineState::WantsWrite(ack);
                     }
 
                     let code = response.code.code();
                     let message = response.text().to_string();
-                    return SmtpOauthbearerResult::Err(SmtpOauthbearerError::Rejected {
+                    return SmtpCoroutineState::Err(SmtpOauthbearerError::Rejected {
                         code,
                         message,
                     });
@@ -186,7 +182,7 @@ impl SmtpOauthbearer {
 
                 State::AwaitError => {
                     match arg.take() {
-                        Some(&[]) => return SmtpOauthbearerResult::Err(SmtpOauthbearerError::Eof),
+                        Some(&[]) => return SmtpCoroutineState::Err(SmtpOauthbearerError::Eof),
                         Some(data) => {
                             trace!("read SMTP bytes: {}", escape_byte_string(data));
                             self.buf.extend_from_slice(data);
@@ -204,20 +200,20 @@ impl SmtpOauthbearer {
                         .take()
                         .unwrap_or_else(|| "authentication failed".into());
 
-                    return SmtpOauthbearerResult::Err(SmtpOauthbearerError::Rejected {
+                    return SmtpCoroutineState::Err(SmtpOauthbearerError::Rejected {
                         code: 535,
                         message,
                     });
                 }
 
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpEhloResult::Ok { .. } => return SmtpOauthbearerResult::Ok,
-                    SmtpEhloResult::WantsRead => return SmtpOauthbearerResult::WantsRead,
-                    SmtpEhloResult::WantsWrite(bytes) => {
-                        return SmtpOauthbearerResult::WantsWrite(bytes);
+                    SmtpCoroutineState::Done(_) => return SmtpCoroutineState::Done(()),
+                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
+                    SmtpCoroutineState::WantsWrite(bytes) => {
+                        return SmtpCoroutineState::WantsWrite(bytes);
                     }
-                    SmtpEhloResult::Err(err) => {
-                        return SmtpOauthbearerResult::Err(SmtpOauthbearerError::Ehlo(err));
+                    SmtpCoroutineState::Err(err) => {
+                        return SmtpCoroutineState::Err(SmtpOauthbearerError::Ehlo(err));
                     }
                 },
             }

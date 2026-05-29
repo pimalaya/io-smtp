@@ -11,7 +11,11 @@ use bounded_static::IntoBoundedStatic;
 use log::trace;
 use thiserror::Error;
 
-use crate::{rfc5321::types::greeting::Greeting, utils::escape_byte_string};
+use crate::{
+    coroutine::{SmtpCoroutine, SmtpCoroutineState},
+    rfc5321::types::greeting::Greeting,
+    utils::escape_byte_string,
+};
 
 /// Output of [`SmtpClientStd::greeting`]: the parsed greeting line plus
 /// any bytes read past it that the caller may need to re-feed.
@@ -28,17 +32,6 @@ pub enum GetSmtpGreetingError {
     ParseResponse(String),
 }
 
-/// Result returned by [`GetSmtpGreeting::resume`].
-#[derive(Debug)]
-pub enum GetSmtpGreetingResult {
-    Ok {
-        greeting: Greeting<'static>,
-        remaining: Vec<u8>,
-    },
-    WantsRead,
-    Err(GetSmtpGreetingError),
-}
-
 /// I/O-free coroutine to read the greeting from an SMTP server.
 #[derive(Debug, Default)]
 pub struct GetSmtpGreeting {
@@ -51,21 +44,20 @@ impl GetSmtpGreeting {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    /// Advances the coroutine.
-    ///
-    /// Pass [`None`] when there is no data to provide (initial call).
-    /// Pass `Some(data)` with bytes read from the socket after a
-    /// [`GetSmtpGreetingResult::WantsRead`]. Pass `Some(&[])` to
-    /// signal EOF.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> GetSmtpGreetingResult {
+impl SmtpCoroutine for GetSmtpGreeting {
+    type Output = SmtpGreetingOutput;
+    type Error = GetSmtpGreetingError;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
         loop {
             if mem::take(&mut self.wants_read) {
-                return GetSmtpGreetingResult::WantsRead;
+                return SmtpCoroutineState::WantsRead;
             }
 
             match arg.take() {
-                Some(&[]) => return GetSmtpGreetingResult::Err(GetSmtpGreetingError::Eof),
+                Some(&[]) => return SmtpCoroutineState::Err(GetSmtpGreetingError::Eof),
                 Some(data) => {
                     trace!("read SMTP bytes: {}", escape_byte_string(data));
                     self.buf.extend_from_slice(data);
@@ -82,10 +74,7 @@ impl GetSmtpGreeting {
                 Ok(greeting) => {
                     let greeting = greeting.into_static();
                     let _ = mem::take(&mut self.buf);
-                    GetSmtpGreetingResult::Ok {
-                        greeting,
-                        remaining: Vec::new(),
-                    }
+                    SmtpCoroutineState::Done((greeting, Vec::new()))
                 }
                 Err(errors) => {
                     let reason = errors
@@ -94,7 +83,7 @@ impl GetSmtpGreeting {
                         .collect::<Vec<_>>()
                         .join("; ");
 
-                    GetSmtpGreetingResult::Err(GetSmtpGreetingError::ParseResponse(reason))
+                    SmtpCoroutineState::Err(GetSmtpGreetingError::ParseResponse(reason))
                 }
             };
         }

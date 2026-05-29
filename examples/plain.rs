@@ -4,6 +4,7 @@ use std::{
 };
 
 use io_smtp::{
+    coroutine::*,
     rfc4616::plain::*,
     rfc5321::{
         ehlo::*,
@@ -35,12 +36,13 @@ fn main() {
 
     let greeting = loop {
         match coroutine.resume(arg.take()) {
-            GetSmtpGreetingResult::Ok { greeting, .. } => break greeting,
-            GetSmtpGreetingResult::WantsRead => {
+            SmtpCoroutineState::Done((greeting, _)) => break greeting,
+            SmtpCoroutineState::WantsRead => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            GetSmtpGreetingResult::Err(err) => panic!("{err}"),
+            SmtpCoroutineState::WantsWrite(_) => arg = None,
+            SmtpCoroutineState::Err(err) => panic!("{err}"),
         }
     };
 
@@ -53,16 +55,16 @@ fn main() {
 
     let capabilities = loop {
         match coroutine.resume(arg.take()) {
-            SmtpEhloResult::Ok { capabilities, .. } => break capabilities,
-            SmtpEhloResult::WantsRead => {
+            SmtpCoroutineState::Done((capabilities, _)) => break capabilities,
+            SmtpCoroutineState::WantsRead => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpEhloResult::WantsWrite(bytes) => {
+            SmtpCoroutineState::WantsWrite(bytes) => {
                 stream.write_all(&bytes).unwrap();
                 arg = None;
             }
-            SmtpEhloResult::Err(err) => panic!("{err}"),
+            SmtpCoroutineState::Err(err) => panic!("{err}"),
         }
     };
 
@@ -75,16 +77,16 @@ fn main() {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpPlainResult::Ok => break,
-            SmtpPlainResult::WantsRead => {
+            SmtpCoroutineState::Done(()) => break,
+            SmtpCoroutineState::WantsRead => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpPlainResult::WantsWrite(bytes) => {
+            SmtpCoroutineState::WantsWrite(bytes) => {
                 stream.write_all(&bytes).unwrap();
                 arg = None;
             }
-            SmtpPlainResult::Err(err) => panic!("{err}"),
+            SmtpCoroutineState::Err(err) => panic!("{err}"),
         }
     }
 

@@ -13,6 +13,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
+    coroutine::{SmtpCoroutine, SmtpCoroutineState},
     rfc5321::types::{ehlo_domain::EhloDomain, ehlo_response::EhloResponse},
     utils::escape_byte_string,
 };
@@ -48,25 +49,6 @@ pub enum SmtpEhloError {
     ParseResponse(String),
 }
 
-/// Result returned by [`SmtpEhlo::resume`].
-#[derive(Debug)]
-pub enum SmtpEhloResult {
-    /// The coroutine has successfully terminated.
-    ///
-    /// `capabilities` are the raw capability strings from the EHLO
-    /// response (e.g. `"AUTH PLAIN LOGIN"`, `"SIZE 10240000"`). Each
-    /// entry is the full capability line after the initial domain
-    /// greeting line. Parse mechanism-specific parameters using the
-    /// relevant RFC module.
-    Ok {
-        capabilities: Vec<Cow<'static, str>>,
-        remaining: Vec<u8>,
-    },
-    WantsRead,
-    WantsWrite(Vec<u8>),
-    Err(SmtpEhloError),
-}
-
 /// I/O-free coroutine to send SMTP EHLO command.
 pub struct SmtpEhlo {
     wants_read: bool,
@@ -87,20 +69,24 @@ impl SmtpEhlo {
             buf: Vec::new(),
         }
     }
+}
 
-    /// Advances the coroutine.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpEhloResult {
+impl SmtpCoroutine for SmtpEhlo {
+    type Output = SmtpEhloOutput;
+    type Error = SmtpEhloError;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpEhloResult::WantsWrite(bytes);
+                return SmtpCoroutineState::WantsWrite(bytes);
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpEhloResult::WantsRead;
+                return SmtpCoroutineState::WantsRead;
             }
 
             match arg.take() {
-                Some(&[]) => return SmtpEhloResult::Err(SmtpEhloError::Eof),
+                Some(&[]) => return SmtpCoroutineState::Err(SmtpEhloError::Eof),
                 Some(data) => {
                     trace!("read SMTP bytes: {}", escape_byte_string(data));
                     self.buf.extend_from_slice(data);
@@ -117,10 +103,7 @@ impl SmtpEhlo {
                 Ok(response) => {
                     let capabilities = response.into_static().capabilities;
                     let _ = mem::take(&mut self.buf);
-                    SmtpEhloResult::Ok {
-                        capabilities,
-                        remaining: Vec::new(),
-                    }
+                    SmtpCoroutineState::Done((capabilities, Vec::new()))
                 }
                 Err(errors) => {
                     let reason = errors
@@ -129,7 +112,7 @@ impl SmtpEhlo {
                         .collect::<Vec<_>>()
                         .join("; ");
 
-                    SmtpEhloResult::Err(SmtpEhloError::ParseResponse(reason))
+                    SmtpCoroutineState::Err(SmtpEhloError::ParseResponse(reason))
                 }
             };
         }

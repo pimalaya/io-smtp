@@ -2,7 +2,7 @@
 name = "io-smtp"
 description = "SMTP client library"
 version = "0.0.1"
-authors = ["Clément DOUIN <pimalaya.org@posteo.net>"]
+authors = ["soywod <pimalaya.org@posteo.net>"]
 edition = "2024"
 rust-version = "1.87"
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = []
+default = ["client"]
 client = []
 scram = ["dep:hmac", "dep:pbkdf2", "dep:rand", "dep:sha2"]
 rustls-ring = ["client", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:url"]
@@ -43,6 +43,9 @@ secrecy = { version = "0.10", default-features = false }
 sha2 = { version = "0.11", optional = true, default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2.2", default-features = false, optional = true }
+
+# [patch.crates-io]
+# pimalaya-stream.path = "../stream"
 
 [patch.crates-io]
 pimalaya-stream.git = "https://github.com/pimalaya/stream"
