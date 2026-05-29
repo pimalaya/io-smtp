@@ -6,7 +6,7 @@ use bounded_static::IntoBoundedStatic;
 use thiserror::Error;
 
 use crate::{
-    coroutine::{SmtpCoroutine, SmtpCoroutineState},
+    coroutine::*,
     rfc5321::{
         data::{SmtpData, SmtpDataError},
         mail::{SmtpMail, SmtpMailError},
@@ -62,21 +62,20 @@ impl SmtpMessageSend {
 }
 
 impl SmtpCoroutine for SmtpMessageSend {
-    type Output = ();
-    type Error = SmtpMessageSendError;
+    type Yield = SmtpYield;
+    type Return = Result<(), SmtpMessageSendError>;
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             match &mut self.state {
                 State::MailFrom(mail) => match mail.resume(arg.take()) {
-                    SmtpCoroutineState::Done(()) => self.state = State::PrepareRcptTo,
-                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
-                    SmtpCoroutineState::WantsWrite(bytes) => {
-                        return SmtpCoroutineState::WantsWrite(bytes);
+                    SmtpCoroutineState::Complete(Ok(())) => self.state = State::PrepareRcptTo,
+                    SmtpCoroutineState::Complete(Err(err)) => {
+                        return SmtpCoroutineState::Complete(Err(SmtpMessageSendError::MailFrom(
+                            err,
+                        )));
                     }
-                    SmtpCoroutineState::Err(err) => {
-                        return SmtpCoroutineState::Err(SmtpMessageSendError::MailFrom(err));
-                    }
+                    SmtpCoroutineState::Yielded(y) => return SmtpCoroutineState::Yielded(y),
                 },
                 State::PrepareRcptTo => {
                     self.state = match self.forward_paths.pop_front() {
@@ -88,24 +87,22 @@ impl SmtpCoroutine for SmtpMessageSend {
                     };
                 }
                 State::RcptTo(rcpt) => match rcpt.resume(arg.take()) {
-                    SmtpCoroutineState::Done(()) => self.state = State::PrepareRcptTo,
-                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
-                    SmtpCoroutineState::WantsWrite(bytes) => {
-                        return SmtpCoroutineState::WantsWrite(bytes);
+                    SmtpCoroutineState::Complete(Ok(())) => self.state = State::PrepareRcptTo,
+                    SmtpCoroutineState::Complete(Err(err)) => {
+                        return SmtpCoroutineState::Complete(Err(SmtpMessageSendError::RcptTo(
+                            err,
+                        )));
                     }
-                    SmtpCoroutineState::Err(err) => {
-                        return SmtpCoroutineState::Err(SmtpMessageSendError::RcptTo(err));
-                    }
+                    SmtpCoroutineState::Yielded(y) => return SmtpCoroutineState::Yielded(y),
                 },
                 State::Data(data) => match data.resume(arg.take()) {
-                    SmtpCoroutineState::Done(()) => return SmtpCoroutineState::Done(()),
-                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
-                    SmtpCoroutineState::WantsWrite(bytes) => {
-                        return SmtpCoroutineState::WantsWrite(bytes);
+                    SmtpCoroutineState::Complete(Ok(())) => {
+                        return SmtpCoroutineState::Complete(Ok(()));
                     }
-                    SmtpCoroutineState::Err(err) => {
-                        return SmtpCoroutineState::Err(SmtpMessageSendError::Data(err));
+                    SmtpCoroutineState::Complete(Err(err)) => {
+                        return SmtpCoroutineState::Complete(Err(SmtpMessageSendError::Data(err)));
                     }
+                    SmtpCoroutineState::Yielded(y) => return SmtpCoroutineState::Yielded(y),
                 },
             }
         }

@@ -12,7 +12,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
-    coroutine::{SmtpCoroutine, SmtpCoroutineState},
+    coroutine::*,
     rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
 };
@@ -107,21 +107,21 @@ impl SmtpData {
 }
 
 impl SmtpCoroutine for SmtpData {
-    type Output = ();
-    type Error = SmtpDataError;
+    type Yield = SmtpYield;
+    type Return = Result<(), SmtpDataError>;
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpCoroutineState::WantsWrite(bytes);
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpCoroutineState::WantsRead;
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsRead);
             }
 
             match arg.take() {
-                Some(&[]) => return SmtpCoroutineState::Err(SmtpDataError::Eof),
+                Some(&[]) => return SmtpCoroutineState::Complete(Err(SmtpDataError::Eof)),
                 Some(data) => {
                     trace!("read SMTP bytes: {}", escape_byte_string(data));
                     self.buf.extend_from_slice(data);
@@ -143,7 +143,7 @@ impl SmtpCoroutine for SmtpData {
                         .collect::<Vec<_>>()
                         .join("; ");
 
-                    return SmtpCoroutineState::Err(SmtpDataError::ParseResponse(reason));
+                    return SmtpCoroutineState::Complete(Err(SmtpDataError::ParseResponse(reason)));
                 }
             };
 
@@ -152,10 +152,10 @@ impl SmtpCoroutine for SmtpData {
                     if response.code != ReplyCode::START_MAIL_INPUT {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        return SmtpCoroutineState::Err(SmtpDataError::CommandRejected {
+                        return SmtpCoroutineState::Complete(Err(SmtpDataError::CommandRejected {
                             code,
                             message,
-                        });
+                        }));
                     }
 
                     let body = self.body.take().expect("body taken twice");
@@ -168,11 +168,14 @@ impl SmtpCoroutine for SmtpData {
                 }
                 State::AwaitFinal => {
                     return if response.code == ReplyCode::OK {
-                        SmtpCoroutineState::Done(())
+                        SmtpCoroutineState::Complete(Ok(()))
                     } else {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        SmtpCoroutineState::Err(SmtpDataError::BodyRejected { code, message })
+                        SmtpCoroutineState::Complete(Err(SmtpDataError::BodyRejected {
+                            code,
+                            message,
+                        }))
                     };
                 }
             }

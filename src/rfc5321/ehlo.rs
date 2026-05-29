@@ -13,7 +13,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
-    coroutine::{SmtpCoroutine, SmtpCoroutineState},
+    coroutine::*,
     rfc5321::types::{ehlo_domain::EhloDomain, ehlo_response::EhloResponse},
     utils::escape_byte_string,
 };
@@ -72,21 +72,21 @@ impl SmtpEhlo {
 }
 
 impl SmtpCoroutine for SmtpEhlo {
-    type Output = SmtpEhloOutput;
-    type Error = SmtpEhloError;
+    type Yield = SmtpYield;
+    type Return = Result<SmtpEhloOutput, SmtpEhloError>;
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpCoroutineState::WantsWrite(bytes);
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpCoroutineState::WantsRead;
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsRead);
             }
 
             match arg.take() {
-                Some(&[]) => return SmtpCoroutineState::Err(SmtpEhloError::Eof),
+                Some(&[]) => return SmtpCoroutineState::Complete(Err(SmtpEhloError::Eof)),
                 Some(data) => {
                     trace!("read SMTP bytes: {}", escape_byte_string(data));
                     self.buf.extend_from_slice(data);
@@ -103,7 +103,7 @@ impl SmtpCoroutine for SmtpEhlo {
                 Ok(response) => {
                     let capabilities = response.into_static().capabilities;
                     let _ = mem::take(&mut self.buf);
-                    SmtpCoroutineState::Done((capabilities, Vec::new()))
+                    SmtpCoroutineState::Complete(Ok((capabilities, Vec::new())))
                 }
                 Err(errors) => {
                     let reason = errors
@@ -112,7 +112,7 @@ impl SmtpCoroutine for SmtpEhlo {
                         .collect::<Vec<_>>()
                         .join("; ");
 
-                    SmtpCoroutineState::Err(SmtpEhloError::ParseResponse(reason))
+                    SmtpCoroutineState::Complete(Err(SmtpEhloError::ParseResponse(reason)))
                 }
             };
         }

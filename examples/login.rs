@@ -36,13 +36,13 @@ fn main() {
 
     let greeting = loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done((greeting, _)) => break greeting,
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok((greeting, _))) => break greeting,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpCoroutineState::WantsWrite(_) => arg = None,
-            SmtpCoroutineState::Err(err) => panic!("{err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(_)) => arg = None,
         }
     };
 
@@ -55,16 +55,16 @@ fn main() {
 
     let capabilities = loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done((capabilities, _)) => break capabilities,
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok((capabilities, _))) => break capabilities,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpCoroutineState::WantsWrite(bytes) => {
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
                 stream.write_all(&bytes).unwrap();
                 arg = None;
             }
-            SmtpCoroutineState::Err(err) => panic!("{err}"),
         }
     };
 
@@ -77,16 +77,16 @@ fn main() {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done(()) => break,
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok(())) => break,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpCoroutineState::WantsWrite(bytes) => {
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
                 stream.write_all(&bytes).unwrap();
                 arg = None;
             }
-            SmtpCoroutineState::Err(err) => panic!("{err}"),
         }
     }
 

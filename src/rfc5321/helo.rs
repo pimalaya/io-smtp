@@ -16,7 +16,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
-    coroutine::{SmtpCoroutine, SmtpCoroutineState},
+    coroutine::*,
     rfc5321::types::{domain::Domain, reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
 };
@@ -77,21 +77,21 @@ impl SmtpHelo {
 }
 
 impl SmtpCoroutine for SmtpHelo {
-    type Output = ();
-    type Error = SmtpHeloError;
+    type Yield = SmtpYield;
+    type Return = Result<(), SmtpHeloError>;
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpCoroutineState::WantsWrite(bytes);
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpCoroutineState::WantsRead;
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsRead);
             }
 
             match arg.take() {
-                Some(&[]) => return SmtpCoroutineState::Err(SmtpHeloError::Eof),
+                Some(&[]) => return SmtpCoroutineState::Complete(Err(SmtpHeloError::Eof)),
                 Some(data) => {
                     trace!("read SMTP bytes: {}", escape_byte_string(data));
                     self.buf.extend_from_slice(data);
@@ -107,11 +107,11 @@ impl SmtpCoroutine for SmtpHelo {
             return match Response::parse(&self.buf) {
                 Ok(response) => {
                     if response.code == ReplyCode::OK {
-                        SmtpCoroutineState::Done(())
+                        SmtpCoroutineState::Complete(Ok(()))
                     } else {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        SmtpCoroutineState::Err(SmtpHeloError::Rejected { code, message })
+                        SmtpCoroutineState::Complete(Err(SmtpHeloError::Rejected { code, message }))
                     }
                 }
                 Err(errors) => {
@@ -121,7 +121,7 @@ impl SmtpCoroutine for SmtpHelo {
                         .collect::<Vec<_>>()
                         .join("; ");
 
-                    SmtpCoroutineState::Err(SmtpHeloError::ParseResponse(reason))
+                    SmtpCoroutineState::Complete(Err(SmtpHeloError::ParseResponse(reason)))
                 }
             };
         }

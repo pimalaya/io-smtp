@@ -11,11 +11,7 @@ use bounded_static::IntoBoundedStatic;
 use log::trace;
 use thiserror::Error;
 
-use crate::{
-    coroutine::{SmtpCoroutine, SmtpCoroutineState},
-    rfc5321::types::greeting::Greeting,
-    utils::escape_byte_string,
-};
+use crate::{coroutine::*, rfc5321::types::greeting::Greeting, utils::escape_byte_string};
 
 /// Output of [`SmtpClientStd::greeting`]: the parsed greeting line plus
 /// any bytes read past it that the caller may need to re-feed.
@@ -47,17 +43,19 @@ impl GetSmtpGreeting {
 }
 
 impl SmtpCoroutine for GetSmtpGreeting {
-    type Output = SmtpGreetingOutput;
-    type Error = GetSmtpGreetingError;
+    type Yield = SmtpYield;
+    type Return = Result<SmtpGreetingOutput, GetSmtpGreetingError>;
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             if mem::take(&mut self.wants_read) {
-                return SmtpCoroutineState::WantsRead;
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsRead);
             }
 
             match arg.take() {
-                Some(&[]) => return SmtpCoroutineState::Err(GetSmtpGreetingError::Eof),
+                Some(&[]) => {
+                    return SmtpCoroutineState::Complete(Err(GetSmtpGreetingError::Eof));
+                }
                 Some(data) => {
                     trace!("read SMTP bytes: {}", escape_byte_string(data));
                     self.buf.extend_from_slice(data);
@@ -74,7 +72,7 @@ impl SmtpCoroutine for GetSmtpGreeting {
                 Ok(greeting) => {
                     let greeting = greeting.into_static();
                     let _ = mem::take(&mut self.buf);
-                    SmtpCoroutineState::Done((greeting, Vec::new()))
+                    SmtpCoroutineState::Complete(Ok((greeting, Vec::new())))
                 }
                 Err(errors) => {
                     let reason = errors
@@ -83,7 +81,7 @@ impl SmtpCoroutine for GetSmtpGreeting {
                         .collect::<Vec<_>>()
                         .join("; ");
 
-                    SmtpCoroutineState::Err(GetSmtpGreetingError::ParseResponse(reason))
+                    SmtpCoroutineState::Complete(Err(GetSmtpGreetingError::ParseResponse(reason)))
                 }
             };
         }

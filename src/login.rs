@@ -18,7 +18,7 @@ use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
 use crate::{
-    coroutine::{SmtpCoroutine, SmtpCoroutineState},
+    coroutine::*,
     rfc4954::auth_data::SmtpAuthData,
     rfc5321::{
         ehlo::{SmtpEhlo, SmtpEhloError},
@@ -104,9 +104,11 @@ impl SmtpLogin {
     fn feed_response(
         &mut self,
         arg: Option<&[u8]>,
-    ) -> Option<SmtpCoroutineState<(), SmtpLoginError>> {
+    ) -> Option<SmtpCoroutineState<SmtpYield, Result<(), SmtpLoginError>>> {
         match arg {
-            Some(&[]) => return Some(SmtpCoroutineState::Err(SmtpLoginError::Eof)),
+            Some(&[]) => {
+                return Some(SmtpCoroutineState::Complete(Err(SmtpLoginError::Eof)));
+            }
             Some(data) => {
                 trace!("read SMTP bytes: {}", escape_byte_string(data));
                 self.buf.extend_from_slice(data);
@@ -115,7 +117,7 @@ impl SmtpLogin {
         }
 
         if !Response::is_complete(&self.buf) {
-            return Some(SmtpCoroutineState::WantsRead);
+            return Some(SmtpCoroutineState::Yielded(SmtpYield::WantsRead));
         }
 
         None
@@ -123,17 +125,17 @@ impl SmtpLogin {
 }
 
 impl SmtpCoroutine for SmtpLogin {
-    type Output = ();
-    type Error = SmtpLoginError;
+    type Yield = SmtpYield;
+    type Return = Result<(), SmtpLoginError>;
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpCoroutineState::WantsWrite(bytes);
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpCoroutineState::WantsRead;
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsRead);
             }
 
             match &mut self.state {
@@ -145,8 +147,8 @@ impl SmtpCoroutine for SmtpLogin {
                     let response = match Response::parse(&self.buf) {
                         Ok(response) => response.into_static(),
                         Err(errors) => {
-                            return SmtpCoroutineState::Err(SmtpLoginError::ParseResponse(
-                                join_errors(errors),
+                            return SmtpCoroutineState::Complete(Err(
+                                SmtpLoginError::ParseResponse(join_errors(errors)),
                             ));
                         }
                     };
@@ -154,13 +156,16 @@ impl SmtpCoroutine for SmtpLogin {
                     if response.code != ReplyCode::AUTH_CONTINUE {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        return SmtpCoroutineState::Err(SmtpLoginError::Rejected { code, message });
+                        return SmtpCoroutineState::Complete(Err(SmtpLoginError::Rejected {
+                            code,
+                            message,
+                        }));
                     }
 
                     self.buf.clear();
                     self.state = State::AwaitPasswordChallenge;
                     let bytes = self.username_bytes.take().expect("username taken twice");
-                    return SmtpCoroutineState::WantsWrite(bytes);
+                    return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
                 }
                 State::AwaitPasswordChallenge => {
                     if let Some(state) = self.feed_response(arg.take()) {
@@ -170,8 +175,8 @@ impl SmtpCoroutine for SmtpLogin {
                     let response = match Response::parse(&self.buf) {
                         Ok(response) => response.into_static(),
                         Err(errors) => {
-                            return SmtpCoroutineState::Err(SmtpLoginError::ParseResponse(
-                                join_errors(errors),
+                            return SmtpCoroutineState::Complete(Err(
+                                SmtpLoginError::ParseResponse(join_errors(errors)),
                             ));
                         }
                     };
@@ -179,13 +184,16 @@ impl SmtpCoroutine for SmtpLogin {
                     if response.code != ReplyCode::AUTH_CONTINUE {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        return SmtpCoroutineState::Err(SmtpLoginError::Rejected { code, message });
+                        return SmtpCoroutineState::Complete(Err(SmtpLoginError::Rejected {
+                            code,
+                            message,
+                        }));
                     }
 
                     self.buf.clear();
                     self.state = State::AwaitFinal;
                     let bytes = self.password_bytes.take().expect("password taken twice");
-                    return SmtpCoroutineState::WantsWrite(bytes);
+                    return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
                 }
                 State::AwaitFinal => {
                     if let Some(state) = self.feed_response(arg.take()) {
@@ -195,8 +203,8 @@ impl SmtpCoroutine for SmtpLogin {
                     let response = match Response::parse(&self.buf) {
                         Ok(response) => response.into_static(),
                         Err(errors) => {
-                            return SmtpCoroutineState::Err(SmtpLoginError::ParseResponse(
-                                join_errors(errors),
+                            return SmtpCoroutineState::Complete(Err(
+                                SmtpLoginError::ParseResponse(join_errors(errors)),
                             ));
                         }
                     };
@@ -204,7 +212,10 @@ impl SmtpCoroutine for SmtpLogin {
                     if response.code != ReplyCode::AUTH_SUCCESSFUL {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        return SmtpCoroutineState::Err(SmtpLoginError::Rejected { code, message });
+                        return SmtpCoroutineState::Complete(Err(SmtpLoginError::Rejected {
+                            code,
+                            message,
+                        }));
                     }
 
                     self.buf.clear();
@@ -212,13 +223,14 @@ impl SmtpCoroutine for SmtpLogin {
                     self.state = State::Ehlo(SmtpEhlo::new(domain));
                 }
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpCoroutineState::Done(_) => return SmtpCoroutineState::Done(()),
-                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
-                    SmtpCoroutineState::WantsWrite(bytes) => {
-                        return SmtpCoroutineState::WantsWrite(bytes);
+                    SmtpCoroutineState::Complete(Ok(_)) => {
+                        return SmtpCoroutineState::Complete(Ok(()));
                     }
-                    SmtpCoroutineState::Err(err) => {
-                        return SmtpCoroutineState::Err(SmtpLoginError::Ehlo(err));
+                    SmtpCoroutineState::Complete(Err(err)) => {
+                        return SmtpCoroutineState::Complete(Err(SmtpLoginError::Ehlo(err)));
+                    }
+                    SmtpCoroutineState::Yielded(y) => {
+                        return SmtpCoroutineState::Yielded(y);
                     }
                 },
             }

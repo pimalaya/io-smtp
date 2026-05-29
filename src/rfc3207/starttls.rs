@@ -11,6 +11,7 @@ use log::trace;
 use thiserror::Error;
 
 use crate::{
+    coroutine::*,
     rfc5321::types::{reply_code::ReplyCode, response::Response},
     utils::escape_byte_string,
 };
@@ -35,25 +36,40 @@ pub enum SmtpStartTlsError {
     Rejected { code: u16, message: String },
 }
 
-/// Result returned by [`SmtpStartTls::resume`].
+/// Per-coroutine Yield for [`SmtpStartTls`].
+///
+/// Extends the standard [`SmtpYield`] with a [`WantsStartTls`] variant
+/// that signals the driver to upgrade the underlying socket to TLS.
+/// The driver does not resume the coroutine after a [`WantsStartTls`]:
+/// the upgrade is the terminal step on the happy path.
+///
+/// [`WantsStartTls`]: SmtpStartTlsYield::WantsStartTls
 #[derive(Debug)]
-pub enum SmtpStartTlsResult {
-    /// The server accepted STARTTLS. The caller must now upgrade the
-    /// socket to TLS.
-    ///
-    /// The single payload carries any bytes the coroutine pre-read
-    /// from the socket past the `220` reply, so the caller can re-feed
-    /// them after the TLS handshake. A well-behaved server never
-    /// speaks before the handshake (any pre-handshake bytes are a
-    /// classic STARTTLS-injection signal — RFC 3207 §6), so the
-    /// payload is normally empty.
-    WantsStartTls(Vec<u8>),
+pub enum SmtpStartTlsYield {
+    /// Driver should read more bytes from the socket and feed them
+    /// back on the next resume.
     WantsRead,
+    /// Driver should write these bytes to the socket; the next resume
+    /// typically takes `None`.
     WantsWrite(Vec<u8>),
-    Err(SmtpStartTlsError),
+    /// The server accepted STARTTLS. The driver should now upgrade
+    /// the underlying socket to TLS and stop driving this coroutine.
+    ///
+    /// The payload carries any bytes the coroutine pre-read from the
+    /// socket past the `220` reply, so the caller can re-feed them
+    /// after the TLS handshake. A well-behaved server never speaks
+    /// before the handshake (any pre-handshake bytes are a classic
+    /// STARTTLS-injection signal, RFC 3207 §6), so the payload is
+    /// normally empty.
+    WantsStartTls(Vec<u8>),
 }
 
 /// I/O-free coroutine to perform SMTP STARTTLS negotiation.
+///
+/// Yields [`SmtpStartTlsYield::WantsStartTls`] once the server replies
+/// with a `220` ready code; the driver performs the TLS upgrade. The
+/// terminal [`SmtpCoroutineState::Complete`] arm is reserved for the
+/// error path (rejection, parse failure, EOF).
 pub struct SmtpStartTls {
     wants_read: bool,
     wants_write: Option<Vec<u8>>,
@@ -77,20 +93,26 @@ impl SmtpStartTls {
             buf: Vec::new(),
         }
     }
+}
 
-    /// Advances the coroutine.
-    pub fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpStartTlsResult {
+impl SmtpCoroutine for SmtpStartTls {
+    type Yield = SmtpStartTlsYield;
+    type Return = Result<(), SmtpStartTlsError>;
+
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpStartTlsResult::WantsWrite(bytes);
+                return SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsWrite(bytes));
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpStartTlsResult::WantsRead;
+                return SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsRead);
             }
 
             match arg.take() {
-                Some(&[]) => return SmtpStartTlsResult::Err(SmtpStartTlsError::Eof),
+                Some(&[]) => {
+                    return SmtpCoroutineState::Complete(Err(SmtpStartTlsError::Eof));
+                }
                 Some(data) => {
                     trace!("read SMTP bytes: {}", escape_byte_string(data));
                     self.buf.extend_from_slice(data);
@@ -107,11 +129,14 @@ impl SmtpStartTls {
                 Ok(response) => {
                     if response.code == ReplyCode::SERVICE_READY {
                         let _ = mem::take(&mut self.buf);
-                        SmtpStartTlsResult::WantsStartTls(Vec::new())
+                        SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsStartTls(Vec::new()))
                     } else {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        SmtpStartTlsResult::Err(SmtpStartTlsError::Rejected { code, message })
+                        SmtpCoroutineState::Complete(Err(SmtpStartTlsError::Rejected {
+                            code,
+                            message,
+                        }))
                     }
                 }
                 Err(errors) => {
@@ -121,7 +146,7 @@ impl SmtpStartTls {
                         .collect::<Vec<_>>()
                         .join("; ");
 
-                    SmtpStartTlsResult::Err(SmtpStartTlsError::ParseResponse(reason))
+                    SmtpCoroutineState::Complete(Err(SmtpStartTlsError::ParseResponse(reason)))
                 }
             };
         }

@@ -201,30 +201,33 @@ impl<S: Read + Write> SmtpClientStd<S> {
         self.stream
     }
 
-    /// Drives any [`SmtpCoroutine`] against this client's stream until
-    /// it terminates. Each command method on [`SmtpClientStd`] is a
-    /// one-liner around `run`; downstream callers can also use it to
-    /// drive custom coroutines.
-    pub fn run<C>(&mut self, mut coroutine: C) -> Result<C::Output, SmtpClientStdError>
+    /// Drives any standard-shape coroutine (`Yield = SmtpYield`,
+    /// `Return = Result<Output, Error>`) against the wrapped stream
+    /// until it terminates.
+    ///
+    /// Coroutines that need richer Yield variants (e.g. [`SmtpStartTls`]
+    /// with [`SmtpStartTlsYield::WantsStartTls`]) are driven by their
+    /// own per-method loops on this client; see [`Self::starttls`].
+    pub fn run<C, T, E>(&mut self, mut coroutine: C) -> Result<T, SmtpClientStdError>
     where
-        C: SmtpCoroutine,
-        SmtpClientStdError: From<C::Error>,
+        C: SmtpCoroutine<Yield = SmtpYield, Return = Result<T, E>>,
+        SmtpClientStdError: From<E>,
     {
         let mut buf = [0u8; READ_BUFFER_SIZE];
         let mut arg: Option<&[u8]> = None;
 
         loop {
             match coroutine.resume(arg.take()) {
-                SmtpCoroutineState::Done(out) => return Ok(out),
-                SmtpCoroutineState::WantsRead => {
+                SmtpCoroutineState::Complete(Ok(out)) => return Ok(out),
+                SmtpCoroutineState::Complete(Err(err)) => return Err(err.into()),
+                SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                     let n = self.stream.read(&mut buf)?;
                     arg = Some(&buf[..n]);
                 }
-                SmtpCoroutineState::WantsWrite(bytes) => {
+                SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
                     self.stream.write_all(&bytes)?;
                     arg = None;
                 }
-                SmtpCoroutineState::Err(err) => return Err(err.into()),
             }
         }
     }
@@ -271,17 +274,25 @@ impl<S: Read + Write> SmtpClientStd<S> {
         let mut arg: Option<&[u8]> = None;
 
         loop {
-            match coroutine.resume(arg) {
-                SmtpStartTlsResult::WantsStartTls(remaining) => return Ok(remaining),
-                SmtpStartTlsResult::WantsRead => {
+            match coroutine.resume(arg.take()) {
+                SmtpCoroutineState::Complete(Ok(())) => {
+                    // Unreachable on the happy path: the coroutine
+                    // signals success via WantsStartTls and the loop
+                    // returns there. Kept exhaustive for safety.
+                    return Ok(Vec::new());
+                }
+                SmtpCoroutineState::Complete(Err(err)) => return Err(err.into()),
+                SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsRead) => {
                     let n = self.stream.read(&mut buf)?;
                     arg = Some(&buf[..n]);
                 }
-                SmtpStartTlsResult::WantsWrite(bytes) => {
+                SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsWrite(bytes)) => {
                     self.stream.write_all(&bytes)?;
                     arg = None;
                 }
-                SmtpStartTlsResult::Err(err) => return Err(err.into()),
+                SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsStartTls(remaining)) => {
+                    return Ok(remaining);
+                }
             }
         }
     }

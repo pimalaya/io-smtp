@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    coroutine::{SmtpCoroutine, SmtpCoroutineState},
+    coroutine::*,
     rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
     rfc5321::{
         ehlo::{SmtpEhlo, SmtpEhloError},
@@ -68,7 +68,7 @@ enum State {
 
 /// I/O-free coroutine to authenticate using SMTP AUTH SCRAM-SHA-256.
 ///
-/// The caller must supply a random `nonce` — a sequence of printable ASCII
+/// The caller must supply a random `nonce`: a sequence of printable ASCII
 /// characters (the standard recommends at least 18 characters). Use
 /// `rand::distr::Alphanumeric` or similar to generate one.
 ///
@@ -239,23 +239,25 @@ impl SmtpScramSha256 {
 }
 
 impl SmtpCoroutine for SmtpScramSha256 {
-    type Output = ();
-    type Error = SmtpScramSha256Error;
+    type Yield = SmtpYield;
+    type Return = Result<(), SmtpScramSha256Error>;
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpCoroutineState::WantsWrite(bytes);
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpCoroutineState::WantsRead;
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsRead);
             }
 
             match &mut self.state {
                 State::AwaitServerFirst => {
                     match arg.take() {
-                        Some(&[]) => return SmtpCoroutineState::Err(SmtpScramSha256Error::Eof),
+                        Some(&[]) => {
+                            return SmtpCoroutineState::Complete(Err(SmtpScramSha256Error::Eof));
+                        }
                         Some(data) => {
                             trace!("read SMTP bytes: {}", escape_byte_string(data));
                             self.buf.extend_from_slice(data);
@@ -277,8 +279,8 @@ impl SmtpCoroutine for SmtpScramSha256 {
                                 .collect::<Vec<_>>()
                                 .join("; ");
 
-                            return SmtpCoroutineState::Err(SmtpScramSha256Error::ParseResponse(
-                                reason,
+                            return SmtpCoroutineState::Complete(Err(
+                                SmtpScramSha256Error::ParseResponse(reason),
                             ));
                         }
                     };
@@ -286,44 +288,46 @@ impl SmtpCoroutine for SmtpScramSha256 {
                     if response.code != ReplyCode::AUTH_CONTINUE {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        return SmtpCoroutineState::Err(SmtpScramSha256Error::Rejected {
+                        return SmtpCoroutineState::Complete(Err(SmtpScramSha256Error::Rejected {
                             code,
                             message,
-                        });
+                        }));
                     }
 
                     let server_first_b64 = response.text().0.trim_start();
                     let server_first_bytes = match base64.decode(server_first_b64.as_bytes()) {
                         Ok(b) => b,
                         Err(e) => {
-                            return SmtpCoroutineState::Err(
+                            return SmtpCoroutineState::Complete(Err(
                                 SmtpScramSha256Error::ParseServerFirst(e.to_string()),
-                            );
+                            ));
                         }
                     };
 
                     let server_first = match from_utf8(&server_first_bytes) {
                         Ok(s) => s,
                         Err(e) => {
-                            return SmtpCoroutineState::Err(
+                            return SmtpCoroutineState::Complete(Err(
                                 SmtpScramSha256Error::ParseServerFirst(e.to_string()),
-                            );
+                            ));
                         }
                     };
 
                     let client_final_bytes = match self.compute_client_final(server_first) {
                         Ok(bytes) => bytes,
-                        Err(err) => return SmtpCoroutineState::Err(err),
+                        Err(err) => return SmtpCoroutineState::Complete(Err(err)),
                     };
 
                     self.buf.clear();
                     self.state = State::AwaitServerFinal;
-                    return SmtpCoroutineState::WantsWrite(client_final_bytes);
+                    return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(client_final_bytes));
                 }
 
                 State::AwaitServerFinal => {
                     match arg.take() {
-                        Some(&[]) => return SmtpCoroutineState::Err(SmtpScramSha256Error::Eof),
+                        Some(&[]) => {
+                            return SmtpCoroutineState::Complete(Err(SmtpScramSha256Error::Eof));
+                        }
                         Some(data) => {
                             trace!("read SMTP bytes: {}", escape_byte_string(data));
                             self.buf.extend_from_slice(data);
@@ -345,8 +349,8 @@ impl SmtpCoroutine for SmtpScramSha256 {
                                 .collect::<Vec<_>>()
                                 .join("; ");
 
-                            return SmtpCoroutineState::Err(SmtpScramSha256Error::ParseResponse(
-                                reason,
+                            return SmtpCoroutineState::Complete(Err(
+                                SmtpScramSha256Error::ParseResponse(reason),
                             ));
                         }
                     };
@@ -354,10 +358,10 @@ impl SmtpCoroutine for SmtpScramSha256 {
                     if response.code != ReplyCode::AUTH_SUCCESSFUL {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        return SmtpCoroutineState::Err(SmtpScramSha256Error::Rejected {
+                        return SmtpCoroutineState::Complete(Err(SmtpScramSha256Error::Rejected {
                             code,
                             message,
-                        });
+                        }));
                     }
 
                     // Verify server signature if present in 235 text
@@ -368,9 +372,9 @@ impl SmtpCoroutine for SmtpScramSha256 {
                             if let Some(v) = server_final.strip_prefix("v=") {
                                 if let Ok(server_sig) = base64.decode(v.as_bytes()) {
                                     if server_sig != self.expected_server_sig {
-                                        return SmtpCoroutineState::Err(
+                                        return SmtpCoroutineState::Complete(Err(
                                             SmtpScramSha256Error::ServerSignatureMismatch,
-                                        );
+                                        ));
                                     }
                                 }
                             }
@@ -383,14 +387,13 @@ impl SmtpCoroutine for SmtpScramSha256 {
                 }
 
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpCoroutineState::Done(_) => return SmtpCoroutineState::Done(()),
-                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
-                    SmtpCoroutineState::WantsWrite(bytes) => {
-                        return SmtpCoroutineState::WantsWrite(bytes);
+                    SmtpCoroutineState::Complete(Ok(_)) => {
+                        return SmtpCoroutineState::Complete(Ok(()));
                     }
-                    SmtpCoroutineState::Err(err) => {
-                        return SmtpCoroutineState::Err(SmtpScramSha256Error::Ehlo(err));
+                    SmtpCoroutineState::Complete(Err(err)) => {
+                        return SmtpCoroutineState::Complete(Err(SmtpScramSha256Error::Ehlo(err)));
                     }
+                    SmtpCoroutineState::Yielded(y) => return SmtpCoroutineState::Yielded(y),
                 },
             }
         }
@@ -406,7 +409,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
 
 /// Encode a username as a SCRAM `saslname` (RFC 5802 §5.1).
 ///
-/// Replaces `=` → `=3D` and `,` → `=2C`.
+/// Replaces `=` to `=3D` and `,` to `=2C`.
 fn sasl_name(username: &str) -> String {
     let mut out = String::with_capacity(username.len());
     for ch in username.chars() {

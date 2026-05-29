@@ -42,10 +42,10 @@ pub enum Auth {
 /// Connects via SMTP (TCP) and exercises the following sequence:
 ///
 /// ```text
-/// GREETING → HELO → EHLO → AUTH → NOOP
-///   → MAIL FROM → RCPT TO → RSET   (aborted transaction)
-///   → MAIL FROM → RCPT TO → DATA   (actual send)
-///   → QUIT
+/// GREETING -> HELO -> EHLO -> AUTH -> NOOP
+///   -> MAIL FROM -> RCPT TO -> RSET   (aborted transaction)
+///   -> MAIL FROM -> RCPT TO -> DATA   (actual send)
+///   -> QUIT
 /// ```
 pub fn run_smtp(host: &str, auth: Auth, email: &str) {
     let _ = env_logger::try_init();
@@ -58,10 +58,10 @@ pub fn run_smtp(host: &str, auth: Auth, email: &str) {
 /// Connects via SMTPS (direct TLS) and exercises the following sequence:
 ///
 /// ```text
-/// GREETING → HELO → EHLO → AUTH → NOOP
-///   → MAIL FROM → RCPT TO → RSET   (aborted transaction)
-///   → MAIL FROM → RCPT TO → DATA   (actual send)
-///   → QUIT
+/// GREETING -> HELO -> EHLO -> AUTH -> NOOP
+///   -> MAIL FROM -> RCPT TO -> RSET   (aborted transaction)
+///   -> MAIL FROM -> RCPT TO -> DATA   (actual send)
+///   -> QUIT
 /// ```
 pub fn run_smtps(host: &str, port: u16, auth: Auth, email: &str) {
     let _ = env_logger::try_init();
@@ -80,7 +80,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     let mut buf = [0u8; 4096];
 
-    // ── GREETING ─────────────────────────────────────────────────────────────
+    // -- GREETING -----------------------------------------------------------
 
     let mut coroutine = GetSmtpGreeting::new();
     let mut chunk: Vec<u8>;
@@ -88,17 +88,17 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done(_) => break,
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok(_)) => break,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("GREETING: {err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpCoroutineState::WantsWrite(_) => arg = None,
-            SmtpCoroutineState::Err(err) => panic!("GREETING: {err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(_)) => arg = None,
         }
     }
 
-    // ── HELO ─────────────────────────────────────────────────────────────────
+    // -- HELO ---------------------------------------------------------------
 
     let mut coroutine = SmtpHelo::new(domain);
     let mut chunk: Vec<u8>;
@@ -106,17 +106,19 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done(()) => break,
-            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok(())) => break,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("HELO: {err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+                stream.write_all(&bytes).expect("write")
+            }
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpCoroutineState::Err(err) => panic!("HELO: {err}"),
         }
     }
 
-    // ── EHLO ─────────────────────────────────────────────────────────────────
+    // -- EHLO ---------------------------------------------------------------
 
     let mut coroutine = SmtpEhlo::new(ehlo_domain.clone());
     let mut chunk: Vec<u8>;
@@ -124,17 +126,19 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done(_) => break,
-            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok(_)) => break,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("EHLO: {err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+                stream.write_all(&bytes).expect("write")
+            }
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpCoroutineState::Err(err) => panic!("EHLO: {err}"),
         }
     }
 
-    // ── AUTH ──────────────────────────────────────────────────────────────────
+    // -- AUTH ---------------------------------------------------------------
 
     match auth {
         Auth::None => {}
@@ -146,15 +150,15 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
             loop {
                 match coroutine.resume(arg.take()) {
-                    SmtpCoroutineState::Done(()) => break,
-                    SmtpCoroutineState::WantsWrite(bytes) => {
+                    SmtpCoroutineState::Complete(Ok(())) => break,
+                    SmtpCoroutineState::Complete(Err(err)) => panic!("AUTH PLAIN: {err}"),
+                    SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
                         stream.write_all(&bytes).expect("write")
                     }
-                    SmtpCoroutineState::WantsRead => {
+                    SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                         chunk = read_chunk(&mut stream, &mut buf);
                         arg = Some(&chunk);
                     }
-                    SmtpCoroutineState::Err(err) => panic!("AUTH PLAIN: {err}"),
                 }
             }
         }
@@ -166,21 +170,21 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
             loop {
                 match coroutine.resume(arg.take()) {
-                    SmtpCoroutineState::Done(()) => break,
-                    SmtpCoroutineState::WantsWrite(bytes) => {
+                    SmtpCoroutineState::Complete(Ok(())) => break,
+                    SmtpCoroutineState::Complete(Err(err)) => panic!("AUTH LOGIN: {err}"),
+                    SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
                         stream.write_all(&bytes).expect("write")
                     }
-                    SmtpCoroutineState::WantsRead => {
+                    SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                         chunk = read_chunk(&mut stream, &mut buf);
                         arg = Some(&chunk);
                     }
-                    SmtpCoroutineState::Err(err) => panic!("AUTH LOGIN: {err}"),
                 }
             }
         }
     }
 
-    // ── NOOP ─────────────────────────────────────────────────────────────────
+    // -- NOOP ---------------------------------------------------------------
 
     let mut coroutine = SmtpNoop::new();
     let mut chunk: Vec<u8>;
@@ -188,17 +192,19 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done(()) => break,
-            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok(())) => break,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("NOOP: {err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+                stream.write_all(&bytes).expect("write")
+            }
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpCoroutineState::Err(err) => panic!("NOOP: {err}"),
         }
     }
 
-    // ── Build paths (shared across the aborted and real transactions) ─────────
+    // -- Build paths (shared across the aborted and real transactions) -----
 
     let (local, domain_part) = email.split_once('@').unwrap();
     let mailbox = Mailbox {
@@ -209,7 +215,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
     let reverse_path = ReversePath::Mailbox(mailbox.clone());
     let forward_path = ForwardPath(mailbox);
 
-    // ── MAIL FROM → RCPT TO → RSET (aborted transaction) ────────────────────
+    // -- MAIL FROM -> RCPT TO -> RSET (aborted transaction) ----------------
 
     let mut coroutine = SmtpMail::new(reverse_path.clone());
     let mut chunk: Vec<u8>;
@@ -217,13 +223,15 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done(()) => break,
-            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok(())) => break,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("MAIL FROM (aborted): {err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+                stream.write_all(&bytes).expect("write")
+            }
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpCoroutineState::Err(err) => panic!("MAIL FROM (aborted): {err}"),
         }
     }
 
@@ -233,13 +241,15 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done(()) => break,
-            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok(())) => break,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("RCPT TO (aborted): {err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+                stream.write_all(&bytes).expect("write")
+            }
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpCoroutineState::Err(err) => panic!("RCPT TO (aborted): {err}"),
         }
     }
 
@@ -249,17 +259,19 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done(()) => break,
-            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok(())) => break,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("RSET: {err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+                stream.write_all(&bytes).expect("write")
+            }
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpCoroutineState::Err(err) => panic!("RSET: {err}"),
         }
     }
 
-    // ── MAIL FROM → RCPT TO → DATA (actual send) ─────────────────────────────
+    // -- MAIL FROM -> RCPT TO -> DATA (actual send) ------------------------
 
     let eml = [
         &format!("From: io-smtp test <{email}>"),
@@ -279,17 +291,19 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done(()) => break,
-            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok(())) => break,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("send message: {err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+                stream.write_all(&bytes).expect("write")
+            }
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpCoroutineState::Err(err) => panic!("send message: {err}"),
         }
     }
 
-    // ── QUIT ──────────────────────────────────────────────────────────────────
+    // -- QUIT ---------------------------------------------------------------
 
     let mut coroutine = SmtpQuit::new();
     let mut chunk: Vec<u8>;
@@ -297,13 +311,15 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done(()) => break,
-            SmtpCoroutineState::WantsWrite(bytes) => stream.write_all(&bytes).expect("write"),
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok(())) => break,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("QUIT: {err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+                stream.write_all(&bytes).expect("write")
+            }
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 chunk = read_chunk(&mut stream, &mut buf);
                 arg = Some(&chunk);
             }
-            SmtpCoroutineState::Err(err) => panic!("QUIT: {err}"),
         }
     }
 }

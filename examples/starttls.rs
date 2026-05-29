@@ -32,13 +32,13 @@ fn main() {
 
     let greeting = loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done((greeting, _)) => break greeting,
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok((greeting, _))) => break greeting,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpCoroutineState::WantsWrite(_) => arg = None,
-            SmtpCoroutineState::Err(err) => panic!("{err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(_)) => arg = None,
         }
     };
 
@@ -51,37 +51,41 @@ fn main() {
 
     let capabilities = loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done((capabilities, _)) => break capabilities,
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok((capabilities, _))) => break capabilities,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpCoroutineState::WantsWrite(bytes) => {
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
                 stream.write_all(&bytes).unwrap();
                 arg = None;
             }
-            SmtpCoroutineState::Err(err) => panic!("{err}"),
         }
     };
 
     println!("capabilities pre STARTTLS: {capabilities:#?}");
 
-    // STARTTLS handshake (exempt coroutine: keeps its own result enum).
+    // STARTTLS handshake (exempt coroutine: declares its own Yield
+    // type to carry the WantsStartTls signal).
     let mut coroutine = SmtpStartTls::new();
     let mut arg: Option<&[u8]> = None;
 
     let preread = loop {
         match coroutine.resume(arg.take()) {
-            SmtpStartTlsResult::WantsStartTls(remaining) => break remaining,
-            SmtpStartTlsResult::WantsRead => {
+            SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsStartTls(remaining)) => {
+                break remaining;
+            }
+            SmtpCoroutineState::Complete(Ok(())) => break Vec::new(),
+            SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+            SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsRead) => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpStartTlsResult::WantsWrite(bytes) => {
+            SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsWrite(bytes)) => {
                 stream.write_all(&bytes).unwrap();
                 arg = None;
             }
-            SmtpStartTlsResult::Err(err) => panic!("{err}"),
         }
     };
 
@@ -102,16 +106,16 @@ fn main() {
 
     let capabilities = loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done((capabilities, _)) => break capabilities,
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok((capabilities, _))) => break capabilities,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpCoroutineState::WantsWrite(bytes) => {
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
                 stream.write_all(&bytes).unwrap();
                 arg = None;
             }
-            SmtpCoroutineState::Err(err) => panic!("{err}"),
         }
     };
 

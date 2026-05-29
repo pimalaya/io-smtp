@@ -15,7 +15,7 @@ use secrecy::{ExposeSecret, SecretBox, SecretString};
 use thiserror::Error;
 
 use crate::{
-    coroutine::{SmtpCoroutine, SmtpCoroutineState},
+    coroutine::*,
     rfc4954::auth::SmtpAuthCommand,
     rfc5321::{
         ehlo::{SmtpEhlo, SmtpEhloError},
@@ -90,23 +90,25 @@ impl SmtpPlain {
 }
 
 impl SmtpCoroutine for SmtpPlain {
-    type Output = ();
-    type Error = SmtpPlainError;
+    type Yield = SmtpYield;
+    type Return = Result<(), SmtpPlainError>;
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpCoroutineState::WantsWrite(bytes);
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpCoroutineState::WantsRead;
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsRead);
             }
 
             match &mut self.state {
                 State::AwaitAuth => {
                     match arg.take() {
-                        Some(&[]) => return SmtpCoroutineState::Err(SmtpPlainError::Eof),
+                        Some(&[]) => {
+                            return SmtpCoroutineState::Complete(Err(SmtpPlainError::Eof));
+                        }
                         Some(data) => {
                             trace!("read SMTP bytes: {}", escape_byte_string(data));
                             self.buf.extend_from_slice(data);
@@ -128,14 +130,19 @@ impl SmtpCoroutine for SmtpPlain {
                                 .collect::<Vec<_>>()
                                 .join("; ");
 
-                            return SmtpCoroutineState::Err(SmtpPlainError::ParseResponse(reason));
+                            return SmtpCoroutineState::Complete(Err(
+                                SmtpPlainError::ParseResponse(reason),
+                            ));
                         }
                     };
 
                     if response.code != ReplyCode::AUTH_SUCCESSFUL {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        return SmtpCoroutineState::Err(SmtpPlainError::Rejected { code, message });
+                        return SmtpCoroutineState::Complete(Err(SmtpPlainError::Rejected {
+                            code,
+                            message,
+                        }));
                     }
 
                     self.buf.clear();
@@ -143,14 +150,13 @@ impl SmtpCoroutine for SmtpPlain {
                     self.state = State::Ehlo(SmtpEhlo::new(domain));
                 }
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpCoroutineState::Done(_) => return SmtpCoroutineState::Done(()),
-                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
-                    SmtpCoroutineState::WantsWrite(bytes) => {
-                        return SmtpCoroutineState::WantsWrite(bytes);
+                    SmtpCoroutineState::Complete(Ok(_)) => {
+                        return SmtpCoroutineState::Complete(Ok(()));
                     }
-                    SmtpCoroutineState::Err(err) => {
-                        return SmtpCoroutineState::Err(SmtpPlainError::Ehlo(err));
+                    SmtpCoroutineState::Complete(Err(err)) => {
+                        return SmtpCoroutineState::Complete(Err(SmtpPlainError::Ehlo(err)));
                     }
+                    SmtpCoroutineState::Yielded(y) => return SmtpCoroutineState::Yielded(y),
                 },
             }
         }

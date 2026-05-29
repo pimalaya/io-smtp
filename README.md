@@ -69,14 +69,12 @@ This library is composed of 3 feature-gated layers:
 
 I/O-SMTP can be consumed three ways, depending on how much of the I/O stack you want to own. Each mode is gated by cargo features.
 
-Whichever mode you pick, every standard-shape coroutine implements the `SmtpCoroutine` trait. Its `resume(Option<&[u8]>)` method returns an `SmtpCoroutineState<Output, Error>` with four shapes:
+Whichever mode you pick, every coroutine implements the `SmtpCoroutine` trait. Its `resume(Option<&[u8]>)` method returns `SmtpCoroutineState<Yield, Return>` with two shapes:
 
-- `WantsRead`: caller reads more bytes from the socket and feeds them back on the next call. Pass `Some(&[])` to signal EOF.
-- `WantsWrite(Vec<u8>)`: caller writes these bytes to the socket. The next call typically passes `None`.
-- `Done(Output)`: terminal success carrying the coroutine's `Output` associated type.
-- `Err(Error)`: terminal failure carrying the coroutine's `Error` associated type.
+- `Yielded(Yield)`: intermediate progress. For standard coroutines `Yield = SmtpYield` (`WantsRead` / `WantsWrite(Vec<u8>)`); the caller reads or writes bytes accordingly. Pass `Some(&[])` to signal EOF on the next resume.
+- `Complete(Return)`: terminal value. By convention `Return = Result<Output, Error>` where the ok arm carries the coroutine's final output and the error arm carries the cause.
 
-`SmtpStartTls` is the one exempt coroutine: it keeps its own `SmtpStartTlsResult` enum because it carries an extra `WantsStartTls(Vec<u8>)` mid-progression variant signalling the TLS upgrade.
+`SmtpStartTls` declares its own `SmtpStartTlsYield` because it carries an extra `WantsStartTls(Vec<u8>)` variant signalling the TLS upgrade to the driver.
 
 ### I/O-free coroutines
 
@@ -97,13 +95,13 @@ let mut arg: Option<&[u8]> = None;
 
 let greeting = loop {
     match coroutine.resume(arg.take()) {
-        SmtpCoroutineState::Done((greeting, _)) => break greeting,
-        SmtpCoroutineState::WantsRead => {
+        SmtpCoroutineState::Complete(Ok((greeting, _))) => break greeting,
+        SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+        SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
             let n = stream.read(&mut buf).unwrap();
             arg = Some(&buf[..n]);
         }
-        SmtpCoroutineState::WantsWrite(_) => unreachable!(),
-        SmtpCoroutineState::Err(err) => panic!("{err}"),
+        SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(_)) => unreachable!(),
     }
 };
 
@@ -131,16 +129,16 @@ let mut arg: Option<&[u8]> = None;
 
 let capabilities = loop {
     match coroutine.resume(arg.take()) {
-        SmtpCoroutineState::Done((capabilities, _)) => break capabilities,
-        SmtpCoroutineState::WantsRead => {
+        SmtpCoroutineState::Complete(Ok((capabilities, _))) => break capabilities,
+        SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+        SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
             let n = stream.read(&mut buf).unwrap();
             arg = Some(&buf[..n]);
         }
-        SmtpCoroutineState::WantsWrite(bytes) => {
+        SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
             stream.write_all(&bytes).unwrap();
             arg = None;
         }
-        SmtpCoroutineState::Err(err) => panic!("{err}"),
     }
 };
 

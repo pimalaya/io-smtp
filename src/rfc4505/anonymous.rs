@@ -6,7 +6,7 @@
 //! ```text
 //! C: AUTH ANONYMOUS [<base64(trace)>]
 //! S: 235 Authentication successful
-//!   — or —
+//!   or
 //! S: 535 Authentication credentials invalid
 //! ```
 //!
@@ -29,7 +29,7 @@ use secrecy::SecretBox;
 use thiserror::Error;
 
 use crate::{
-    coroutine::{SmtpCoroutine, SmtpCoroutineState},
+    coroutine::*,
     rfc4954::auth::SmtpAuthCommand,
     rfc5321::{
         ehlo::{SmtpEhlo, SmtpEhloError},
@@ -103,23 +103,25 @@ impl SmtpAnonymous {
 }
 
 impl SmtpCoroutine for SmtpAnonymous {
-    type Output = ();
-    type Error = SmtpAnonymousError;
+    type Yield = SmtpYield;
+    type Return = Result<(), SmtpAnonymousError>;
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Output, Self::Error> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             if let Some(bytes) = self.wants_write.take() {
-                return SmtpCoroutineState::WantsWrite(bytes);
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
             }
 
             if mem::take(&mut self.wants_read) {
-                return SmtpCoroutineState::WantsRead;
+                return SmtpCoroutineState::Yielded(SmtpYield::WantsRead);
             }
 
             match &mut self.state {
                 State::AwaitAuth => {
                     match arg.take() {
-                        Some(&[]) => return SmtpCoroutineState::Err(SmtpAnonymousError::Eof),
+                        Some(&[]) => {
+                            return SmtpCoroutineState::Complete(Err(SmtpAnonymousError::Eof));
+                        }
                         Some(data) => {
                             trace!("read SMTP bytes: {}", escape_byte_string(data));
                             self.buf.extend_from_slice(data);
@@ -141,8 +143,8 @@ impl SmtpCoroutine for SmtpAnonymous {
                                 .collect::<Vec<_>>()
                                 .join("; ");
 
-                            return SmtpCoroutineState::Err(SmtpAnonymousError::ParseResponse(
-                                reason,
+                            return SmtpCoroutineState::Complete(Err(
+                                SmtpAnonymousError::ParseResponse(reason),
                             ));
                         }
                     };
@@ -150,10 +152,10 @@ impl SmtpCoroutine for SmtpAnonymous {
                     if response.code != ReplyCode::AUTH_SUCCESSFUL {
                         let code = response.code.code();
                         let message = response.text().to_string();
-                        return SmtpCoroutineState::Err(SmtpAnonymousError::Rejected {
+                        return SmtpCoroutineState::Complete(Err(SmtpAnonymousError::Rejected {
                             code,
                             message,
-                        });
+                        }));
                     }
 
                     self.buf.clear();
@@ -161,14 +163,13 @@ impl SmtpCoroutine for SmtpAnonymous {
                     self.state = State::Ehlo(SmtpEhlo::new(domain));
                 }
                 State::Ehlo(ehlo) => match ehlo.resume(arg.take()) {
-                    SmtpCoroutineState::Done(_) => return SmtpCoroutineState::Done(()),
-                    SmtpCoroutineState::WantsRead => return SmtpCoroutineState::WantsRead,
-                    SmtpCoroutineState::WantsWrite(bytes) => {
-                        return SmtpCoroutineState::WantsWrite(bytes);
+                    SmtpCoroutineState::Complete(Ok(_)) => {
+                        return SmtpCoroutineState::Complete(Ok(()));
                     }
-                    SmtpCoroutineState::Err(err) => {
-                        return SmtpCoroutineState::Err(SmtpAnonymousError::Ehlo(err));
+                    SmtpCoroutineState::Complete(Err(err)) => {
+                        return SmtpCoroutineState::Complete(Err(SmtpAnonymousError::Ehlo(err)));
                     }
+                    SmtpCoroutineState::Yielded(y) => return SmtpCoroutineState::Yielded(y),
                 },
             }
         }

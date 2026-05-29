@@ -21,13 +21,13 @@ fn main() {
 
     let greeting = loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Done((greeting, _)) => break greeting,
-            SmtpCoroutineState::WantsRead => {
+            SmtpCoroutineState::Complete(Ok((greeting, _))) => break greeting,
+            SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
                 let n = stream.read(&mut buf).unwrap();
                 arg = Some(&buf[..n]);
             }
-            SmtpCoroutineState::WantsWrite(_) => arg = None,
-            SmtpCoroutineState::Err(err) => panic!("{err}"),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(_)) => arg = None,
         }
     };
 
