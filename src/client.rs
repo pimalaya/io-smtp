@@ -27,7 +27,8 @@
     feature = "native-tls"
 ))]
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
+use core::fmt;
 use std::io::{self, Read, Write};
 
 use secrecy::SecretString;
@@ -168,37 +169,38 @@ pub enum SmtpClientStdError {
     StartTlsOverTls,
 }
 
-/// Std-blocking SMTP client wrapping a single `Read + Write` stream.
-#[derive(Debug)]
-pub struct SmtpClientStd<S: Read + Write> {
-    stream: S,
+/// Marker for everything the client can run against; auto-implemented
+/// for any blocking `Read + Write + Send` impl. The `Send` supertrait
+/// flows the auto-trait through the `Box<dyn Stream>` type erasure so
+/// `SmtpClientStd` can travel between threads.
+pub trait Stream: Read + Write + Send {}
+impl<T: Read + Write + Send + ?Sized> Stream for T {}
+
+/// Std-blocking SMTP client wrapping a single boxed stream.
+pub struct SmtpClientStd {
+    pub stream: Box<dyn Stream>,
 }
 
-impl<S: Read + Write> SmtpClientStd<S> {
+impl fmt::Debug for SmtpClientStd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SmtpClientStd").finish_non_exhaustive()
+    }
+}
+
+impl SmtpClientStd {
     /// Builds a client around `stream`. The caller is responsible for
     /// opening the connection (TCP, TLS handshake if needed, STARTTLS
     /// upgrade if needed).
-    pub fn new(stream: S) -> Self {
-        Self { stream }
+    pub fn new<S: Read + Write + Send + 'static>(stream: S) -> Self {
+        Self {
+            stream: Box::new(stream),
+        }
     }
 
-    /// Returns a shared reference to the underlying stream.
-    pub fn stream(&self) -> &S {
-        &self.stream
-    }
-
-    /// Returns an exclusive reference to the underlying stream.
-    pub fn stream_mut(&mut self) -> &mut S {
-        &mut self.stream
-    }
-
-    /// Consumes the client and returns its underlying stream. Useful
-    /// after [`starttls`] to perform a TLS upgrade on the raw stream
-    /// before rebuilding a fresh client around it.
-    ///
-    /// [`starttls`]: SmtpClientStd::starttls
-    pub fn into_stream(self) -> S {
-        self.stream
+    /// Replaces the underlying stream; useful after a caller-managed
+    /// TLS upgrade or reconnection.
+    pub fn set_stream<S: Read + Write + Send + 'static>(&mut self, stream: S) {
+        self.stream = Box::new(stream);
     }
 
     /// Drives any standard-shape coroutine (`Yield = SmtpYield`,
@@ -466,7 +468,7 @@ impl<S: Read + Write> SmtpClientStd<S> {
     feature = "rustls-ring",
     feature = "native-tls"
 ))]
-impl SmtpClientStd<StreamStd> {
+impl SmtpClientStd {
     /// Connects to `url`, reads the greeting, sends an initial EHLO,
     /// optionally performs the STARTTLS upgrade (then re-sends EHLO),
     /// and finally runs the chosen SASL mechanism.
@@ -523,15 +525,27 @@ impl SmtpClientStd<StreamStd> {
         }
 
         let domain = domain.into_static();
+
+        // STARTTLS needs the concrete StreamStd to call upgrade_tls
+        // after the SMTP-layer handshake; once boxed there is no way
+        // back to the concrete type. Run greeting + the initial EHLO
+        // (and optionally STARTTLS) inline against the raw stream,
+        // upgrade if requested, then build the boxed client.
+        let stream = {
+            let mut stream = stream;
+            run_smtp_inline(&mut stream, GetSmtpGreeting::new())?;
+            run_smtp_inline(&mut stream, SmtpEhlo::new(domain.clone()))?;
+            if starttls {
+                run_starttls_inline(&mut stream)?;
+                stream.upgrade_tls(tls)?
+            } else {
+                stream
+            }
+        };
+
         let mut client = Self::new(stream);
 
-        client.greeting()?;
-        client.ehlo(domain.clone())?;
-
         if starttls {
-            client.starttls()?;
-            let upgraded = client.into_stream().upgrade_tls(tls)?;
-            client = Self::new(upgraded);
             client.ehlo(domain.clone())?;
         }
 
@@ -579,5 +593,70 @@ impl SmtpClientStd<StreamStd> {
         }
 
         Ok(client)
+    }
+}
+
+/// Drives any standard-shape SMTP coroutine inline against a concrete
+/// [`StreamStd`]. Used by [`SmtpClientStd::connect`] to run greeting +
+/// the pre-STARTTLS EHLO before boxing the stream; the boxed
+/// [`SmtpClientStd::stream`] hides the concrete type that
+/// [`StreamStd::upgrade_tls`] needs.
+#[cfg(any(
+    feature = "rustls-aws",
+    feature = "rustls-ring",
+    feature = "native-tls"
+))]
+fn run_smtp_inline<C, T, E>(
+    stream: &mut StreamStd,
+    mut coroutine: C,
+) -> Result<T, SmtpClientStdError>
+where
+    C: SmtpCoroutine<Yield = SmtpYield, Return = Result<T, E>>,
+    SmtpClientStdError: From<E>,
+{
+    let mut buf = [0u8; READ_BUFFER_SIZE];
+    let mut arg: Option<&[u8]> = None;
+
+    loop {
+        match coroutine.resume(arg.take()) {
+            SmtpCoroutineState::Complete(Ok(out)) => return Ok(out),
+            SmtpCoroutineState::Complete(Err(err)) => return Err(err.into()),
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
+                let n = stream.read(&mut buf)?;
+                arg = Some(&buf[..n]);
+            }
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+                stream.write_all(&bytes)?;
+            }
+        }
+    }
+}
+
+/// Drives [`SmtpStartTls`] inline against a concrete [`StreamStd`]
+/// (same rationale as [`run_smtp_inline`]; [`SmtpStartTls`] has its
+/// own Yield enum so it cannot reuse that helper).
+#[cfg(any(
+    feature = "rustls-aws",
+    feature = "rustls-ring",
+    feature = "native-tls"
+))]
+fn run_starttls_inline(stream: &mut StreamStd) -> Result<(), SmtpClientStdError> {
+    let mut coroutine = SmtpStartTls::new();
+    let mut buf = [0u8; READ_BUFFER_SIZE];
+    let mut arg: Option<&[u8]> = None;
+
+    loop {
+        match coroutine.resume(arg.take()) {
+            SmtpCoroutineState::Complete(Ok(())) => return Ok(()),
+            SmtpCoroutineState::Complete(Err(err)) => return Err(err.into()),
+            SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsRead) => {
+                let n = stream.read(&mut buf)?;
+                arg = Some(&buf[..n]);
+            }
+            SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsWrite(bytes)) => {
+                stream.write_all(&bytes)?;
+            }
+            SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsStartTls(_)) => return Ok(()),
+        }
     }
 }
