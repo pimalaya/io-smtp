@@ -21,6 +21,8 @@
 //! [`greeting`]: SmtpClientStd::greeting
 //! [`ehlo`]: SmtpClientStd::ehlo
 
+use core::{any::Any, fmt};
+
 #[cfg(any(
     feature = "rustls-aws",
     feature = "rustls-ring",
@@ -28,7 +30,7 @@
 ))]
 use alloc::string::{String, ToString};
 use alloc::{boxed::Box, vec::Vec};
-use core::fmt;
+
 use std::io::{self, Read, Write};
 
 use secrecy::SecretString;
@@ -84,8 +86,6 @@ use crate::{
     rfc7628::{oauthbearer::*, xoauth2::*},
     send::*,
 };
-
-const READ_BUFFER_SIZE: usize = 16 * 1024;
 
 /// Errors returned by [`SmtpClientStd`].
 #[derive(Debug, Error)]
@@ -169,22 +169,11 @@ pub enum SmtpClientStdError {
     StartTlsOverTls,
 }
 
-/// Marker for everything the client can run against; auto-implemented
-/// for any blocking `Read + Write + Send` impl. The `Send` supertrait
-/// flows the auto-trait through the `Box<dyn Stream>` type erasure so
-/// `SmtpClientStd` can travel between threads.
-pub trait Stream: Read + Write + Send {}
-impl<T: Read + Write + Send + ?Sized> Stream for T {}
+const READ_BUFFER_SIZE: usize = 16 * 1024;
 
 /// Std-blocking SMTP client wrapping a single boxed stream.
 pub struct SmtpClientStd {
-    pub stream: Box<dyn Stream>,
-}
-
-impl fmt::Debug for SmtpClientStd {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SmtpClientStd").finish_non_exhaustive()
-    }
+    pub stream: Box<dyn SmtpStream>,
 }
 
 impl SmtpClientStd {
@@ -463,6 +452,12 @@ impl SmtpClientStd {
     }
 }
 
+impl fmt::Debug for SmtpClientStd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SmtpClientStd").finish_non_exhaustive()
+    }
+}
+
 #[cfg(any(
     feature = "rustls-aws",
     feature = "rustls-ring",
@@ -658,5 +653,25 @@ fn run_starttls_inline(stream: &mut StreamStd) -> Result<(), SmtpClientStdError>
             }
             SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsStartTls(_)) => return Ok(()),
         }
+    }
+}
+
+/// Marker for everything the client can run against; auto-implemented
+/// for any blocking `Read + Write + Send + 'static` impl. The `Send`
+/// supertrait flows the auto-trait through the `Box<dyn SmtpStream>`
+/// type erasure so `SmtpClientStd` can travel between threads.
+/// [`as_any_mut`] lets specialized callers (e.g. byte-level proxies
+/// that need [`StreamStd::set_read_timeout`]) downcast the boxed
+/// stream back to its concrete type.
+///
+/// [`as_any_mut`]: SmtpStream::as_any_mut
+/// [`StreamStd::set_read_timeout`]: pimalaya_stream::std::stream::StreamStd::set_read_timeout
+pub trait SmtpStream: Read + Write + Send + Any {
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T: Read + Write + Send + Any> SmtpStream for T {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
