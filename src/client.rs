@@ -171,6 +171,15 @@ pub enum SmtpClientStdError {
 
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 
+/// Default ALPN protocol identifier offered during the TLS handshake
+/// for SMTP submission connections (RFC 7595 registers the `smtp`
+/// token). Re-exported so config-driven callers can use it as a serde
+/// default and so wizard/discovery code shares a single source of
+/// truth.
+pub fn default_alpn() -> Vec<String> {
+    vec![String::from("smtp")]
+}
+
 /// Std-blocking SMTP client wrapping a single boxed stream.
 pub struct SmtpClientStd {
     pub stream: Box<dyn SmtpStream>,
@@ -470,6 +479,9 @@ impl SmtpClientStd {
     ///
     /// - `smtp://`  goes through plain TCP (port defaults to 25).
     /// - `smtps://` goes through implicit TLS (port defaults to 465).
+    /// - `tls` carries the rustls/native-tls knobs *and* the ALPN list
+    ///   (see [`default_alpn`] for the SMTP-conformant `["smtp"]`).
+    ///   Set `tls.rustls.alpn` to an empty vec to skip ALPN.
     /// - `starttls = true` (only valid on `smtp://`) performs the SMTP
     ///   `STARTTLS` upgrade and runs a fresh EHLO over TLS.
     /// - `domain` is the client identifier sent in EHLO (typically
