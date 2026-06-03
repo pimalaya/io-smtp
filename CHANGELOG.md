@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-03
+
 ### Added
 
 - Added the `SmtpCoroutine` trait mirroring `core::ops::Coroutine`.
@@ -27,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added I/O-free SASL coroutines under `crate::sasl`: ANONYMOUS, LOGIN, PLAIN, XOAUTH2.
 
-  Each supports both SASL-IR (RFC 4954 §4 inline credentials) and the non-IR challenge-response flow, behind the new `Smtp*Options::initial_request` knob.
+  Each supports both SASL-IR (RFC 4954 §4 inline credentials) and the non-IR challenge-response flow, behind the new `Smtp*Options::initial_request` option.
 
 - Added I/O-free SASL OAUTHBEARER coroutine following RFC 7628 under `crate::rfc7628::auth_oauthbearer`.
 
@@ -87,4 +89,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Enables `trace!("<op>: {}", self.state)` for uniform protocol tracing.
 
-[unreleased]: https://github.com/pimalaya/io-smtp/compare/root..HEAD
+[unreleased]: https://github.com/pimalaya/io-smtp/compare/v0.1.0..HEAD
+[0.1.0]: https://github.com/pimalaya/io-smtp/compare/root..v0.1.0
