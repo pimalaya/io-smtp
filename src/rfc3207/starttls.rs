@@ -1,6 +1,47 @@
-//! I/O-free coroutine to perform SMTP STARTTLS negotiation.
+//! SMTP STARTTLS coroutine; returns any bytes received past the
+//! `220` reply. RFC 3207 §6 forbids trailing bytes, so a non-empty
+//! return value is a STARTTLS-injection signal: refuse the upgrade.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use std::{
+//!     io::{Read, Write},
+//!     net::TcpStream,
+//! };
+//!
+//! use io_smtp::{
+//!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
+//!     rfc3207::starttls::SmtpStartTls,
+//! };
+//!
+//! // Ready stream needed (TCP-connected, plain SMTP, greeting + EHLO done)
+//! let mut stream = TcpStream::connect("localhost:25").unwrap();
+//!
+//! let mut buf = [0u8; 4096];
+//!
+//! let mut coroutine = SmtpStartTls::new();
+//! let mut arg = None;
+//!
+//! let remaining = loop {
+//!     match coroutine.resume(arg.take()) {
+//!         SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+//!             stream.write_all(&bytes).unwrap();
+//!         }
+//!         SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
+//!             let n = stream.read(&mut buf).unwrap();
+//!             arg = Some(&buf[..n]);
+//!         }
+//!         SmtpCoroutineState::Complete(Ok(remaining)) => break remaining,
+//!         SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+//!     }
+//! };
+//!
+//! assert!(remaining.is_empty(), "STARTTLS-injection: refuse the upgrade");
+//! // Now upgrade `stream` to TLS before sending further SMTP commands.
+//! ```
 
-use core::mem;
+use core::fmt;
 
 use alloc::{
     string::{String, ToString},
@@ -10,11 +51,7 @@ use alloc::{
 use log::trace;
 use thiserror::Error;
 
-use crate::{
-    coroutine::*,
-    rfc5321::types::{reply_code::ReplyCode, response::Response},
-    utils::escape_byte_string,
-};
+use crate::{coroutine::*, rfc5321::types::reply_code::ReplyCode, send::*, smtp_try};
 
 /// The STARTTLS command (RFC 3207).
 pub struct SmtpStartTlsCommand;
@@ -25,55 +62,26 @@ impl From<SmtpStartTlsCommand> for Vec<u8> {
     }
 }
 
-/// Errors that can occur during the coroutine progression.
-#[derive(Debug, Error)]
+/// Failure causes during the SMTP STARTTLS handshake.
+#[derive(Clone, Debug, Error)]
 pub enum SmtpStartTlsError {
-    #[error("Reached unexpected EOF")]
-    Eof,
-    #[error("Parse SMTP response error: {0}")]
-    ParseResponse(String),
-    #[error("STARTTLS rejected by server: {code} {message}")]
+    #[error("SMTP STARTTLS failed: rejected {code} {message}")]
     Rejected { code: u16, message: String },
+    #[error("SMTP STARTTLS failed: {0}")]
+    Send(#[from] SendSmtpCommandError),
 }
 
-/// Per-coroutine Yield for [`SmtpStartTls`].
-///
-/// Extends the standard [`SmtpYield`] with a [`WantsStartTls`] variant
-/// that signals the driver to upgrade the underlying socket to TLS.
-/// The driver does not resume the coroutine after a [`WantsStartTls`]:
-/// the upgrade is the terminal step on the happy path.
-///
-/// [`WantsStartTls`]: SmtpStartTlsYield::WantsStartTls
-#[derive(Debug)]
-pub enum SmtpStartTlsYield {
-    /// Driver should read more bytes from the socket and feed them
-    /// back on the next resume.
-    WantsRead,
-    /// Driver should write these bytes to the socket; the next resume
-    /// typically takes `None`.
-    WantsWrite(Vec<u8>),
-    /// The server accepted STARTTLS. The driver should now upgrade
-    /// the underlying socket to TLS and stop driving this coroutine.
-    ///
-    /// The payload carries any bytes the coroutine pre-read from the
-    /// socket past the `220` reply, so the caller can re-feed them
-    /// after the TLS handshake. A well-behaved server never speaks
-    /// before the handshake (any pre-handshake bytes are a classic
-    /// STARTTLS-injection signal, RFC 3207 §6), so the payload is
-    /// normally empty.
-    WantsStartTls(Vec<u8>),
-}
-
-/// I/O-free coroutine to perform SMTP STARTTLS negotiation.
-///
-/// Yields [`SmtpStartTlsYield::WantsStartTls`] once the server replies
-/// with a `220` ready code; the driver performs the TLS upgrade. The
-/// terminal [`SmtpCoroutineState::Complete`] arm is reserved for the
-/// error path (rejection, parse failure, EOF).
+/// I/O-free SMTP STARTTLS coroutine.
 pub struct SmtpStartTls {
-    wants_read: bool,
-    wants_write: Option<Vec<u8>>,
-    buf: Vec<u8>,
+    state: State,
+}
+
+impl SmtpStartTls {
+    pub fn new() -> Self {
+        Self {
+            state: State::Send(SendSmtpCommand::new(SmtpStartTlsCommand)),
+        }
+    }
 }
 
 impl Default for SmtpStartTls {
@@ -82,73 +90,116 @@ impl Default for SmtpStartTls {
     }
 }
 
-impl SmtpStartTls {
-    /// Creates a new coroutine.
-    pub fn new() -> Self {
-        trace!("sending STARTTLS command");
+impl SmtpCoroutine for SmtpStartTls {
+    type Yield = SmtpYield;
+    type Return = Result<Vec<u8>, SmtpStartTlsError>;
 
-        Self {
-            wants_read: false,
-            wants_write: Some(SmtpStartTlsCommand.into()),
-            buf: Vec::new(),
+    fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
+        loop {
+            trace!("starttls: {}", self.state);
+
+            match &mut self.state {
+                State::Send(send) => {
+                    let out = smtp_try!(send, arg);
+
+                    if out.response.code == ReplyCode::SERVICE_READY {
+                        return SmtpCoroutineState::Complete(Ok(Vec::new()));
+                    }
+
+                    let code = out.response.code.code();
+                    let message = out.response.text().to_string();
+                    return SmtpCoroutineState::Complete(Err(SmtpStartTlsError::Rejected {
+                        code,
+                        message,
+                    }));
+                }
+            }
         }
     }
 }
 
-impl SmtpCoroutine for SmtpStartTls {
-    type Yield = SmtpStartTlsYield;
-    type Return = Result<(), SmtpStartTlsError>;
+enum State {
+    Send(SendSmtpCommand<SmtpStartTlsCommand>),
+}
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
-        loop {
-            if let Some(bytes) = self.wants_write.take() {
-                return SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsWrite(bytes));
-            }
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Send(_) => f.write_str("send starttls"),
+        }
+    }
+}
 
-            if mem::take(&mut self.wants_read) {
-                return SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsRead);
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            match arg.take() {
-                Some(&[]) => {
-                    return SmtpCoroutineState::Complete(Err(SmtpStartTlsError::Eof));
-                }
-                Some(data) => {
-                    trace!("read SMTP bytes: {}", escape_byte_string(data));
-                    self.buf.extend_from_slice(data);
-                }
-                None => {}
-            }
+    #[test]
+    fn success_returns_empty_remaining() {
+        let mut starttls = SmtpStartTls::new();
 
-            if !Response::is_complete(&self.buf) {
-                self.wants_read = true;
-                continue;
-            }
+        let bytes = expect_wants_write(&mut starttls, None);
+        assert_eq!(bytes, b"STARTTLS\r\n");
 
-            return match Response::parse(&self.buf) {
-                Ok(response) => {
-                    if response.code == ReplyCode::SERVICE_READY {
-                        let _ = mem::take(&mut self.buf);
-                        SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsStartTls(Vec::new()))
-                    } else {
-                        let code = response.code.code();
-                        let message = response.text().to_string();
-                        SmtpCoroutineState::Complete(Err(SmtpStartTlsError::Rejected {
-                            code,
-                            message,
-                        }))
-                    }
-                }
-                Err(errors) => {
-                    let reason = errors
-                        .iter()
-                        .map(|e| e.to_string())
-                        .collect::<Vec<_>>()
-                        .join("; ");
+        expect_wants_read(&mut starttls);
+        let remaining = expect_complete_ok(&mut starttls, b"220 ready\r\n");
+        assert!(remaining.is_empty());
+    }
 
-                    SmtpCoroutineState::Complete(Err(SmtpStartTlsError::ParseResponse(reason)))
-                }
-            };
+    #[test]
+    fn rejected_returns_rejected_error() {
+        let mut starttls = SmtpStartTls::new();
+        let _ = expect_wants_write(&mut starttls, None);
+        expect_wants_read(&mut starttls);
+
+        let err = expect_complete_err(&mut starttls, b"454 TLS not available\r\n");
+        let SmtpStartTlsError::Rejected { code, message } = err else {
+            panic!("expected SmtpStartTlsError::Rejected, got {err:?}");
+        };
+        assert_eq!(code, 454);
+        assert_eq!(message, "TLS not available");
+    }
+
+    #[test]
+    fn eof_returns_eof_error() {
+        let mut starttls = SmtpStartTls::new();
+        let _ = expect_wants_write(&mut starttls, None);
+        expect_wants_read(&mut starttls);
+
+        let err = expect_complete_err(&mut starttls, b"");
+        assert!(matches!(
+            err,
+            SmtpStartTlsError::Send(SendSmtpCommandError::Eof)
+        ));
+    }
+
+    // --- utils
+
+    fn expect_wants_write(cor: &mut SmtpStartTls, arg: Option<&[u8]>) -> Vec<u8> {
+        match cor.resume(arg) {
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => bytes,
+            state => panic!("expected WantsWrite, got {state:?}"),
+        }
+    }
+
+    fn expect_wants_read(cor: &mut SmtpStartTls) {
+        match cor.resume(None) {
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {}
+            state => panic!("expected WantsRead, got {state:?}"),
+        }
+    }
+
+    fn expect_complete_ok(cor: &mut SmtpStartTls, reply: &[u8]) -> Vec<u8> {
+        match cor.resume(Some(reply)) {
+            SmtpCoroutineState::Complete(Ok(remaining)) => remaining,
+            state => panic!("expected Complete(Ok), got {state:?}"),
+        }
+    }
+
+    fn expect_complete_err(cor: &mut SmtpStartTls, reply: &[u8]) -> SmtpStartTlsError {
+        match cor.resume(Some(reply)) {
+            SmtpCoroutineState::Complete(Err(err)) => err,
+            state => panic!("expected Complete(Err), got {state:?}"),
         }
     }
 }

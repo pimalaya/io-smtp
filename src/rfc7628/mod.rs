@@ -1,9 +1,7 @@
-//! RFC 7628 — A Set of Simple Authentication and Security Layer (SASL)
-//! Mechanisms for OAuth.
+//! RFC 7628 — A Set of Simple Authentication and Security Layer
+//! (SASL) Mechanisms for OAuth.
 //!
-//! Provides the OAUTHBEARER SASL mechanism for authenticating SMTP sessions
-//! using OAuth 2.0 bearer tokens. The Google-specific XOAUTH2 predecessor is
-//! grouped here as well.
+//! Provides the OAUTHBEARER SASL mechanism for authenticating SMTP
+//! sessions using OAuth 2.0 bearer tokens.
 
-pub mod oauthbearer;
-pub mod xoauth2;
+pub mod auth_oauthbearer;

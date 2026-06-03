@@ -1,6 +1,42 @@
-//! I/O-free coroutine to send SMTP QUIT command.
+//! SMTP QUIT coroutine; asks the server to close the session.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use std::{
+//!     io::{Read, Write},
+//!     net::TcpStream,
+//! };
+//!
+//! use io_smtp::{
+//!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
+//!     rfc5321::quit::SmtpQuit,
+//! };
+//!
+//! // Ready stream needed (TCP-connected, TLS-negociated, SMTP-handshaked)
+//! let mut stream = TcpStream::connect("localhost:25").unwrap();
+//!
+//! let mut buf = [0u8; 4096];
+//!
+//! let mut coroutine = SmtpQuit::new();
+//! let mut arg = None;
+//!
+//! loop {
+//!     match coroutine.resume(arg.take()) {
+//!         SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+//!             stream.write_all(&bytes).unwrap();
+//!         }
+//!         SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
+//!             let n = stream.read(&mut buf).unwrap();
+//!             arg = Some(&buf[..n]);
+//!         }
+//!         SmtpCoroutineState::Complete(Ok(())) => break,
+//!         SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+//!     }
+//! }
+//! ```
 
-use core::mem;
+use core::fmt;
 
 use alloc::{
     string::{String, ToString},
@@ -10,11 +46,7 @@ use alloc::{
 use log::trace;
 use thiserror::Error;
 
-use crate::{
-    coroutine::*,
-    rfc5321::types::{reply_code::ReplyCode, response::Response},
-    utils::escape_byte_string,
-};
+use crate::{coroutine::*, rfc5321::types::reply_code::ReplyCode, send::*, smtp_try};
 
 /// The QUIT command (RFC 5321 §4.1.1.10).
 pub struct SmtpQuitCommand;
@@ -25,22 +57,26 @@ impl From<SmtpQuitCommand> for Vec<u8> {
     }
 }
 
-/// Errors that can occur during QUIT.
-#[derive(Debug, Error)]
+/// Failure causes during the SMTP QUIT exchange.
+#[derive(Clone, Debug, Error)]
 pub enum SmtpQuitError {
-    #[error("Reached unexpected EOF")]
-    Eof,
-    #[error("Parse SMTP response error: {0}")]
-    ParseResponse(String),
-    #[error("QUIT rejected: {code} {message}")]
+    #[error("SMTP QUIT failed: rejected {code} {message}")]
     Rejected { code: u16, message: String },
+    #[error("SMTP QUIT failed: {0}")]
+    Send(#[from] SendSmtpCommandError),
 }
 
-/// I/O-free coroutine to send SMTP QUIT command.
+/// I/O-free SMTP QUIT coroutine.
 pub struct SmtpQuit {
-    wants_read: bool,
-    wants_write: Option<Vec<u8>>,
-    buf: Vec<u8>,
+    state: State,
+}
+
+impl SmtpQuit {
+    pub fn new() -> Self {
+        Self {
+            state: State::Send(SendSmtpCommand::new(SmtpQuitCommand)),
+        }
+    }
 }
 
 impl Default for SmtpQuit {
@@ -49,67 +85,115 @@ impl Default for SmtpQuit {
     }
 }
 
-impl SmtpQuit {
-    /// Creates a new QUIT coroutine.
-    pub fn new() -> Self {
-        trace!("sending QUIT command");
-
-        Self {
-            wants_read: false,
-            wants_write: Some(SmtpQuitCommand.into()),
-            buf: Vec::new(),
-        }
-    }
-}
-
 impl SmtpCoroutine for SmtpQuit {
     type Yield = SmtpYield;
     type Return = Result<(), SmtpQuitError>;
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
+    fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            if let Some(bytes) = self.wants_write.take() {
-                return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
-            }
+            trace!("quit: {}", self.state);
 
-            if mem::take(&mut self.wants_read) {
-                return SmtpCoroutineState::Yielded(SmtpYield::WantsRead);
-            }
+            match &mut self.state {
+                State::Send(send) => {
+                    let out = smtp_try!(send, arg);
 
-            match arg.take() {
-                Some(&[]) => return SmtpCoroutineState::Complete(Err(SmtpQuitError::Eof)),
-                Some(data) => {
-                    trace!("read SMTP bytes: {}", escape_byte_string(data));
-                    self.buf.extend_from_slice(data);
-                }
-                None => {}
-            }
-
-            if !Response::is_complete(&self.buf) {
-                self.wants_read = true;
-                continue;
-            }
-
-            return match Response::parse(&self.buf) {
-                Ok(response) => {
-                    if response.code == ReplyCode::SERVICE_CLOSING {
-                        SmtpCoroutineState::Complete(Ok(()))
-                    } else {
-                        let code = response.code.code();
-                        let message = response.text().to_string();
-                        SmtpCoroutineState::Complete(Err(SmtpQuitError::Rejected { code, message }))
+                    if out.response.code == ReplyCode::SERVICE_CLOSING {
+                        return SmtpCoroutineState::Complete(Ok(()));
                     }
-                }
-                Err(errors) => {
-                    let reason = errors
-                        .iter()
-                        .map(|e| e.to_string())
-                        .collect::<Vec<_>>()
-                        .join("; ");
 
-                    SmtpCoroutineState::Complete(Err(SmtpQuitError::ParseResponse(reason)))
+                    let code = out.response.code.code();
+                    let message = out.response.text().to_string();
+                    return SmtpCoroutineState::Complete(Err(SmtpQuitError::Rejected {
+                        code,
+                        message,
+                    }));
                 }
-            };
+            }
+        }
+    }
+}
+
+enum State {
+    Send(SendSmtpCommand<SmtpQuitCommand>),
+}
+
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Send(_) => f.write_str("send quit"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_returns_ok() {
+        let mut quit = SmtpQuit::new();
+
+        let bytes = expect_wants_write(&mut quit, None);
+        assert_eq!(bytes, b"QUIT\r\n");
+
+        expect_wants_read(&mut quit);
+        expect_complete_ok(&mut quit, b"221 service closing\r\n");
+    }
+
+    #[test]
+    fn rejected_returns_rejected_error() {
+        let mut quit = SmtpQuit::new();
+        let _ = expect_wants_write(&mut quit, None);
+        expect_wants_read(&mut quit);
+
+        let err = expect_complete_err(&mut quit, b"500 syntax error\r\n");
+        let SmtpQuitError::Rejected { code, message } = err else {
+            panic!("expected SmtpQuitError::Rejected, got {err:?}");
+        };
+        assert_eq!(code, 500);
+        assert_eq!(message, "syntax error");
+    }
+
+    #[test]
+    fn eof_returns_eof_error() {
+        let mut quit = SmtpQuit::new();
+        let _ = expect_wants_write(&mut quit, None);
+        expect_wants_read(&mut quit);
+
+        let err = expect_complete_err(&mut quit, b"");
+        assert!(matches!(
+            err,
+            SmtpQuitError::Send(SendSmtpCommandError::Eof)
+        ));
+    }
+
+    // --- utils
+
+    fn expect_wants_write(cor: &mut SmtpQuit, arg: Option<&[u8]>) -> Vec<u8> {
+        match cor.resume(arg) {
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => bytes,
+            state => panic!("expected WantsWrite, got {state:?}"),
+        }
+    }
+
+    fn expect_wants_read(cor: &mut SmtpQuit) {
+        match cor.resume(None) {
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {}
+            state => panic!("expected WantsRead, got {state:?}"),
+        }
+    }
+
+    fn expect_complete_ok(cor: &mut SmtpQuit, reply: &[u8]) {
+        match cor.resume(Some(reply)) {
+            SmtpCoroutineState::Complete(Ok(())) => {}
+            state => panic!("expected Complete(Ok), got {state:?}"),
+        }
+    }
+
+    fn expect_complete_err(cor: &mut SmtpQuit, reply: &[u8]) -> SmtpQuitError {
+        match cor.resume(Some(reply)) {
+            SmtpCoroutineState::Complete(Err(err)) => err,
+            state => panic!("expected Complete(Err), got {state:?}"),
         }
     }
 }

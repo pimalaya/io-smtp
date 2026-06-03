@@ -1,6 +1,42 @@
-//! I/O-free coroutine to send SMTP NOOP command.
+//! SMTP NOOP coroutine, useful as keep-alive or round-trip probe.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use std::{
+//!     io::{Read, Write},
+//!     net::TcpStream,
+//! };
+//!
+//! use io_smtp::{
+//!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
+//!     rfc5321::noop::SmtpNoop,
+//! };
+//!
+//! // Ready stream needed (TCP-connected, TLS-negociated, SMTP-handshaked)
+//! let mut stream = TcpStream::connect("localhost:25").unwrap();
+//!
+//! let mut buf = [0u8; 4096];
+//!
+//! let mut coroutine = SmtpNoop::new();
+//! let mut arg = None;
+//!
+//! loop {
+//!     match coroutine.resume(arg.take()) {
+//!         SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
+//!             stream.write_all(&bytes).unwrap();
+//!         }
+//!         SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
+//!             let n = stream.read(&mut buf).unwrap();
+//!             arg = Some(&buf[..n]);
+//!         }
+//!         SmtpCoroutineState::Complete(Ok(())) => break,
+//!         SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
+//!     }
+//! }
+//! ```
 
-use core::mem;
+use core::fmt;
 
 use alloc::{
     borrow::Cow,
@@ -8,19 +44,14 @@ use alloc::{
     vec::Vec,
 };
 
-use bounded_static::IntoBoundedStatic;
 use log::trace;
 use thiserror::Error;
 
-use crate::{
-    coroutine::*,
-    rfc5321::types::{reply_code::ReplyCode, response::Response},
-    utils::escape_byte_string,
-};
+use crate::{coroutine::*, rfc5321::types::reply_code::ReplyCode, send::*, smtp_try};
 
 /// The NOOP command (RFC 5321 §4.1.1.9).
 pub struct SmtpNoopCommand<'a> {
-    /// Optional string argument (ignored by server).
+    /// Optional string argument; servers must ignore it.
     pub string: Option<Cow<'a, str>>,
 }
 
@@ -38,22 +69,26 @@ impl<'a> From<SmtpNoopCommand<'a>> for Vec<u8> {
     }
 }
 
-/// Errors that can occur during NOOP.
-#[derive(Debug, Error)]
+/// Failure causes during the SMTP NOOP exchange.
+#[derive(Clone, Debug, Error)]
 pub enum SmtpNoopError {
-    #[error("Reached unexpected EOF")]
-    Eof,
-    #[error("Parse SMTP response error: {0}")]
-    ParseResponse(String),
-    #[error("NOOP rejected: {code} {message}")]
+    #[error("SMTP NOOP failed: rejected {code} {message}")]
     Rejected { code: u16, message: String },
+    #[error("SMTP NOOP failed: {0}")]
+    Send(#[from] SendSmtpCommandError),
 }
 
-/// I/O-free coroutine to send SMTP NOOP command.
+/// I/O-free SMTP NOOP coroutine.
 pub struct SmtpNoop {
-    wants_read: bool,
-    wants_write: Option<Vec<u8>>,
-    buf: Vec<u8>,
+    state: State,
+}
+
+impl SmtpNoop {
+    pub fn new() -> Self {
+        Self {
+            state: State::Send(SendSmtpCommand::new(SmtpNoopCommand { string: None })),
+        }
+    }
 }
 
 impl Default for SmtpNoop {
@@ -62,70 +97,115 @@ impl Default for SmtpNoop {
     }
 }
 
-impl SmtpNoop {
-    /// Creates a new NOOP coroutine.
-    pub fn new() -> Self {
-        trace!("sending NOOP command");
-
-        let bytes = SmtpNoopCommand { string: None }.into();
-
-        Self {
-            wants_read: false,
-            wants_write: Some(bytes),
-            buf: Vec::new(),
-        }
-    }
-}
-
 impl SmtpCoroutine for SmtpNoop {
     type Yield = SmtpYield;
     type Return = Result<(), SmtpNoopError>;
 
-    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
+    fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            if let Some(bytes) = self.wants_write.take() {
-                return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
-            }
+            trace!("noop: {}", self.state);
 
-            if mem::take(&mut self.wants_read) {
-                return SmtpCoroutineState::Yielded(SmtpYield::WantsRead);
-            }
+            match &mut self.state {
+                State::Send(send) => {
+                    let out = smtp_try!(send, arg);
 
-            match arg.take() {
-                Some(&[]) => return SmtpCoroutineState::Complete(Err(SmtpNoopError::Eof)),
-                Some(data) => {
-                    trace!("read SMTP bytes: {}", escape_byte_string(data));
-                    self.buf.extend_from_slice(data);
-                }
-                None => {}
-            }
-
-            if !Response::is_complete(&self.buf) {
-                self.wants_read = true;
-                continue;
-            }
-
-            return match Response::parse(&self.buf) {
-                Ok(response) => {
-                    let response = response.into_static();
-                    if response.code == ReplyCode::OK {
-                        SmtpCoroutineState::Complete(Ok(()))
-                    } else {
-                        let code = response.code.code();
-                        let message = response.text().to_string();
-                        SmtpCoroutineState::Complete(Err(SmtpNoopError::Rejected { code, message }))
+                    if out.response.code == ReplyCode::OK {
+                        return SmtpCoroutineState::Complete(Ok(()));
                     }
-                }
-                Err(errors) => {
-                    let reason = errors
-                        .iter()
-                        .map(|e| e.to_string())
-                        .collect::<Vec<_>>()
-                        .join("; ");
 
-                    SmtpCoroutineState::Complete(Err(SmtpNoopError::ParseResponse(reason)))
+                    let code = out.response.code.code();
+                    let message = out.response.text().to_string();
+                    return SmtpCoroutineState::Complete(Err(SmtpNoopError::Rejected {
+                        code,
+                        message,
+                    }));
                 }
-            };
+            }
+        }
+    }
+}
+
+enum State {
+    Send(SendSmtpCommand<SmtpNoopCommand<'static>>),
+}
+
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Send(_) => f.write_str("send noop"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_returns_ok() {
+        let mut noop = SmtpNoop::new();
+
+        let bytes = expect_wants_write(&mut noop, None);
+        assert_eq!(bytes, b"NOOP\r\n");
+
+        expect_wants_read(&mut noop);
+        expect_complete_ok(&mut noop, b"250 OK\r\n");
+    }
+
+    #[test]
+    fn rejected_returns_rejected_error() {
+        let mut noop = SmtpNoop::new();
+        let _ = expect_wants_write(&mut noop, None);
+        expect_wants_read(&mut noop);
+
+        let err = expect_complete_err(&mut noop, b"500 syntax error\r\n");
+        let SmtpNoopError::Rejected { code, message } = err else {
+            panic!("expected SmtpNoopError::Rejected, got {err:?}");
+        };
+        assert_eq!(code, 500);
+        assert_eq!(message, "syntax error");
+    }
+
+    #[test]
+    fn eof_returns_eof_error() {
+        let mut noop = SmtpNoop::new();
+        let _ = expect_wants_write(&mut noop, None);
+        expect_wants_read(&mut noop);
+
+        let err = expect_complete_err(&mut noop, b"");
+        assert!(matches!(
+            err,
+            SmtpNoopError::Send(SendSmtpCommandError::Eof)
+        ));
+    }
+
+    // --- utils
+
+    fn expect_wants_write(cor: &mut SmtpNoop, arg: Option<&[u8]>) -> Vec<u8> {
+        match cor.resume(arg) {
+            SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => bytes,
+            state => panic!("expected WantsWrite, got {state:?}"),
+        }
+    }
+
+    fn expect_wants_read(cor: &mut SmtpNoop) {
+        match cor.resume(None) {
+            SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {}
+            state => panic!("expected WantsRead, got {state:?}"),
+        }
+    }
+
+    fn expect_complete_ok(cor: &mut SmtpNoop, reply: &[u8]) {
+        match cor.resume(Some(reply)) {
+            SmtpCoroutineState::Complete(Ok(())) => {}
+            state => panic!("expected Complete(Ok), got {state:?}"),
+        }
+    }
+
+    fn expect_complete_err(cor: &mut SmtpNoop, reply: &[u8]) -> SmtpNoopError {
+        match cor.resume(Some(reply)) {
+            SmtpCoroutineState::Complete(Err(err)) => err,
+            state => panic!("expected Complete(Err), got {state:?}"),
         }
     }
 }

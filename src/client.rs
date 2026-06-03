@@ -1,19 +1,17 @@
 //! # Standard, blocking SMTP client
 //!
-//! Holds a single stream (any blocking `Read + Write` impl) and
-//! exposes one method per common coroutine. SMTP has no long-lived
-//! session context like IMAP: capabilities are returned by
-//! [`greeting`] / [`ehlo`] and consumed by the caller, and each
-//! coroutine is otherwise stateless.
+//! Holds a single stream (any blocking `Read + Write` impl) and exposes one
+//! method per common coroutine. SMTP has no long-lived session context like
+//! IMAP: capabilities are returned by [`greeting`] / [`ehlo`] and consumed by
+//! the caller, and each coroutine is otherwise stateless.
 //!
-//! The bare [`new`] constructor takes a pre-connected stream; callers
-//! handle TCP and TLS themselves. With one of the TLS feature flags
-//! enabled (`rustls-ring`, `rustls-aws`, `native-tls`), [`connect`] is
-//! also available and produces a ready-to-use authenticated client
-//! end-to-end: it opens the transport (plain TCP for `smtp://`,
-//! implicit TLS for `smtps://`), reads the greeting, sends the
-//! initial EHLO, optionally performs the STARTTLS upgrade and a fresh
-//! EHLO over TLS, then runs the chosen SASL mechanism if one was
+//! The bare [`new`] constructor takes a pre-connected stream; callers handle
+//! TCP and TLS themselves. With one of the TLS feature flags enabled
+//! (`rustls-ring`, `rustls-aws`, `native-tls`), [`connect`] is also available
+//! and produces a ready-to-use authenticated client end-to-end: it opens the
+//! transport (plain TCP for `smtp://`, implicit TLS for `smtps://`), reads the
+//! greeting, sends the initial EHLO, optionally performs the STARTTLS upgrade
+//! and a fresh EHLO over TLS, then runs the chosen SASL mechanism if one was
 //! provided.
 //!
 //! [`new`]: SmtpClientStd::new
@@ -28,8 +26,8 @@ use core::{any::Any, fmt};
     feature = "rustls-ring",
     feature = "native-tls"
 ))]
-use alloc::string::{String, ToString};
-use alloc::{boxed::Box, vec::Vec};
+use alloc::string::ToString;
+use alloc::{borrow::Cow, boxed::Box, string::String, vec::Vec};
 
 use std::io::{self, Read, Write};
 
@@ -61,13 +59,11 @@ use pimalaya_stream::{
 use url::Url;
 
 #[cfg(feature = "scram")]
-use crate::rfc7677::scram_sha256::*;
+use crate::rfc7677::auth_scram_sha_256::*;
 use crate::{
     coroutine::*,
-    login::*,
+    message::*,
     rfc3207::starttls::*,
-    rfc4505::anonymous::*,
-    rfc4616::plain::*,
     rfc5321::{
         data::*,
         ehlo::*,
@@ -79,19 +75,19 @@ use crate::{
         rcpt::*,
         rset::*,
         types::{
-            domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath,
+            domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath, greeting::Greeting,
             parameter::Parameter, reverse_path::ReversePath,
         },
     },
-    rfc7628::{oauthbearer::*, xoauth2::*},
-    send::*,
+    rfc7628::auth_oauthbearer::*,
+    sasl::{auth_anonymous::*, auth_login::*, auth_plain::*, auth_xoauth2::*},
 };
 
 /// Errors returned by [`SmtpClientStd`].
 #[derive(Debug, Error)]
 pub enum SmtpClientStdError {
     #[error(transparent)]
-    Greeting(#[from] GetSmtpGreetingError),
+    Greeting(#[from] SmtpGreetingGetError),
     #[error(transparent)]
     Ehlo(#[from] SmtpEhloError),
     #[error(transparent)]
@@ -100,18 +96,18 @@ pub enum SmtpClientStdError {
     StartTls(#[from] SmtpStartTlsError),
 
     #[error(transparent)]
-    AuthAnonymous(#[from] SmtpAnonymousError),
+    AuthAnonymous(#[from] SmtpAuthAnonymousError),
     #[error(transparent)]
-    AuthLogin(#[from] SmtpLoginError),
+    AuthLogin(#[from] SmtpAuthLoginError),
     #[error(transparent)]
-    AuthPlain(#[from] SmtpPlainError),
+    AuthPlain(#[from] SmtpAuthPlainError),
     #[error(transparent)]
-    AuthOAuthBearer(#[from] SmtpOauthbearerError),
+    AuthOAuthBearer(#[from] SmtpAuthOauthbearerError),
     #[error(transparent)]
-    AuthXOAuth2(#[from] SmtpXoauth2Error),
+    AuthXOAuth2(#[from] SmtpAuthXoauth2Error),
     #[cfg(feature = "scram")]
     #[error(transparent)]
-    AuthScramSha256(#[from] SmtpScramSha256Error),
+    AuthScramSha256(#[from] SmtpAuthScramSha256Error),
     #[cfg(any(
         feature = "rustls-aws",
         feature = "rustls-ring",
@@ -171,11 +167,10 @@ pub enum SmtpClientStdError {
 
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 
-/// Default ALPN protocol identifier offered during the TLS handshake
-/// for SMTP submission connections (RFC 7595 registers the `smtp`
-/// token). Re-exported so config-driven callers can use it as a serde
-/// default and so wizard/discovery code shares a single source of
-/// truth.
+/// Default ALPN protocol identifier offered during the TLS handshake for SMTP
+/// submission connections (RFC 7595 registers the `smtp` token). Re-exported so
+/// config-driven callers can use it as a serde default and so wizard/discovery
+/// code shares a single source of truth.
 pub fn default_alpn() -> Vec<String> {
     vec![String::from("smtp")]
 }
@@ -186,28 +181,25 @@ pub struct SmtpClientStd {
 }
 
 impl SmtpClientStd {
-    /// Builds a client around `stream`. The caller is responsible for
-    /// opening the connection (TCP, TLS handshake if needed, STARTTLS
-    /// upgrade if needed).
+    /// Builds a client around `stream`. The caller is responsible for opening
+    /// the connection (TCP, TLS handshake if needed, STARTTLS upgrade if
+    /// needed).
     pub fn new<S: Read + Write + Send + 'static>(stream: S) -> Self {
         Self {
             stream: Box::new(stream),
         }
     }
 
-    /// Replaces the underlying stream; useful after a caller-managed
-    /// TLS upgrade or reconnection.
+    /// Replaces the underlying stream; useful after a caller-managed TLS
+    /// upgrade or reconnection.
     pub fn set_stream<S: Read + Write + Send + 'static>(&mut self, stream: S) {
         self.stream = Box::new(stream);
     }
 
-    /// Drives any standard-shape coroutine (`Yield = SmtpYield`,
-    /// `Return = Result<Output, Error>`) against the wrapped stream
-    /// until it terminates.
-    ///
-    /// Coroutines that need richer Yield variants (e.g. [`SmtpStartTls`]
-    /// with [`SmtpStartTlsYield::WantsStartTls`]) are driven by their
-    /// own per-method loops on this client; see [`Self::starttls`].
+    /// Drives any standard-shape coroutine (`Yield = SmtpYield`, `Return =
+    /// Result<Output, Error>`) against the wrapped stream until it
+    /// terminates. Every coroutine in this crate (including [`SmtpStartTls`])
+    /// fits this signature.
     pub fn run<C, T, E>(&mut self, mut coroutine: C) -> Result<T, SmtpClientStdError>
     where
         C: SmtpCoroutine<Yield = SmtpYield, Return = Result<T, E>>,
@@ -234,67 +226,44 @@ impl SmtpClientStd {
 
     // ---- Session lifecycle -----------------------------------------------
 
-    /// Runs [`GetSmtpGreeting`]: reads the initial server greeting.
-    /// Call this once after [`new`] / [`connect`].
+    /// Runs [`SmtpGreetingGet`]: reads the initial server greeting.  Call this
+    /// once after [`new`] / [`connect`].
     ///
     /// [`new`]: SmtpClientStd::new
     /// [`connect`]: SmtpClientStd::connect
-    pub fn greeting(&mut self) -> Result<SmtpGreetingOutput, SmtpClientStdError> {
-        self.run(GetSmtpGreeting::new())
+    pub fn greeting(&mut self) -> Result<Greeting<'static>, SmtpClientStdError> {
+        self.run(SmtpGreetingGet::new())
     }
 
-    /// Runs [`SmtpEhlo`] (`EHLO <domain>`, RFC 5321 §4.1.1.1). Returns
-    /// the raw capability lines reported by the server.
-    pub fn ehlo(&mut self, domain: EhloDomain<'_>) -> Result<SmtpEhloOutput, SmtpClientStdError> {
+    /// Runs [`SmtpEhlo`] (`EHLO <domain>`, RFC 5321 §4.1.1.1). Returns the raw
+    /// capability lines reported by the server.
+    pub fn ehlo(
+        &mut self,
+        domain: EhloDomain<'_>,
+    ) -> Result<Vec<Cow<'static, str>>, SmtpClientStdError> {
         self.run(SmtpEhlo::new(domain))
     }
 
-    /// Runs [`SmtpHelo`] (`HELO <domain>`, RFC 5321 §4.1.1.1). Use
-    /// [`ehlo`] on any modern server; fall back to HELO only if the
-    /// server rejects EHLO with 500/502.
+    /// Runs [`SmtpHelo`] (`HELO <domain>`, RFC 5321 §4.1.1.1). Use [`ehlo`] on
+    /// any modern server; fall back to HELO only if the server rejects EHLO
+    /// with 500/502.
     ///
     /// [`ehlo`]: SmtpClientStd::ehlo
     pub fn helo(&mut self, domain: Domain<'_>) -> Result<(), SmtpClientStdError> {
         self.run(SmtpHelo::new(domain))
     }
 
-    /// Runs [`SmtpStartTls`] (`STARTTLS`, RFC 3207). On success the
-    /// caller must upgrade the underlying socket to TLS (via
-    /// [`into_stream`]), then build a new client around the upgraded
-    /// stream and re-issue [`ehlo`]. The returned bytes are anything
-    /// the coroutine pre-read past the `220` reply (normally empty;
-    /// any pre-handshake bytes are a classic STARTTLS-injection
-    /// signal).
+    /// Runs [`SmtpStartTls`] (`STARTTLS`, RFC 3207). On success the caller must
+    /// upgrade the underlying socket to TLS (via [`StreamStd::upgrade_tls`]),
+    /// then build a new client around the upgraded stream and re-issue
+    /// [`ehlo`]. The returned bytes are anything the coroutine pre-read past
+    /// the `220` reply (normally empty; any pre-handshake bytes are a classic
+    /// STARTTLS-injection signal).
     ///
-    /// [`into_stream`]: SmtpClientStd::into_stream
+    /// [`StreamStd::upgrade_tls`]: pimalaya_stream::std::stream::StreamStd::upgrade_tls
     /// [`ehlo`]: SmtpClientStd::ehlo
     pub fn starttls(&mut self) -> Result<Vec<u8>, SmtpClientStdError> {
-        let mut coroutine = SmtpStartTls::new();
-        let mut buf = [0u8; READ_BUFFER_SIZE];
-        let mut arg: Option<&[u8]> = None;
-
-        loop {
-            match coroutine.resume(arg.take()) {
-                SmtpCoroutineState::Complete(Ok(())) => {
-                    // Unreachable on the happy path: the coroutine
-                    // signals success via WantsStartTls and the loop
-                    // returns there. Kept exhaustive for safety.
-                    return Ok(Vec::new());
-                }
-                SmtpCoroutineState::Complete(Err(err)) => return Err(err.into()),
-                SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsRead) => {
-                    let n = self.stream.read(&mut buf)?;
-                    arg = Some(&buf[..n]);
-                }
-                SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsWrite(bytes)) => {
-                    self.stream.write_all(&bytes)?;
-                    arg = None;
-                }
-                SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsStartTls(remaining)) => {
-                    return Ok(remaining);
-                }
-            }
-        }
+        self.run(SmtpStartTls::new())
     }
 
     /// Runs [`SmtpQuit`] (`QUIT`, RFC 5321 §4.1.1.10).
@@ -304,23 +273,26 @@ impl SmtpClientStd {
 
     // ---- Authentication --------------------------------------------------
 
-    /// Runs [`SmtpAnonymous`] (`AUTH ANONYMOUS`, RFC 4505).
-    /// Refreshes the capability list with an `EHLO` after a successful
-    /// authentication. The optional `trace` token is sent in
-    /// cleartext for server-side logging; do not put credentials in
-    /// it.
+    /// Runs [`SmtpAnonymous`] (`AUTH ANONYMOUS`, RFC 4505).  Refreshes the
+    /// capability list with an `EHLO` after a successful authentication. The
+    /// optional `trace` token is sent in cleartext for server-side logging; do
+    /// not put credentials in it.
     pub fn auth_anonymous(
         &mut self,
         trace: Option<&str>,
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        self.run(SmtpAnonymous::new(trace, domain))
+        self.run(SmtpAuthAnonymous::new(
+            trace,
+            domain,
+            SmtpAuthAnonymousOptions::default(),
+        ))
     }
 
-    /// Runs [`SmtpLogin`] (`AUTH LOGIN`, legacy SASL mechanism).
-    /// Refreshes the capability list with an `EHLO` after a successful
-    /// authentication. Prefer [`auth_plain`] or [`auth_scram_sha256`]
-    /// when the server supports them.
+    /// Runs [`SmtpAuthLogin`] (`AUTH LOGIN`, legacy SASL mechanism).  Refreshes
+    /// the capability list with an `EHLO` after a successful
+    /// authentication. Prefer [`auth_plain`] or [`auth_scram_sha256`] when the
+    /// server supports them.
     ///
     /// [`auth_plain`]: SmtpClientStd::auth_plain
     /// [`auth_scram_sha256`]: SmtpClientStd::auth_scram_sha256
@@ -330,41 +302,53 @@ impl SmtpClientStd {
         password: &SecretString,
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        self.run(SmtpLogin::new(login, password, domain))
+        self.run(SmtpAuthLogin::new(
+            login,
+            password,
+            domain,
+            SmtpAuthLoginOptions::default(),
+        ))
     }
 
-    /// Runs [`SmtpPlain`] (`AUTH PLAIN`, RFC 4616). Refreshes the
-    /// capability list with an `EHLO` after a successful
-    /// authentication.
+    /// Runs [`SmtpAuthPlain`] (`AUTH PLAIN`, RFC 4616). Refreshes the
+    /// capability list with an `EHLO` after a successful authentication.
     pub fn auth_plain(
         &mut self,
         login: &str,
         password: &SecretString,
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        self.run(SmtpPlain::new(login, password, domain))
+        self.run(SmtpAuthPlain::new(
+            login,
+            password,
+            domain,
+            SmtpAuthPlainOptions::default(),
+        ))
     }
 
-    /// Runs [`SmtpOauthbearer`] (`AUTH OAUTHBEARER`, RFC 7628).
-    /// Refreshes the capability list with an `EHLO` after a successful
-    /// authentication. The `token` is an OAuth 2.0 bearer access
-    /// token: the connection **must** be TLS-protected before calling
-    /// this method.
+    /// Runs [`SmtpAuthOauthbearer`] (`AUTH OAUTHBEARER`, RFC 7628).  Refreshes
+    /// the capability list with an `EHLO` after a successful
+    /// authentication. The `token` is an OAuth 2.0 bearer access token: the
+    /// connection **must** be TLS-protected before calling this method.
     pub fn auth_oauthbearer(
         &mut self,
         token: &SecretString,
         username: Option<&str>,
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        self.run(SmtpOauthbearer::new(token, username, domain))
+        self.run(SmtpAuthOauthbearer::new(
+            token,
+            username,
+            domain,
+            SmtpAuthOauthbearerOptions::default(),
+        ))
     }
 
-    /// Runs [`SmtpXoauth2`] (`AUTH XOAUTH2`, Google's pre-standard
-    /// OAuth 2.0 SASL mechanism). Refreshes the capability list with
-    /// an `EHLO` after a successful authentication. The `token` is an
-    /// OAuth 2.0 bearer access token: the connection **must** be
-    /// TLS-protected before calling this method. Prefer
-    /// [`auth_oauthbearer`] on servers that support both.
+    /// Runs [`SmtpAuthXoauth2`] (`AUTH XOAUTH2`, Google's pre-standard OAuth
+    /// 2.0 SASL mechanism). Refreshes the capability list with an `EHLO` after
+    /// a successful authentication. The `token` is an OAuth 2.0 bearer access
+    /// token: the connection **must** be TLS-protected before calling this
+    /// method. Prefer [`auth_oauthbearer`] on servers that support both.
     ///
     /// [`auth_oauthbearer`]: SmtpClientStd::auth_oauthbearer
     pub fn auth_xoauth2(
@@ -373,14 +357,18 @@ impl SmtpClientStd {
         token: &SecretString,
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        self.run(SmtpXoauth2::new(username, token, domain))
+        self.run(SmtpAuthXoauth2::new(
+            username,
+            token,
+            domain,
+            SmtpAuthXoauth2Options::default(),
+        ))
     }
 
-    /// Runs [`SmtpScramSha256`] (`AUTH SCRAM-SHA-256`, RFC 7677).
+    /// Runs [`SmtpAuthScramSha256`] (`AUTH SCRAM-SHA-256`, RFC 7677).
     /// Refreshes the capability list with an `EHLO` after a successful
-    /// authentication. `nonce` must be printable ASCII (no commas);
-    /// the standard recommends at least 18 bytes of cryptographic
-    /// randomness.
+    /// authentication. `nonce` must be printable ASCII (no commas); the
+    /// standard recommends at least 18 bytes of cryptographic randomness.
     #[cfg(feature = "scram")]
     pub fn auth_scram_sha256(
         &mut self,
@@ -389,45 +377,39 @@ impl SmtpClientStd {
         nonce: &[u8],
         domain: EhloDomain<'_>,
     ) -> Result<(), SmtpClientStdError> {
-        self.run(SmtpScramSha256::new(username, password, nonce, domain))
+        self.run(SmtpAuthScramSha256::new(
+            username,
+            password,
+            nonce,
+            domain,
+            SmtpAuthScramSha256Options::default(),
+        ))
     }
 
     // ---- Mail transaction ------------------------------------------------
 
     /// Runs [`SmtpMail`] (`MAIL FROM:<reverse-path>`, RFC 5321
-    /// §4.1.1.2).
-    pub fn mail(&mut self, reverse_path: ReversePath<'_>) -> Result<(), SmtpClientStdError> {
-        self.run(SmtpMail::new(reverse_path))
-    }
-
-    /// Runs [`SmtpMail::with_params`]: same as [`mail`] but appends
-    /// ESMTP parameters (e.g. `SIZE=`, `BODY=`, DSN).
-    ///
-    /// [`mail`]: SmtpClientStd::mail
-    pub fn mail_with_params(
+    /// §4.1.1.2). Pass an empty `parameters` vector for the bare
+    /// form, non-empty entries for ESMTP parameters (e.g. `SIZE=`,
+    /// `BODY=`, DSN).
+    pub fn mail(
         &mut self,
         reverse_path: ReversePath<'_>,
         parameters: Vec<Parameter<'_>>,
     ) -> Result<(), SmtpClientStdError> {
-        self.run(SmtpMail::with_params(reverse_path, parameters))
+        self.run(SmtpMail::new(reverse_path, parameters))
     }
 
     /// Runs [`SmtpRcpt`] (`RCPT TO:<forward-path>`, RFC 5321
-    /// §4.1.1.3).
-    pub fn rcpt(&mut self, forward_path: ForwardPath<'_>) -> Result<(), SmtpClientStdError> {
-        self.run(SmtpRcpt::new(forward_path))
-    }
-
-    /// Runs [`SmtpRcpt::with_params`]: same as [`rcpt`] but appends
-    /// ESMTP parameters (e.g. DSN `NOTIFY=`, `ORCPT=`).
-    ///
-    /// [`rcpt`]: SmtpClientStd::rcpt
-    pub fn rcpt_with_params(
+    /// §4.1.1.3). Pass an empty `parameters` vector for the bare
+    /// form, non-empty entries for ESMTP parameters (e.g. DSN
+    /// `NOTIFY=`, `ORCPT=`).
+    pub fn rcpt(
         &mut self,
         forward_path: ForwardPath<'_>,
         parameters: Vec<Parameter<'_>>,
     ) -> Result<(), SmtpClientStdError> {
-        self.run(SmtpRcpt::with_params(forward_path, parameters))
+        self.run(SmtpRcpt::new(forward_path, parameters))
     }
 
     /// Runs [`SmtpData`] (`DATA` + body terminator, RFC 5321
@@ -540,10 +522,10 @@ impl SmtpClientStd {
         // upgrade if requested, then build the boxed client.
         let stream = {
             let mut stream = stream;
-            run_smtp_inline(&mut stream, GetSmtpGreeting::new())?;
+            run_smtp_inline(&mut stream, SmtpGreetingGet::new())?;
             run_smtp_inline(&mut stream, SmtpEhlo::new(domain.clone()))?;
             if starttls {
-                run_starttls_inline(&mut stream)?;
+                run_smtp_inline(&mut stream, SmtpStartTls::new())?;
                 stream.upgrade_tls(tls)?
             } else {
                 stream
@@ -639,42 +621,12 @@ where
     }
 }
 
-/// Drives [`SmtpStartTls`] inline against a concrete [`StreamStd`]
-/// (same rationale as [`run_smtp_inline`]; [`SmtpStartTls`] has its
-/// own Yield enum so it cannot reuse that helper).
-#[cfg(any(
-    feature = "rustls-aws",
-    feature = "rustls-ring",
-    feature = "native-tls"
-))]
-fn run_starttls_inline(stream: &mut StreamStd) -> Result<(), SmtpClientStdError> {
-    let mut coroutine = SmtpStartTls::new();
-    let mut buf = [0u8; READ_BUFFER_SIZE];
-    let mut arg: Option<&[u8]> = None;
-
-    loop {
-        match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Complete(Ok(())) => return Ok(()),
-            SmtpCoroutineState::Complete(Err(err)) => return Err(err.into()),
-            SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsRead) => {
-                let n = stream.read(&mut buf)?;
-                arg = Some(&buf[..n]);
-            }
-            SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsWrite(bytes)) => {
-                stream.write_all(&bytes)?;
-            }
-            SmtpCoroutineState::Yielded(SmtpStartTlsYield::WantsStartTls(_)) => return Ok(()),
-        }
-    }
-}
-
-/// Marker for everything the client can run against; auto-implemented
-/// for any blocking `Read + Write + Send + 'static` impl. The `Send`
-/// supertrait flows the auto-trait through the `Box<dyn SmtpStream>`
-/// type erasure so `SmtpClientStd` can travel between threads.
-/// [`as_any_mut`] lets specialized callers (e.g. byte-level proxies
-/// that need [`StreamStd::set_read_timeout`]) downcast the boxed
-/// stream back to its concrete type.
+/// Marker for everything the client can run against; auto-implemented for any
+/// blocking `Read + Write + Send + 'static` impl. The `Send` supertrait flows
+/// the auto-trait through the `Box<dyn SmtpStream>` type erasure so
+/// `SmtpClientStd` can travel between threads.  [`as_any_mut`] lets specialized
+/// callers (e.g. byte-level proxies that need [`StreamStd::set_read_timeout`])
+/// downcast the boxed stream back to its concrete type.
 ///
 /// [`as_any_mut`]: SmtpStream::as_any_mut
 /// [`StreamStd::set_read_timeout`]: pimalaya_stream::std::stream::StreamStd::set_read_timeout

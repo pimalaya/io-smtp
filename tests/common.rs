@@ -9,11 +9,10 @@ use std::io::{Read, Write};
 
 use io_smtp::{
     coroutine::*,
-    login::SmtpLogin,
-    rfc4616::plain::SmtpPlain,
+    message::SmtpMessageSend,
     rfc5321::{
         ehlo::SmtpEhlo,
-        greeting::GetSmtpGreeting,
+        greeting::SmtpGreetingGet,
         helo::SmtpHelo,
         mail::SmtpMail,
         noop::SmtpNoop,
@@ -25,7 +24,10 @@ use io_smtp::{
             local_part::LocalPart, mailbox::Mailbox, reverse_path::ReversePath,
         },
     },
-    send::SmtpMessageSend,
+    sasl::{
+        auth_login::{SmtpAuthLogin, SmtpAuthLoginOptions},
+        auth_plain::{SmtpAuthPlain, SmtpAuthPlainOptions},
+    },
 };
 use pimalaya_stream::{std::stream::StreamStd, tls::Tls};
 use secrecy::SecretString;
@@ -82,7 +84,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     // -- GREETING -----------------------------------------------------------
 
-    let mut coroutine = GetSmtpGreeting::new();
+    let mut coroutine = SmtpGreetingGet::new();
     let mut chunk: Vec<u8>;
     let mut arg: Option<&[u8]> = None;
 
@@ -144,7 +146,12 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
         Auth::None => {}
         Auth::Plain { username, password } => {
             let password = SecretString::from(password);
-            let mut coroutine = SmtpPlain::new(&username, &password, ehlo_domain.clone());
+            let mut coroutine = SmtpAuthPlain::new(
+                &username,
+                &password,
+                ehlo_domain.clone(),
+                SmtpAuthPlainOptions::default(),
+            );
             let mut chunk: Vec<u8>;
             let mut arg: Option<&[u8]> = None;
 
@@ -164,7 +171,12 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
         }
         Auth::Login { username, password } => {
             let password = SecretString::from(password);
-            let mut coroutine = SmtpLogin::new(&username, &password, ehlo_domain.clone());
+            let mut coroutine = SmtpAuthLogin::new(
+                &username,
+                &password,
+                ehlo_domain.clone(),
+                SmtpAuthLoginOptions::default(),
+            );
             let mut chunk: Vec<u8>;
             let mut arg: Option<&[u8]> = None;
 
@@ -217,7 +229,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     // -- MAIL FROM -> RCPT TO -> RSET (aborted transaction) ----------------
 
-    let mut coroutine = SmtpMail::new(reverse_path.clone());
+    let mut coroutine = SmtpMail::new(reverse_path.clone(), Vec::new());
     let mut chunk: Vec<u8>;
     let mut arg: Option<&[u8]> = None;
 
@@ -235,7 +247,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
         }
     }
 
-    let mut coroutine = SmtpRcpt::new(forward_path.clone());
+    let mut coroutine = SmtpRcpt::new(forward_path.clone(), Vec::new());
     let mut chunk: Vec<u8>;
     let mut arg: Option<&[u8]> = None;
 

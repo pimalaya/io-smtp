@@ -13,7 +13,7 @@ This library is composed of 3 feature-gated layers:
 - [Features](#features)
 - [RFC coverage](#rfc-coverage)
 - [Usage](#usage)
-  - [I/O-free coroutines](#io-free-coroutines)
+  - [Coroutine](#coroutine)
   - [Light client](#light-client)
   - [Full client](#full-client)
 - [Examples](#examples)
@@ -40,19 +40,20 @@ This library is composed of 3 feature-gated layers:
 
 ## RFC coverage
 
-| Module  | What it covers                                                                   |
-|---------|----------------------------------------------------------------------------------|
-| `login` | LOGIN: legacy de-facto AUTH mechanism (no RFC)                                   |
-| [1870]  | SIZE: maximum message size declaration                                           |
-| [3207]  | STARTTLS: upgrade a plain connection to TLS                                      |
-| [3461]  | DSN: `RET`, `ENVID`, `NOTIFY`, `ORCPT` ESMTP parameters for MAIL FROM / RCPT TO  |
-| [3463]  | Enhanced status codes: `EnhancedStatusCode` type                                 |
-| [4505]  | ANONYMOUS: SASL ANONYMOUS mechanism                                              |
-| [4616]  | PLAIN: SASL PLAIN authentication mechanism                                       |
-| [4954]  | AUTH: SASL exchange protocol                                                     |
-| [5321]  | SMTP: greeting, EHLO, HELO, MAIL FROM, RCPT TO, DATA, NOOP, RSET, QUIT           |
-| [7628]  | OAUTHBEARER: OAuth 2.0 bearer token SASL mechanism; also XOAUTH2                 |
-| [7677]  | SCRAM-SHA-256: SASL SCRAM-SHA-256 mechanism (feature `scram`)                    |
+| Module                            | What it covers                                                                   |
+|-----------------------------------|----------------------------------------------------------------------------------|
+| [1870]                            | SIZE: maximum message size declaration                                           |
+| [3207]                            | STARTTLS: upgrade a plain connection to TLS                                      |
+| [3461]                            | DSN: `RET`, `ENVID`, `NOTIFY`, `ORCPT` ESMTP parameters for MAIL FROM / RCPT TO  |
+| [3463]                            | Enhanced status codes: `EnhancedStatusCode` type                                 |
+| [4954]                            | AUTH: SASL exchange protocol (verb, command, continuation data)                  |
+| [5321]                            | SMTP: greeting, EHLO, HELO, MAIL FROM, RCPT TO, DATA, NOOP, RSET, QUIT           |
+| [7628]                            | OAUTHBEARER: OAuth 2.0 bearer token SASL mechanism                               |
+| [7677]                            | SCRAM-SHA-256: SASL SCRAM-SHA-256 mechanism (feature `scram`)                    |
+| `sasl::auth_anonymous` ([4505])   | ANONYMOUS: SASL ANONYMOUS mechanism                                              |
+| `sasl::auth_login`                | LOGIN: legacy de-facto AUTH mechanism (no RFC)                                   |
+| `sasl::auth_plain` ([4616])       | PLAIN: SASL PLAIN authentication mechanism                                       |
+| `sasl::auth_xoauth2`              | XOAUTH2: Google's pre-standard OAuth 2.0 SASL mechanism (no RFC)                 |
 
 [1870]: https://www.rfc-editor.org/rfc/rfc1870
 [3207]: https://www.rfc-editor.org/rfc/rfc3207
@@ -71,18 +72,18 @@ I/O-SMTP can be consumed three ways, depending on how much of the I/O stack you 
 
 Whichever mode you pick, every coroutine implements the `SmtpCoroutine` trait. Its `resume(Option<&[u8]>)` method returns `SmtpCoroutineState<Yield, Return>` with two shapes:
 
-- `Yielded(Yield)`: intermediate progress. For standard coroutines `Yield = SmtpYield` (`WantsRead` / `WantsWrite(Vec<u8>)`); the caller reads or writes bytes accordingly. Pass `Some(&[])` to signal EOF on the next resume.
-- `Complete(Return)`: terminal value. By convention `Return = Result<Output, Error>` where the ok arm carries the coroutine's final output and the error arm carries the cause.
+- `Yielded(Yield)`: intermediate progress. Every coroutine in this crate picks the standard `SmtpYield` (`WantsRead` / `WantsWrite(Vec<u8>)`); the caller reads or writes bytes accordingly. Pass `Some(&[])` to signal EOF on the next resume.
+- `Complete(Return)`: terminal value. By convention `Return = Result<Output, Error>` where the ok arm carries the coroutine's final output and the error arm carries the cause. `SmtpStartTls` uses `Result<Vec<u8>, _>`: the ok arm's `Vec<u8>` carries any bytes the coroutine pre-read past the `220` reply (a non-empty value signals STARTTLS-injection per RFC 3207 §6).
 
-`SmtpStartTls` declares its own `SmtpStartTlsYield` because it carries an extra `WantsStartTls(Vec<u8>)` variant signalling the TLS upgrade to the driver.
+Each higher-level coroutine internally delegates to a shared `SendSmtpCommand<Cmd>` base coroutine (in `crate::send`) that owns the serialise → write → read → parse loop.
 
-### I/O-free coroutines
+### Coroutine
 
 No features required: works in `#![no_std]`, no sockets, no async runtime. You own the loop and the bytes; the library only produces command bytes and consumes server responses.
 
 Read the SMTP greeting against a blocking TCP socket (the same shape works under async, fuzzing, or in-memory replay):
 
-```rust,ignore
+```rust,no_run
 use std::{io::Read, net::TcpStream};
 
 use io_smtp::{coroutine::*, rfc5321::greeting::*};
@@ -90,12 +91,12 @@ use io_smtp::{coroutine::*, rfc5321::greeting::*};
 let mut stream = TcpStream::connect("smtp.example.com:25").unwrap();
 let mut buf = [0u8; 16 * 1024];
 
-let mut coroutine = GetSmtpGreeting::new();
+let mut coroutine = SmtpGreetingGet::new();
 let mut arg: Option<&[u8]> = None;
 
 let greeting = loop {
     match coroutine.resume(arg.take()) {
-        SmtpCoroutineState::Complete(Ok((greeting, _))) => break greeting,
+        SmtpCoroutineState::Complete(Ok(greeting)) => break greeting,
         SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
         SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
             let n = stream.read(&mut buf).unwrap();
@@ -110,8 +111,8 @@ println!("{greeting:?}");
 
 Drive a multi-step command (EHLO) the same way:
 
-```rust,ignore
-use std::{io::{Read, Write}, net::TcpStream};
+```rust,no_run
+use std::{borrow::Cow, io::{Read, Write}, net::TcpStream};
 
 use io_smtp::{
     coroutine::*,
@@ -123,13 +124,13 @@ use io_smtp::{
 
 # let mut stream = TcpStream::connect("smtp.example.com:25").unwrap();
 # let mut buf = [0u8; 16 * 1024];
-let domain: EhloDomain<'_> = Domain::parse(b"localhost").unwrap().into();
+let domain = EhloDomain::Domain(Domain(Cow::Borrowed("localhost")));
 let mut coroutine = SmtpEhlo::new(domain);
 let mut arg: Option<&[u8]> = None;
 
 let capabilities = loop {
     match coroutine.resume(arg.take()) {
-        SmtpCoroutineState::Complete(Ok((capabilities, _))) => break capabilities,
+        SmtpCoroutineState::Complete(Ok(capabilities)) => break capabilities,
         SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
         SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
             let n = stream.read(&mut buf).unwrap();
@@ -156,24 +157,28 @@ Enable the `client` feature. `SmtpClientStd::new(stream)` wraps any blocking `Re
 io-smtp = { version = "0.0.1", default-features = false, features = ["client"] }
 ```
 
-```rust,ignore
-use std::net::TcpStream;
+```rust,no_run
+use std::{borrow::Cow, error::Error, net::TcpStream};
 
 use io_smtp::{
     client::SmtpClientStd,
     rfc5321::types::{domain::Domain, ehlo_domain::EhloDomain},
 };
 
-let stream = TcpStream::connect("smtp.example.com:25")?;
-let mut client = SmtpClientStd::new(stream);
+fn main() -> Result<(), Box<dyn Error>> {
+    let stream = TcpStream::connect("smtp.example.com:25")?;
+    let mut client = SmtpClientStd::new(stream);
 
-let (greeting, _) = client.greeting()?;
-println!("server greeting: {greeting:?}");
+    let greeting = client.greeting()?;
+    println!("server greeting: {greeting:?}");
 
-let domain: EhloDomain<'_> = Domain::parse(b"localhost")?.into();
-let (capabilities, _) = client.ehlo(domain)?;
-for line in capabilities {
-    println!("{line}");
+    let domain = EhloDomain::Domain(Domain(Cow::Borrowed("localhost")));
+    let capabilities = client.ehlo(domain)?;
+    for line in capabilities {
+        println!("{line}");
+    }
+
+    Ok(())
 }
 ```
 
@@ -186,36 +191,48 @@ Enable one of the TLS feature flags: `rustls-ring` (default), `rustls-aws`, or `
 io-smtp = { version = "0.0.1", default-features = false, features = ["rustls-ring"] }
 ```
 
-```rust,ignore
+```rust,no_run
+use std::{borrow::Cow, error::Error};
+
 use io_smtp::{
     client::SmtpClientStd,
     rfc5321::types::{
-        domain::Domain, ehlo_domain::EhloDomain,
-        forward_path::ForwardPath, reverse_path::ReversePath,
+        domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath,
+        local_part::LocalPart, mailbox::Mailbox, reverse_path::ReversePath,
     },
 };
 use pimalaya_stream::{sasl::SaslPlain, tls::Tls};
 use secrecy::SecretString;
 use url::Url;
 
-let url = Url::parse("smtps://smtp.example.com")?;
-let tls = Tls::default();
-let domain: EhloDomain<'_> = Domain::parse(b"localhost")?.into();
-let sasl = SaslPlain {
-    authzid: None,
-    authcid: "alice@example.com".into(),
-    passwd: SecretString::from("hunter2".to_owned()),
-};
+fn main() -> Result<(), Box<dyn Error>> {
+    let url = Url::parse("smtps://smtp.example.com")?;
+    let tls = Tls::default();
+    let domain = EhloDomain::Domain(Domain(Cow::Borrowed("localhost")));
+    let sasl = SaslPlain {
+        authzid: None,
+        authcid: "alice@example.com".into(),
+        passwd: SecretString::from("hunter2".to_owned()),
+    };
 
-let mut client = SmtpClientStd::connect(&url, &tls, false, domain, Some(sasl))?;
+    let mut client = SmtpClientStd::connect(&url, &tls, false, domain, Some(sasl))?;
 
-// session is already authenticated; send a message
-let from: ReversePath = "<alice@example.com>".parse()?;
-let to: ForwardPath = "<bob@example.com>".parse()?;
-let message =
-    b"From: alice@example.com\r\nTo: bob@example.com\r\nSubject: Test\r\n\r\nHello!".to_vec();
-client.send(from, [to], message)?;
-client.quit()?;
+    // session is already authenticated; send a message
+    let alice = Mailbox {
+        local_part: LocalPart(Cow::Borrowed("alice")),
+        domain: EhloDomain::Domain(Domain(Cow::Borrowed("example.com"))),
+    };
+    let bob = Mailbox {
+        local_part: LocalPart(Cow::Borrowed("bob")),
+        domain: EhloDomain::Domain(Domain(Cow::Borrowed("example.com"))),
+    };
+    let message =
+        b"From: alice@example.com\r\nTo: bob@example.com\r\nSubject: Test\r\n\r\nHello!".to_vec();
+    client.send(ReversePath::Mailbox(alice), [ForwardPath(bob)], message)?;
+    client.quit()?;
+
+    Ok(())
+}
 ```
 
 The `sasl` argument is `Option<impl Into<Sasl>>`, so any of the per-mechanism structs (`SaslLogin`, `SaslPlain`, `SaslOauthbearer`, `SaslScramSha256` behind the `scram` feature) can be passed in `Some(...)` directly without wrapping in a `Sasl` variant. `SaslAnonymous` and `SaslXoauth2` are not supported by SMTP.
@@ -248,7 +265,7 @@ AI-generated code; the code is adjusted to fit correct behaviour.
 but nonexistent APIs, stale RFC references. The verification workflow catches most of this; it does not catch all of it. Bug reports are welcome and taken
 seriously.
 
-- **Last reviewed**: 29/05/2026
+- **Last reviewed**: 03/06/2026
 
 ## License
 

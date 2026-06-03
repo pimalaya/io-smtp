@@ -8,11 +8,11 @@
 //!
 //! // MAIL FROM with RET=HDRS and ENVID
 //! let params = vec![DsnRet::Hdrs.into_parameter(), DsnNotify::envid("abc123")];
-//! let coroutine = SmtpMail::with_params(reverse_path, params);
+//! let coroutine = SmtpMail::new(reverse_path, params);
 //!
 //! // RCPT TO with NOTIFY=SUCCESS,FAILURE
-//! let params = vec![DsnNotify::SUCCESS | DsnNotify::FAILURE];
-//! let coroutine = SmtpRcpt::with_params(forward_path, params);
+//! let params = vec![(DsnNotify::SUCCESS | DsnNotify::FAILURE).into_parameter()];
+//! let coroutine = SmtpRcpt::new(forward_path, params);
 //! ```
 
 use core::ops::BitOr;

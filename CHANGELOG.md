@@ -9,14 +9,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added basic I/O-free coroutines.
+- Added the `SmtpCoroutine` trait mirroring `core::ops::Coroutine`.
 
-- Added standard, blocking client.
+  The trait is composed of `Yield` and `Return` associated types, plus a two-variant `SmtpCoroutineState<Y, R>` (`Yielded(Y)` and `Complete(R)`). Standard coroutines pick the shared `SmtpYield { WantsRead, WantsWrite(Vec<u8>) }`; the previous `SmtpStartTlsYield` is gone (see Changed below).
+
+- Added the `smtp_try!` macro: coroutine equivalent of `?`.
+
+  Advances one inner resume step, re-yields intermediate `Yielded(y)` (via `Into`), short-circuits on `Complete(Err(_))`, otherwise binds the inner `Ok` value to the caller.
+
+- Added `SendSmtpCommand<Cmd>` in `crate::send`: base coroutine that serialises one SMTP command (any `Cmd: Into<Vec<u8>>`), writes it, drives the read loop, and parses the reply through `Response::is_complete` / `Response::parse`. Every higher-level coroutine delegates to it.
+
+- Added I/O-free SMTP RFC 5321 coroutines.
+
+  greeting (renamed `SmtpGreetingGet`), ehlo, helo, mail, rcpt, data (with dot-stuffing), noop, quit, rset.
+
+- Added I/O-free SMTP STARTTLS coroutine following RFC 3207.
+
+- Added I/O-free SASL coroutines under `crate::sasl`: ANONYMOUS, LOGIN, PLAIN, XOAUTH2.
+
+  Each supports both SASL-IR (RFC 4954 §4 inline credentials) and the non-IR challenge-response flow, behind the new `Smtp*Options::initial_request` knob.
+
+- Added I/O-free SASL OAUTHBEARER coroutine following RFC 7628 under `crate::rfc7628::auth_oauthbearer`.
+
+  Surfaces the base64-encoded JSON failure detail (sent by the server on `334`) in the `Rejected` error message after the mandatory `\x01` acknowledgement.
+
+- Added I/O-free SASL SCRAM-SHA-256 coroutine following RFC 7677 under `crate::rfc7677::auth_scram_sha_256`, behind the `scram` cargo feature.
+
+  Verifies the server signature before returning `Ok` (protects against MITM).
+
+- Added `Smtp*Options` structs on every auth coroutine: `{ initial_request, ensure_capabilities }`.
+
+  `initial_request = true` (default) inlines credentials with `AUTH` for a single round-trip; `false` waits for the `334` challenge. `ensure_capabilities = true` (default) chains a fresh `EHLO` after the `235` reply so callers see the post-authentication capability set. AUTH LOGIN ignores `initial_request` (always challenge-response). SCRAM-SHA-256 ignores `initial_request` (always SASL-IR).
+
+- Added the `client` cargo feature enabling `SmtpClientStd::new(stream)`.
+
+  Blocking light client wrapping any `Read + Write` stream and exposing one method per SMTP coroutine.
+
+- Added the `rustls-ring` cargo feature (default) enabling `SmtpClientStd::connect(url, tls, starttls, domain, sasl)`.
+
+  Opens `smtp://` (plain TCP) or `smtps://` (implicit TLS) via [pimalaya/stream](https://github.com/pimalaya/stream) with rustls + ring crypto provider, drives optional STARTTLS upgrade, reads greeting and initial EHLO, runs the chosen SASL mechanism, returns an authenticated client.
+
+- Added the `rustls-aws` cargo feature.
+
+  Same full client as `rustls-ring` but with the aws-lc-rs crypto provider.
+
+- Added the `native-tls` cargo feature.
+
+  Same full client backed by the platform's `native-tls` implementation.
+
+- Added the `vendored` cargo feature.
+
+  Compiles the underlying TLS dependencies in vendored mode (forwarded to `pimalaya-stream/vendored`).
 
 ### Changed
 
-- Unified all standard-shape coroutines under a single `SmtpCoroutine` trait (in `crate::coroutine`) with associated `Output` and `Error`. `resume` now returns `SmtpCoroutineState<Output, Error>` directly; the per-coroutine `Smtp*Result` enums are gone. `SmtpClientStd::run<C: SmtpCoroutine>` drives any coroutine to completion against the wrapped stream, replacing the internal `coroutine!` macro. Exempt (kept as-is with its own result enum because it carries a `WantsStartTls` mid-progression variant): `SmtpStartTls`.
+- Reshuffled SASL mechanisms under `crate::sasl/`.
 
-- Migrated `SmtpCoroutine` to the generator-shape trait pattern: `type Yield` + `type Return`, with a two-variant `SmtpCoroutineState<Y, R>` (`Yielded(Y)` / `Complete(R)`) mirroring `core::ops::CoroutineState`. Standard coroutines pick `type Yield = SmtpYield` (`WantsRead` / `WantsWrite(Vec<u8>)`) and `type Return = Result<Output, Error>`. `SmtpStartTls` is now also a regular `SmtpCoroutine` impl with a dedicated `SmtpStartTlsYield` enum (`WantsRead` / `WantsWrite(Vec<u8>)` / `WantsStartTls(Vec<u8>)`); `SmtpStartTlsResult` is gone. `SmtpClientStd::run<C, T, E>` is now constrained to `C::Yield = SmtpYield` and each command method on the client is a one-line call to `run`; `starttls` keeps its own per-method loop to handle `WantsStartTls`.
+  PLAIN, LOGIN, ANONYMOUS and XOAUTH2 (mechanisms with no protocol-specific RFC glue) moved to `crate::sasl::{auth_plain, auth_login, auth_anonymous, auth_xoauth2}`. OAUTHBEARER kept under `crate::rfc7628::auth_oauthbearer` and SCRAM-SHA-256 under `crate::rfc7677::auth_scram_sha_256` (their RFCs specify cryptographic and transport behaviour beyond plain SASL framing).
+
+- Renamed coroutine types for naming consistency.
+
+  `GetSmtpGreeting → SmtpGreetingGet`, `SmtpAnonymous → SmtpAuthAnonymous`, `SmtpLogin → SmtpAuthLogin`, `SmtpPlain → SmtpAuthPlain`, `SmtpXoauth2 → SmtpAuthXoauth2`, `SmtpOauthbearer → SmtpAuthOauthbearer`, `SmtpScramSha256 → SmtpAuthScramSha256`, plus matching `*Error` rename.
+
+- Dropped `SmtpStartTlsYield`.
+
+  `SmtpStartTls` now uses `type Yield = SmtpYield; type Return = Result<Vec<u8>, SmtpStartTlsError>`. The success arm `Complete(Ok(remaining))` is the "go ahead and upgrade" signal; `remaining` carries any bytes pre-read past the `220` reply (a non-empty value is a STARTTLS-injection signal per RFC 3207 §6). `SmtpClientStd::starttls()` collapses to a one-liner over `run()`; `run_starttls_inline` in `connect()` is gone.
+
+- Normalised error messages across every coroutine.
+
+  Every `Smtp*Error` variant now formats as `"SMTP <OP> failed: <reason>"`, with the common `Send(#[from] SendSmtpCommandError)` variant carrying lower-level read/parse failures.
+
+- Renamed `crate::send` to `crate::message`.
+
+  The `SmtpMessageSend` composite coroutine (MAIL FROM → RCPT TO → DATA) moved to `crate::message`. The freed `crate::send` module now hosts `SendSmtpCommand` (the base helper).
+
+- Every coroutine grew a dedicated `enum State` with a `fmt::Display` impl.
+
+  Enables `trace!("<op>: {}", self.state)` for uniform protocol tracing.
 
 [unreleased]: https://github.com/pimalaya/io-smtp/compare/root..HEAD
