@@ -72,6 +72,7 @@ use crate::{
         mail::*,
         noop::*,
         quit::*,
+        raw::*,
         rcpt::*,
         rset::*,
         types::{
@@ -125,6 +126,8 @@ pub enum SmtpClientStdError {
     Data(#[from] SmtpDataError),
     #[error(transparent)]
     Noop(#[from] SmtpNoopError),
+    #[error(transparent)]
+    Raw(#[from] SmtpRawError),
     #[error(transparent)]
     Rset(#[from] SmtpRsetError),
     #[error(transparent)]
@@ -427,6 +430,17 @@ impl SmtpClientStd {
     /// Runs [`SmtpNoop`] (`NOOP`, RFC 5321 §4.1.1.9).
     pub fn noop(&mut self) -> Result<(), SmtpClientStdError> {
         self.run(SmtpNoop::new())
+    }
+
+    /// Runs [`SmtpRaw`]: sends an arbitrary command line (without the
+    /// trailing CRLF) and returns the server reply verbatim. Reserved
+    /// for simple request/reply commands; do not use for DATA or
+    /// STARTTLS, which switch the stream into a different mode.
+    pub fn raw(
+        &mut self,
+        command: impl Into<Cow<'static, str>>,
+    ) -> Result<String, SmtpClientStdError> {
+        self.run(SmtpRaw::new(command))
     }
 
     // ---- High-level helpers ----------------------------------------------
