@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-15
+
 ### Added
 
 - Added the raw passthrough coroutine and its client method.
@@ -103,5 +105,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Enables `trace!("<op>: {}", self.state)` for uniform protocol tracing.
 
-[unreleased]: https://github.com/pimalaya/io-smtp/compare/v0.1.0..HEAD
+[unreleased]: https://github.com/pimalaya/io-smtp/compare/v0.2.0..HEAD
+[0.2.0]: https://github.com/pimalaya/io-smtp/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/pimalaya/io-smtp/compare/root..v0.1.0
