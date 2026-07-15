@@ -17,7 +17,7 @@
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::types::{domain::Domain, ehlo_domain::EhloDomain},
+//!     rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
 //!     sasl::auth_plain::{SmtpAuthPlain, SmtpAuthPlainOptions},
 //! };
 //!
@@ -27,7 +27,7 @@
 //! let mut buf = [0u8; 4096];
 //!
 //! let password = SecretString::from("secret".to_string());
-//! let domain = EhloDomain::Domain(Domain(Cow::Borrowed("example.com")));
+//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")));
 //! let opts = SmtpAuthPlainOptions::default();
 //! let mut coroutine = SmtpAuthPlain::new("alice", &password, domain, opts);
 //! let mut arg = None;
@@ -56,7 +56,7 @@ use alloc::{
 };
 
 use bounded_static::IntoBoundedStatic;
-use log::trace;
+use log::debug;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use thiserror::Error;
 
@@ -65,7 +65,7 @@ use crate::{
     rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
     rfc5321::{
         ehlo::{SmtpEhlo, SmtpEhloError},
-        types::{ehlo_domain::EhloDomain, reply_code::ReplyCode},
+        types::{ehlo_domain::SmtpEhloDomain, reply_code::SmtpReplyCode},
     },
     send::*,
     smtp_try,
@@ -96,14 +96,24 @@ impl Default for SmtpAuthPlainOptions {
 /// Failure causes during the SMTP AUTH PLAIN exchange.
 #[derive(Debug, Error)]
 pub enum SmtpAuthPlainError {
+    /// The server rejected the authentication.
     #[error("SMTP AUTH PLAIN failed: rejected {code} {message}")]
-    Rejected { code: u16, message: String },
+    Rejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+    },
+    /// The server challenged despite the inline initial response.
     #[error("SMTP AUTH PLAIN failed: server sent an unexpected continuation request")]
     UnexpectedContinuationRequest,
+    /// The server accepted before the expected challenge.
     #[error("SMTP AUTH PLAIN failed: server did not send the expected continuation request")]
     ExpectedContinuationRequest,
+    /// The underlying command exchange failed.
     #[error("SMTP AUTH PLAIN failed: {0}")]
-    Send(#[from] SendSmtpCommandError),
+    Send(#[from] SmtpCommandSendError),
+    /// The post-authentication capability refresh failed.
     #[error(transparent)]
     Ehlo(#[from] SmtpEhloError),
 }
@@ -111,16 +121,18 @@ pub enum SmtpAuthPlainError {
 /// I/O-free SMTP AUTH PLAIN coroutine.
 pub struct SmtpAuthPlain {
     state: State,
-    domain: Option<EhloDomain<'static>>,
+    domain: Option<SmtpEhloDomain<'static>>,
     payload: Option<Vec<u8>>,
     opts: SmtpAuthPlainOptions,
 }
 
 impl SmtpAuthPlain {
+    /// Creates the coroutine from the credentials and the client
+    /// identity used by the capability refresh.
     pub fn new(
         login: &str,
         password: &SecretString,
-        domain: EhloDomain<'_>,
+        domain: SmtpEhloDomain<'_>,
         opts: SmtpAuthPlainOptions,
     ) -> Self {
         let mut payload = Vec::new();
@@ -134,13 +146,13 @@ impl SmtpAuthPlain {
                 mechanism: Cow::Borrowed(PLAIN),
                 initial_response: Some(SecretBox::new(payload.clone().into_boxed_slice())),
             };
-            State::Send(SendSmtpCommand::new(cmd))
+            State::Send(SmtpCommandSend::new(cmd))
         } else {
             let cmd = SmtpAuthCommand {
                 mechanism: Cow::Borrowed(PLAIN),
                 initial_response: None,
             };
-            State::Send(SendSmtpCommand::new(cmd))
+            State::Send(SmtpCommandSend::new(cmd))
         };
 
         Self {
@@ -158,36 +170,37 @@ impl SmtpCoroutine for SmtpAuthPlain {
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            trace!("auth plain: {}", self.state);
-
             match &mut self.state {
                 State::Send(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == ReplyCode::AUTH_SUCCESSFUL {
+                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
                         if self.opts.initial_request {
-                            // IR flow: success on first reply.
+                            // NOTE: IR flow: success on first reply.
                             self.advance_after_auth();
                             continue;
                         }
-                        // Non-IR flow: success before the challenge,
-                        // technically RFC 4954 §4 forbids this.
+                        // NOTE: non-IR flow: success before the
+                        // challenge, technically RFC 4954 §4 forbids
+                        // this.
                         return SmtpCoroutineState::Complete(Err(
                             SmtpAuthPlainError::ExpectedContinuationRequest,
                         ));
                     }
 
-                    if out.response.code == ReplyCode::AUTH_CONTINUE {
+                    if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
                         if self.opts.initial_request {
-                            // IR flow: server should never challenge.
+                            // NOTE: IR flow: server should never
+                            // challenge.
                             return SmtpCoroutineState::Complete(Err(
                                 SmtpAuthPlainError::UnexpectedContinuationRequest,
                             ));
                         }
-                        // Non-IR flow: send credentials now.
+                        // NOTE: non-IR flow: send credentials now.
                         let payload = self.payload.take().expect("payload taken twice");
                         let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
-                        self.state = State::Continue(SendSmtpCommand::new(data));
+                        self.state = State::Continue(SmtpCommandSend::new(data));
+                        debug!("challenge received, sending credentials");
                         continue;
                     }
 
@@ -201,7 +214,7 @@ impl SmtpCoroutine for SmtpAuthPlain {
                 State::Continue(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == ReplyCode::AUTH_SUCCESSFUL {
+                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
                         self.advance_after_auth();
                         continue;
                     }
@@ -215,6 +228,7 @@ impl SmtpCoroutine for SmtpAuthPlain {
                 }
                 State::Ehlo(ehlo) => {
                     let _ = smtp_try!(ehlo, arg);
+                    debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
                 State::Done => return SmtpCoroutineState::Complete(Ok(())),
@@ -226,6 +240,7 @@ impl SmtpCoroutine for SmtpAuthPlain {
 impl SmtpAuthPlain {
     fn advance_after_auth(&mut self) {
         let _ = self.payload.take();
+        debug!("authenticated");
         if self.opts.ensure_capabilities {
             let domain = self.domain.take().expect("domain taken twice");
             self.state = State::Ehlo(SmtpEhlo::new(domain));
@@ -236,8 +251,8 @@ impl SmtpAuthPlain {
 }
 
 enum State {
-    Send(SendSmtpCommand<SmtpAuthCommand<'static>>),
-    Continue(SendSmtpCommand<SmtpAuthData>),
+    Send(SmtpCommandSend<SmtpAuthCommand<'static>>),
+    Continue(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
     Done,
 }
@@ -255,12 +270,21 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use crate::rfc5321::types::domain::Domain;
+    use core::str::from_utf8;
 
-    use super::*;
+    use alloc::{borrow::Cow, string::ToString, vec::Vec};
 
-    fn domain() -> EhloDomain<'static> {
-        EhloDomain::Domain(Domain(Cow::Borrowed("example.com")))
+    use secrecy::SecretString;
+
+    use crate::{
+        coroutine::*,
+        rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
+        sasl::auth_plain::*,
+        send::SmtpCommandSendError,
+    };
+
+    fn domain() -> SmtpEhloDomain<'static> {
+        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")))
     }
 
     fn password() -> SecretString {
@@ -273,7 +297,7 @@ mod tests {
         let mut auth = SmtpAuthPlain::new("alice", &password(), domain(), opts);
 
         let bytes = expect_wants_write(&mut auth, None);
-        let line = core::str::from_utf8(&bytes).expect("utf8 command");
+        let line = from_utf8(&bytes).expect("utf8 command");
         assert!(line.starts_with("AUTH PLAIN "));
 
         expect_wants_read(&mut auth);
@@ -319,7 +343,7 @@ mod tests {
         let mut auth = SmtpAuthPlain::new("alice", &password(), domain(), opts);
 
         let bytes = expect_wants_write(&mut auth, None);
-        let line = core::str::from_utf8(&bytes).expect("utf8 command");
+        let line = from_utf8(&bytes).expect("utf8 command");
         assert!(line.trim_end().ends_with("AUTH PLAIN"));
 
         expect_wants_read(&mut auth);
@@ -340,11 +364,9 @@ mod tests {
         let err = expect_complete_err(&mut auth, b"");
         assert!(matches!(
             err,
-            SmtpAuthPlainError::Send(SendSmtpCommandError::Eof)
+            SmtpAuthPlainError::Send(SmtpCommandSendError::Eof)
         ));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpAuthPlain, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

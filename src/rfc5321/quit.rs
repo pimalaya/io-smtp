@@ -43,10 +43,10 @@ use alloc::{
     vec::Vec,
 };
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
-use crate::{coroutine::*, rfc5321::types::reply_code::ReplyCode, send::*, smtp_try};
+use crate::{coroutine::*, rfc5321::types::reply_code::SmtpReplyCode, send::*, smtp_try};
 
 /// The QUIT command (RFC 5321 §4.1.1.10).
 pub struct SmtpQuitCommand;
@@ -60,10 +60,17 @@ impl From<SmtpQuitCommand> for Vec<u8> {
 /// Failure causes during the SMTP QUIT exchange.
 #[derive(Clone, Debug, Error)]
 pub enum SmtpQuitError {
+    /// The server rejected the QUIT command.
     #[error("SMTP QUIT failed: rejected {code} {message}")]
-    Rejected { code: u16, message: String },
+    Rejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+    },
+    /// The underlying command exchange failed.
     #[error("SMTP QUIT failed: {0}")]
-    Send(#[from] SendSmtpCommandError),
+    Send(#[from] SmtpCommandSendError),
 }
 
 /// I/O-free SMTP QUIT coroutine.
@@ -72,9 +79,10 @@ pub struct SmtpQuit {
 }
 
 impl SmtpQuit {
+    /// Creates the coroutine.
     pub fn new() -> Self {
         Self {
-            state: State::Send(SendSmtpCommand::new(SmtpQuitCommand)),
+            state: State::Send(SmtpCommandSend::new(SmtpQuitCommand)),
         }
     }
 }
@@ -90,31 +98,25 @@ impl SmtpCoroutine for SmtpQuit {
     type Return = Result<(), SmtpQuitError>;
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
-        loop {
-            trace!("quit: {}", self.state);
+        match &mut self.state {
+            State::Send(send) => {
+                let out = smtp_try!(send, arg);
 
-            match &mut self.state {
-                State::Send(send) => {
-                    let out = smtp_try!(send, arg);
-
-                    if out.response.code == ReplyCode::SERVICE_CLOSING {
-                        return SmtpCoroutineState::Complete(Ok(()));
-                    }
-
-                    let code = out.response.code.code();
-                    let message = out.response.text().to_string();
-                    return SmtpCoroutineState::Complete(Err(SmtpQuitError::Rejected {
-                        code,
-                        message,
-                    }));
+                if out.response.code == SmtpReplyCode::SERVICE_CLOSING {
+                    debug!("quit accepted");
+                    return SmtpCoroutineState::Complete(Ok(()));
                 }
+
+                let code = out.response.code.code();
+                let message = out.response.text().to_string();
+                SmtpCoroutineState::Complete(Err(SmtpQuitError::Rejected { code, message }))
             }
         }
     }
 }
 
 enum State {
-    Send(SendSmtpCommand<SmtpQuitCommand>),
+    Send(SmtpCommandSend<SmtpQuitCommand>),
 }
 
 impl fmt::Display for State {
@@ -127,7 +129,9 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use alloc::vec::Vec;
+
+    use crate::{coroutine::*, rfc5321::quit::*, send::SmtpCommandSendError};
 
     #[test]
     fn success_returns_ok() {
@@ -163,11 +167,9 @@ mod tests {
         let err = expect_complete_err(&mut quit, b"");
         assert!(matches!(
             err,
-            SmtpQuitError::Send(SendSmtpCommandError::Eof)
+            SmtpQuitError::Send(SmtpCommandSendError::Eof)
         ));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpQuit, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

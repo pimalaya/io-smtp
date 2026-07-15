@@ -10,7 +10,7 @@ pub const AUTH: &str = "AUTH";
 /// The AUTH EHLO capability: the set of SASL mechanisms offered by the server.
 ///
 /// Borrows directly from the raw capability line returned by
-/// `EhloResponse::get_capability(AUTH)`.
+/// `SmtpEhloResponse::get_capability(AUTH)`.
 ///
 /// # Example
 ///

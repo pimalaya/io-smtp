@@ -45,10 +45,10 @@ use alloc::{
     vec::Vec,
 };
 
-use log::trace;
+use log::{debug, trace};
 use thiserror::Error;
 
-use crate::{coroutine::*, rfc5321::types::reply_code::ReplyCode, send::*, smtp_try};
+use crate::{coroutine::*, rfc5321::types::reply_code::SmtpReplyCode, send::*, smtp_try};
 
 /// The DATA command (RFC 5321 §4.1.1.4).
 pub struct SmtpDataCommand;
@@ -72,12 +72,25 @@ impl From<SmtpDataBody> for Vec<u8> {
 /// Failure causes during the SMTP DATA exchange.
 #[derive(Clone, Debug, Error)]
 pub enum SmtpDataError {
+    /// The server rejected the DATA command itself.
     #[error("SMTP DATA command failed: rejected {code} {message}")]
-    CommandRejected { code: u16, message: String },
+    CommandRejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+    },
+    /// The server rejected the message body.
     #[error("SMTP DATA body failed: rejected {code} {message}")]
-    BodyRejected { code: u16, message: String },
+    BodyRejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+    },
+    /// The underlying command exchange failed.
     #[error("SMTP DATA failed: {0}")]
-    Send(#[from] SendSmtpCommandError),
+    Send(#[from] SmtpCommandSendError),
 }
 
 /// I/O-free SMTP DATA coroutine.
@@ -91,7 +104,7 @@ impl SmtpData {
     /// dot-stuffing and the terminator are appended internally.
     pub fn new(message: Vec<u8>) -> Self {
         Self {
-            state: State::SendCommand(SendSmtpCommand::new(SmtpDataCommand)),
+            state: State::SendCommand(SmtpCommandSend::new(SmtpDataCommand)),
             body: Some(message),
         }
     }
@@ -133,13 +146,11 @@ impl SmtpCoroutine for SmtpData {
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            trace!("data: {}", self.state);
-
             match &mut self.state {
                 State::SendCommand(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code != ReplyCode::START_MAIL_INPUT {
+                    if out.response.code != SmtpReplyCode::START_MAIL_INPUT {
                         let code = out.response.code.code();
                         let message = out.response.text().to_string();
                         return SmtpCoroutineState::Complete(Err(SmtpDataError::CommandRejected {
@@ -150,14 +161,17 @@ impl SmtpCoroutine for SmtpData {
 
                     let body = self.body.take().expect("body taken twice");
                     let prepared = Self::prepare_body(body);
-                    trace!("message body prepared: {} bytes", prepared.len());
 
-                    self.state = State::SendBody(SendSmtpCommand::new(SmtpDataBody(prepared)));
+                    let len = prepared.len();
+                    self.state = State::SendBody(SmtpCommandSend::new(SmtpDataBody(prepared)));
+                    debug!("data accepted, sending body");
+                    trace!("prepared body: {len} bytes");
                 }
                 State::SendBody(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == ReplyCode::OK {
+                    if out.response.code == SmtpReplyCode::OK {
+                        debug!("body accepted");
                         return SmtpCoroutineState::Complete(Ok(()));
                     }
 
@@ -174,8 +188,8 @@ impl SmtpCoroutine for SmtpData {
 }
 
 enum State {
-    SendCommand(SendSmtpCommand<SmtpDataCommand>),
-    SendBody(SendSmtpCommand<SmtpDataBody>),
+    SendCommand(SmtpCommandSend<SmtpDataCommand>),
+    SendBody(SmtpCommandSend<SmtpDataBody>),
 }
 
 impl fmt::Display for State {
@@ -189,7 +203,9 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use alloc::vec::Vec;
+
+    use crate::{coroutine::*, rfc5321::data::*, send::SmtpCommandSendError};
 
     #[test]
     fn success_returns_ok() {
@@ -251,11 +267,9 @@ mod tests {
         let err = expect_complete_err(&mut data, b"");
         assert!(matches!(
             err,
-            SmtpDataError::Send(SendSmtpCommandError::Eof)
+            SmtpDataError::Send(SmtpCommandSendError::Eof)
         ));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpData, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

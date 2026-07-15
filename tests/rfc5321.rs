@@ -1,6 +1,6 @@
 //! Tests for RFC 5321: Simple Mail Transfer Protocol.
 //!
-//! All tests drive SMTP coroutines against pre-crafted in-memory
+//! All tests pump SMTP coroutines against pre-crafted in-memory
 //! response buffers. No network connection is made.
 
 use std::borrow::Cow;
@@ -13,13 +13,13 @@ use io_smtp::{
         noop::*,
         quit::*,
         rset::*,
-        types::{domain::Domain, ehlo_domain::EhloDomain, greeting::Greeting},
+        types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain, greeting::SmtpGreeting},
     },
 };
 
 fn run_greeting(
     response: &[u8],
-) -> SmtpCoroutineState<SmtpYield, Result<Greeting<'static>, SmtpGreetingGetError>> {
+) -> SmtpCoroutineState<SmtpYield, Result<SmtpGreeting<'static>, SmtpGreetingGetError>> {
     let mut coroutine = SmtpGreetingGet::new();
     let mut arg: Option<&[u8]> = None;
 
@@ -33,7 +33,7 @@ fn run_greeting(
 
 fn run_ehlo(
     response: &[u8],
-    domain: EhloDomain<'_>,
+    domain: SmtpEhloDomain<'_>,
 ) -> SmtpCoroutineState<SmtpYield, Result<Vec<Cow<'static, str>>, SmtpEhloError>> {
     let mut coroutine = SmtpEhlo::new(domain);
     let mut arg: Option<&[u8]> = None;
@@ -61,8 +61,8 @@ fn greeting_220() {
 
 #[test]
 fn greeting_incomplete_rejected() {
-    // No CRLF: drive the coroutine until it asks for more bytes, then
-    // signal EOF to force an error terminal.
+    // NOTE: no CRLF: resume the coroutine until it asks for more
+    // bytes, then signal EOF to force an error terminal.
     let mut coroutine = SmtpGreetingGet::new();
     let mut arg: Option<&[u8]> = None;
     let mut sent = false;
@@ -87,7 +87,7 @@ fn greeting_incomplete_rejected() {
 #[test]
 fn ehlo_single_line() {
     let response = b"250 smtp.example.com\r\n";
-    let domain = EhloDomain::Domain(Domain("localhost".into()));
+    let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain("localhost".into()));
 
     match run_ehlo(response, domain) {
         SmtpCoroutineState::Complete(Ok(capabilities)) => assert!(capabilities.is_empty()),
@@ -101,7 +101,7 @@ fn ehlo_with_capabilities() {
                      250-SIZE 10240000\r\n\
                      250-STARTTLS\r\n\
                      250 ENHANCEDSTATUSCODES\r\n";
-    let domain = EhloDomain::Domain(Domain("localhost".into()));
+    let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain("localhost".into()));
 
     match run_ehlo(response, domain) {
         SmtpCoroutineState::Complete(Ok(capabilities)) => assert_eq!(capabilities.len(), 3),

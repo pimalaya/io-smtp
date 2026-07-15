@@ -43,10 +43,10 @@ use alloc::{
     vec::Vec,
 };
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
-use crate::{coroutine::*, rfc5321::types::reply_code::ReplyCode, send::*, smtp_try};
+use crate::{coroutine::*, rfc5321::types::reply_code::SmtpReplyCode, send::*, smtp_try};
 
 /// The RSET command (RFC 5321 §4.1.1.5).
 pub struct SmtpRsetCommand;
@@ -60,10 +60,17 @@ impl From<SmtpRsetCommand> for Vec<u8> {
 /// Failure causes during the SMTP RSET exchange.
 #[derive(Clone, Debug, Error)]
 pub enum SmtpRsetError {
+    /// The server rejected the RSET command.
     #[error("SMTP RSET failed: rejected {code} {message}")]
-    Rejected { code: u16, message: String },
+    Rejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+    },
+    /// The underlying command exchange failed.
     #[error("SMTP RSET failed: {0}")]
-    Send(#[from] SendSmtpCommandError),
+    Send(#[from] SmtpCommandSendError),
 }
 
 /// I/O-free SMTP RSET coroutine.
@@ -72,9 +79,10 @@ pub struct SmtpRset {
 }
 
 impl SmtpRset {
+    /// Creates the coroutine.
     pub fn new() -> Self {
         Self {
-            state: State::Send(SendSmtpCommand::new(SmtpRsetCommand)),
+            state: State::Send(SmtpCommandSend::new(SmtpRsetCommand)),
         }
     }
 }
@@ -90,31 +98,25 @@ impl SmtpCoroutine for SmtpRset {
     type Return = Result<(), SmtpRsetError>;
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
-        loop {
-            trace!("rset: {}", self.state);
+        match &mut self.state {
+            State::Send(send) => {
+                let out = smtp_try!(send, arg);
 
-            match &mut self.state {
-                State::Send(send) => {
-                    let out = smtp_try!(send, arg);
-
-                    if out.response.code == ReplyCode::OK {
-                        return SmtpCoroutineState::Complete(Ok(()));
-                    }
-
-                    let code = out.response.code.code();
-                    let message = out.response.text().to_string();
-                    return SmtpCoroutineState::Complete(Err(SmtpRsetError::Rejected {
-                        code,
-                        message,
-                    }));
+                if out.response.code == SmtpReplyCode::OK {
+                    debug!("rset accepted");
+                    return SmtpCoroutineState::Complete(Ok(()));
                 }
+
+                let code = out.response.code.code();
+                let message = out.response.text().to_string();
+                SmtpCoroutineState::Complete(Err(SmtpRsetError::Rejected { code, message }))
             }
         }
     }
 }
 
 enum State {
-    Send(SendSmtpCommand<SmtpRsetCommand>),
+    Send(SmtpCommandSend<SmtpRsetCommand>),
 }
 
 impl fmt::Display for State {
@@ -127,7 +129,9 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use alloc::vec::Vec;
+
+    use crate::{coroutine::*, rfc5321::rset::*, send::SmtpCommandSendError};
 
     #[test]
     fn success_returns_ok() {
@@ -163,11 +167,9 @@ mod tests {
         let err = expect_complete_err(&mut rset, b"");
         assert!(matches!(
             err,
-            SmtpRsetError::Send(SendSmtpCommandError::Eof)
+            SmtpRsetError::Send(SmtpCommandSendError::Eof)
         ));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpRset, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

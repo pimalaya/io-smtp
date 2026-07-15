@@ -1,4 +1,4 @@
-//! Generator-shape coroutine driver. Mirrors `core::ops::Coroutine`:
+//! Generator-shape coroutine contract. Mirrors `core::ops::Coroutine`:
 //! `Yield` for intermediate progress, `Return` for terminal output,
 //! [`SmtpCoroutineState`] for both.
 
@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 /// State yielded by an [`SmtpCoroutine::resume`] step.
 #[derive(Debug)]
 pub enum SmtpCoroutineState<Y, R> {
-    /// Intermediate yield; the driver reacts and resumes.
+    /// Intermediate yield; the caller reacts and resumes.
     Yielded(Y),
     /// Terminal yield; by convention `R = Result<Output, Error>`.
     Complete(R),
@@ -29,9 +29,11 @@ pub trait SmtpCoroutine {
 /// Standard I/O-only Yield; every coroutine in this crate picks it.
 #[derive(Debug)]
 pub enum SmtpYield {
-    /// Driver should read more bytes and feed them back on resume.
+    /// The caller should read more bytes and feed them back on
+    /// resume.
     WantsRead,
-    /// Driver should write these bytes; the next resume takes `None`.
+    /// The caller should write these bytes; the next resume takes
+    /// `None`.
     WantsWrite(Vec<u8>),
 }
 

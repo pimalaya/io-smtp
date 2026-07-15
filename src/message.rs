@@ -14,8 +14,8 @@
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
 //!     message::SmtpMessageSend,
 //!     rfc5321::types::{
-//!         domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath,
-//!         local_part::LocalPart, mailbox::Mailbox, reverse_path::ReversePath,
+//!         domain::SmtpDomain, ehlo_domain::SmtpEhloDomain, forward_path::SmtpForwardPath,
+//!         local_part::SmtpLocalPart, mailbox::SmtpMailbox, reverse_path::SmtpReversePath,
 //!     },
 //! };
 //!
@@ -24,20 +24,20 @@
 //!
 //! let mut buf = [0u8; 4096];
 //!
-//! let alice = Mailbox {
-//!     local_part: LocalPart(Cow::Borrowed("alice")),
-//!     domain: EhloDomain::Domain(Domain(Cow::Borrowed("example.org"))),
+//! let alice = SmtpMailbox {
+//!     local_part: SmtpLocalPart(Cow::Borrowed("alice")),
+//!     domain: SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.org"))),
 //! };
-//! let bob = Mailbox {
-//!     local_part: LocalPart(Cow::Borrowed("bob")),
-//!     domain: EhloDomain::Domain(Domain(Cow::Borrowed("example.org"))),
+//! let bob = SmtpMailbox {
+//!     local_part: SmtpLocalPart(Cow::Borrowed("bob")),
+//!     domain: SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.org"))),
 //! };
 //! let message =
 //!     b"From: alice@example.org\r\nTo: bob@example.org\r\nSubject: hi\r\n\r\nhello\r\n".to_vec();
 //!
 //! let mut coroutine = SmtpMessageSend::new(
-//!     ReversePath::Mailbox(alice),
-//!     [ForwardPath(bob)],
+//!     SmtpReversePath::SmtpMailbox(alice),
+//!     [SmtpForwardPath(bob)],
 //!     message,
 //! );
 //! let mut arg = None;
@@ -62,7 +62,7 @@ use core::fmt;
 use alloc::{collections::VecDeque, vec::Vec};
 
 use bounded_static::IntoBoundedStatic;
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
 use crate::{
@@ -71,7 +71,7 @@ use crate::{
         data::{SmtpData, SmtpDataError},
         mail::{SmtpMail, SmtpMailError},
         rcpt::{SmtpRcpt, SmtpRcptError},
-        types::{forward_path::ForwardPath, reverse_path::ReversePath},
+        types::{forward_path::SmtpForwardPath, reverse_path::SmtpReversePath},
     },
     smtp_try,
 };
@@ -79,10 +79,13 @@ use crate::{
 /// Failure causes during the SMTP send composite coroutine.
 #[derive(Debug, Error)]
 pub enum SmtpMessageSendError {
+    /// The MAIL FROM step failed.
     #[error(transparent)]
     MailFrom(#[from] SmtpMailError),
+    /// A RCPT TO step failed.
     #[error(transparent)]
     RcptTo(#[from] SmtpRcptError),
+    /// The DATA step failed.
     #[error(transparent)]
     Data(#[from] SmtpDataError),
 }
@@ -90,14 +93,16 @@ pub enum SmtpMessageSendError {
 /// I/O-free SMTP composite send coroutine.
 pub struct SmtpMessageSend {
     state: State,
-    forward_paths: VecDeque<ForwardPath<'static>>,
+    forward_paths: VecDeque<SmtpForwardPath<'static>>,
     message: Option<Vec<u8>>,
 }
 
 impl SmtpMessageSend {
+    /// Creates the coroutine from the sender path, the recipient
+    /// paths and the complete message (headers plus body).
     pub fn new<'a>(
-        reverse_path: ReversePath<'_>,
-        forward_paths: impl IntoIterator<Item = ForwardPath<'a>>,
+        reverse_path: SmtpReversePath<'_>,
+        forward_paths: impl IntoIterator<Item = SmtpForwardPath<'a>>,
         message: Vec<u8>,
     ) -> Self {
         let forward_paths = forward_paths
@@ -119,19 +124,20 @@ impl SmtpCoroutine for SmtpMessageSend {
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            trace!("message send: {}", self.state);
-
             match &mut self.state {
                 State::MailFrom(mail) => {
                     let () = smtp_try!(mail, arg);
                     self.state = self.next_rcpt_or_data();
+                    debug!("mail from accepted, next: {}", self.state);
                 }
                 State::RcptTo(rcpt) => {
                     let () = smtp_try!(rcpt, arg);
                     self.state = self.next_rcpt_or_data();
+                    debug!("rcpt to accepted, next: {}", self.state);
                 }
                 State::Data(data) => {
                     let () = smtp_try!(data, arg);
+                    debug!("message sent");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
             }

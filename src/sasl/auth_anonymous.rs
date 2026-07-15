@@ -15,7 +15,7 @@
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::types::{domain::Domain, ehlo_domain::EhloDomain},
+//!     rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
 //!     sasl::auth_anonymous::{SmtpAuthAnonymous, SmtpAuthAnonymousOptions},
 //! };
 //!
@@ -24,7 +24,7 @@
 //!
 //! let mut buf = [0u8; 4096];
 //!
-//! let domain = EhloDomain::Domain(Domain(Cow::Borrowed("client.example.org")));
+//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("client.example.org")));
 //! let opts = SmtpAuthAnonymousOptions::default();
 //! let mut coroutine = SmtpAuthAnonymous::new(Some("trace@example.org"), domain, opts);
 //! let mut arg = None;
@@ -53,7 +53,7 @@ use alloc::{
 };
 
 use bounded_static::IntoBoundedStatic;
-use log::trace;
+use log::debug;
 use secrecy::SecretBox;
 use thiserror::Error;
 
@@ -62,7 +62,7 @@ use crate::{
     rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
     rfc5321::{
         ehlo::{SmtpEhlo, SmtpEhloError},
-        types::{ehlo_domain::EhloDomain, reply_code::ReplyCode},
+        types::{ehlo_domain::SmtpEhloDomain, reply_code::SmtpReplyCode},
     },
     send::*,
     smtp_try,
@@ -93,14 +93,24 @@ impl Default for SmtpAuthAnonymousOptions {
 /// Failure causes during the SMTP AUTH ANONYMOUS exchange.
 #[derive(Debug, Error)]
 pub enum SmtpAuthAnonymousError {
+    /// The server rejected the authentication.
     #[error("SMTP AUTH ANONYMOUS failed: rejected {code} {message}")]
-    Rejected { code: u16, message: String },
+    Rejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+    },
+    /// The server challenged despite the inline initial response.
     #[error("SMTP AUTH ANONYMOUS failed: server sent an unexpected continuation request")]
     UnexpectedContinuationRequest,
+    /// The server accepted before the expected challenge.
     #[error("SMTP AUTH ANONYMOUS failed: server did not send the expected continuation request")]
     ExpectedContinuationRequest,
+    /// The underlying command exchange failed.
     #[error("SMTP AUTH ANONYMOUS failed: {0}")]
-    Send(#[from] SendSmtpCommandError),
+    Send(#[from] SmtpCommandSendError),
+    /// The post-authentication capability refresh failed.
     #[error(transparent)]
     Ehlo(#[from] SmtpEhloError),
 }
@@ -108,7 +118,7 @@ pub enum SmtpAuthAnonymousError {
 /// I/O-free SMTP AUTH ANONYMOUS coroutine.
 pub struct SmtpAuthAnonymous {
     state: State,
-    domain: Option<EhloDomain<'static>>,
+    domain: Option<SmtpEhloDomain<'static>>,
     payload: Option<Vec<u8>>,
     opts: SmtpAuthAnonymousOptions,
 }
@@ -117,7 +127,7 @@ impl SmtpAuthAnonymous {
     /// Pass [`None`] for an empty trace.
     pub fn new(
         trace: Option<&str>,
-        domain: EhloDomain<'_>,
+        domain: SmtpEhloDomain<'_>,
         opts: SmtpAuthAnonymousOptions,
     ) -> Self {
         let payload = trace.unwrap_or("").as_bytes().to_vec();
@@ -127,13 +137,13 @@ impl SmtpAuthAnonymous {
                 mechanism: Cow::Borrowed(ANONYMOUS),
                 initial_response: Some(SecretBox::new(payload.clone().into_boxed_slice())),
             };
-            State::Send(SendSmtpCommand::new(cmd))
+            State::Send(SmtpCommandSend::new(cmd))
         } else {
             let cmd = SmtpAuthCommand {
                 mechanism: Cow::Borrowed(ANONYMOUS),
                 initial_response: None,
             };
-            State::Send(SendSmtpCommand::new(cmd))
+            State::Send(SmtpCommandSend::new(cmd))
         };
 
         Self {
@@ -151,13 +161,11 @@ impl SmtpCoroutine for SmtpAuthAnonymous {
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            trace!("auth anonymous: {}", self.state);
-
             match &mut self.state {
                 State::Send(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == ReplyCode::AUTH_SUCCESSFUL {
+                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
                         if self.opts.initial_request {
                             self.advance_after_auth();
                             continue;
@@ -167,7 +175,7 @@ impl SmtpCoroutine for SmtpAuthAnonymous {
                         ));
                     }
 
-                    if out.response.code == ReplyCode::AUTH_CONTINUE {
+                    if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
                         if self.opts.initial_request {
                             return SmtpCoroutineState::Complete(Err(
                                 SmtpAuthAnonymousError::UnexpectedContinuationRequest,
@@ -175,7 +183,8 @@ impl SmtpCoroutine for SmtpAuthAnonymous {
                         }
                         let payload = self.payload.take().expect("payload taken twice");
                         let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
-                        self.state = State::Continue(SendSmtpCommand::new(data));
+                        self.state = State::Continue(SmtpCommandSend::new(data));
+                        debug!("challenge received, sending trace");
                         continue;
                     }
 
@@ -189,7 +198,7 @@ impl SmtpCoroutine for SmtpAuthAnonymous {
                 State::Continue(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == ReplyCode::AUTH_SUCCESSFUL {
+                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
                         self.advance_after_auth();
                         continue;
                     }
@@ -203,6 +212,7 @@ impl SmtpCoroutine for SmtpAuthAnonymous {
                 }
                 State::Ehlo(ehlo) => {
                     let _ = smtp_try!(ehlo, arg);
+                    debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
                 State::Done => return SmtpCoroutineState::Complete(Ok(())),
@@ -214,6 +224,7 @@ impl SmtpCoroutine for SmtpAuthAnonymous {
 impl SmtpAuthAnonymous {
     fn advance_after_auth(&mut self) {
         let _ = self.payload.take();
+        debug!("authenticated");
         if self.opts.ensure_capabilities {
             let domain = self.domain.take().expect("domain taken twice");
             self.state = State::Ehlo(SmtpEhlo::new(domain));
@@ -224,8 +235,8 @@ impl SmtpAuthAnonymous {
 }
 
 enum State {
-    Send(SendSmtpCommand<SmtpAuthCommand<'static>>),
-    Continue(SendSmtpCommand<SmtpAuthData>),
+    Send(SmtpCommandSend<SmtpAuthCommand<'static>>),
+    Continue(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
     Done,
 }
@@ -243,12 +254,19 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use crate::rfc5321::types::domain::Domain;
+    use core::str::from_utf8;
 
-    use super::*;
+    use alloc::{borrow::Cow, vec::Vec};
 
-    fn domain() -> EhloDomain<'static> {
-        EhloDomain::Domain(Domain(Cow::Borrowed("example.com")))
+    use crate::{
+        coroutine::*,
+        rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
+        sasl::auth_anonymous::*,
+        send::SmtpCommandSendError,
+    };
+
+    fn domain() -> SmtpEhloDomain<'static> {
+        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")))
     }
 
     #[test]
@@ -272,7 +290,7 @@ mod tests {
         let mut auth = SmtpAuthAnonymous::new(None, domain(), opts);
 
         let bytes = expect_wants_write(&mut auth, None);
-        let line = core::str::from_utf8(&bytes).expect("utf8 command");
+        let line = from_utf8(&bytes).expect("utf8 command");
         assert!(line.contains("AUTH ANONYMOUS"));
 
         expect_wants_read(&mut auth);
@@ -318,11 +336,9 @@ mod tests {
         let err = expect_complete_err(&mut auth, b"");
         assert!(matches!(
             err,
-            SmtpAuthAnonymousError::Send(SendSmtpCommandError::Eof)
+            SmtpAuthAnonymousError::Send(SmtpCommandSendError::Eof)
         ));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpAuthAnonymous, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

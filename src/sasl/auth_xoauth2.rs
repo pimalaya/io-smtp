@@ -18,7 +18,7 @@
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::types::{domain::Domain, ehlo_domain::EhloDomain},
+//!     rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
 //!     sasl::auth_xoauth2::{SmtpAuthXoauth2, SmtpAuthXoauth2Options},
 //! };
 //!
@@ -28,7 +28,7 @@
 //! let mut buf = [0u8; 4096];
 //!
 //! let token = SecretString::from("ya29.tokenvalue".to_string());
-//! let domain = EhloDomain::Domain(Domain(Cow::Borrowed("client.example.org")));
+//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("client.example.org")));
 //! let opts = SmtpAuthXoauth2Options::default();
 //! let mut coroutine = SmtpAuthXoauth2::new("alice@example.org", &token, domain, opts);
 //! let mut arg = None;
@@ -53,12 +53,13 @@ use core::fmt;
 use alloc::{
     borrow::Cow,
     string::{String, ToString},
+    vec,
     vec::Vec,
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as base64};
 use bounded_static::IntoBoundedStatic;
-use log::trace;
+use log::debug;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use thiserror::Error;
 
@@ -67,7 +68,7 @@ use crate::{
     rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
     rfc5321::{
         ehlo::{SmtpEhlo, SmtpEhloError},
-        types::{ehlo_domain::EhloDomain, reply_code::ReplyCode},
+        types::{ehlo_domain::SmtpEhloDomain, reply_code::SmtpReplyCode},
     },
     send::*,
     smtp_try,
@@ -98,12 +99,21 @@ impl Default for SmtpAuthXoauth2Options {
 /// Failure causes during the SMTP AUTH XOAUTH2 exchange.
 #[derive(Debug, Error)]
 pub enum SmtpAuthXoauth2Error {
+    /// The server rejected the authentication.
     #[error("SMTP AUTH XOAUTH2 failed: rejected {code} {message}")]
-    Rejected { code: u16, message: String },
+    Rejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text, or the decoded error detail.
+        message: String,
+    },
+    /// The server accepted before the expected challenge.
     #[error("SMTP AUTH XOAUTH2 failed: server did not send the expected continuation request")]
     ExpectedContinuationRequest,
+    /// The underlying command exchange failed.
     #[error("SMTP AUTH XOAUTH2 failed: {0}")]
-    Send(#[from] SendSmtpCommandError),
+    Send(#[from] SmtpCommandSendError),
+    /// The post-authentication capability refresh failed.
     #[error(transparent)]
     Ehlo(#[from] SmtpEhloError),
 }
@@ -112,17 +122,19 @@ pub enum SmtpAuthXoauth2Error {
 /// TLS-protected before calling this.
 pub struct SmtpAuthXoauth2 {
     state: State,
-    domain: Option<EhloDomain<'static>>,
+    domain: Option<SmtpEhloDomain<'static>>,
     payload: Option<Vec<u8>>,
     error_detail: Option<String>,
     opts: SmtpAuthXoauth2Options,
 }
 
 impl SmtpAuthXoauth2 {
+    /// Creates the coroutine from the username, the bearer token and
+    /// the client identity used by the capability refresh.
     pub fn new(
         username: &str,
         token: &SecretString,
-        domain: EhloDomain<'_>,
+        domain: SmtpEhloDomain<'_>,
         opts: SmtpAuthXoauth2Options,
     ) -> Self {
         let payload = build_payload(username, token);
@@ -132,13 +144,13 @@ impl SmtpAuthXoauth2 {
                 mechanism: Cow::Borrowed(XOAUTH2),
                 initial_response: Some(SecretBox::new(payload.clone().into_boxed_slice())),
             };
-            State::Send(SendSmtpCommand::new(cmd))
+            State::Send(SmtpCommandSend::new(cmd))
         } else {
             let cmd = SmtpAuthCommand {
                 mechanism: Cow::Borrowed(XOAUTH2),
                 initial_response: None,
             };
-            State::Send(SendSmtpCommand::new(cmd))
+            State::Send(SmtpCommandSend::new(cmd))
         };
 
         Self {
@@ -157,13 +169,11 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            trace!("auth xoauth2: {}", self.state);
-
             match &mut self.state {
                 State::Send(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == ReplyCode::AUTH_SUCCESSFUL {
+                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
                         if self.opts.initial_request {
                             self.advance_after_auth();
                             continue;
@@ -173,24 +183,27 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
                         ));
                     }
 
-                    if out.response.code == ReplyCode::AUTH_CONTINUE {
+                    if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
                         if self.opts.initial_request {
-                            // Server is asking us to ack the JSON
-                            // error detail (XOAUTH2 failure flow).
+                            // NOTE: the server is asking us to ack
+                            // the JSON error detail (XOAUTH2 failure
+                            // flow).
                             let text = out.response.text().0.trim_start();
                             if let Ok(detail_bytes) = base64.decode(text.as_bytes()) {
                                 self.error_detail = String::from_utf8(detail_bytes).ok();
                             }
 
                             let ack = SmtpAuthData::r#continue(vec![0x01u8]);
-                            self.state = State::AckError(SendSmtpCommand::new(ack));
+                            self.state = State::AckError(SmtpCommandSend::new(ack));
+                            debug!("error detail received, acknowledging");
                             continue;
                         }
 
-                        // Non-IR: send the credentials now.
+                        // NOTE: non-IR: send the credentials now.
                         let payload = self.payload.take().expect("payload taken twice");
                         let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
-                        self.state = State::Continue(SendSmtpCommand::new(data));
+                        self.state = State::Continue(SmtpCommandSend::new(data));
+                        debug!("challenge received, sending credentials");
                         continue;
                     }
 
@@ -204,19 +217,20 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
                 State::Continue(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == ReplyCode::AUTH_SUCCESSFUL {
+                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
                         self.advance_after_auth();
                         continue;
                     }
 
-                    if out.response.code == ReplyCode::AUTH_CONTINUE {
+                    if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
                         let text = out.response.text().0.trim_start();
                         if let Ok(detail_bytes) = base64.decode(text.as_bytes()) {
                             self.error_detail = String::from_utf8(detail_bytes).ok();
                         }
 
                         let ack = SmtpAuthData::r#continue(vec![0x01u8]);
-                        self.state = State::AckError(SendSmtpCommand::new(ack));
+                        self.state = State::AckError(SmtpCommandSend::new(ack));
+                        debug!("error detail received, acknowledging");
                         continue;
                     }
 
@@ -242,6 +256,7 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
                 }
                 State::Ehlo(ehlo) => {
                     let _ = smtp_try!(ehlo, arg);
+                    debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
                 State::Done => return SmtpCoroutineState::Complete(Ok(())),
@@ -253,6 +268,7 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
 impl SmtpAuthXoauth2 {
     fn advance_after_auth(&mut self) {
         let _ = self.payload.take();
+        debug!("authenticated");
         if self.opts.ensure_capabilities {
             let domain = self.domain.take().expect("domain taken twice");
             self.state = State::Ehlo(SmtpEhlo::new(domain));
@@ -263,9 +279,9 @@ impl SmtpAuthXoauth2 {
 }
 
 enum State {
-    Send(SendSmtpCommand<SmtpAuthCommand<'static>>),
-    Continue(SendSmtpCommand<SmtpAuthData>),
-    AckError(SendSmtpCommand<SmtpAuthData>),
+    Send(SmtpCommandSend<SmtpAuthCommand<'static>>),
+    Continue(SmtpCommandSend<SmtpAuthData>),
+    AckError(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
     Done,
 }
@@ -298,12 +314,19 @@ fn build_payload(username: &str, token: &SecretString) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use crate::rfc5321::types::domain::Domain;
+    use alloc::{borrow::Cow, string::ToString, vec::Vec};
 
-    use super::*;
+    use secrecy::SecretString;
 
-    fn domain() -> EhloDomain<'static> {
-        EhloDomain::Domain(Domain(Cow::Borrowed("example.com")))
+    use crate::{
+        coroutine::*,
+        rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
+        sasl::auth_xoauth2::*,
+        send::SmtpCommandSendError,
+    };
+
+    fn domain() -> SmtpEhloDomain<'static> {
+        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")))
     }
 
     fn token() -> SecretString {
@@ -381,11 +404,9 @@ mod tests {
         let err = expect_complete_err(&mut auth, b"");
         assert!(matches!(
             err,
-            SmtpAuthXoauth2Error::Send(SendSmtpCommandError::Eof)
+            SmtpAuthXoauth2Error::Send(SmtpCommandSendError::Eof)
         ));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpAuthXoauth2, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

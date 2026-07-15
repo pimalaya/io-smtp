@@ -1,4 +1,7 @@
-//! Module dedicated to the SMTP greeting.
+//! SMTP greeting (RFC 5321 §4.2).
+//!
+//! The 220 banner the server sends right after the transport
+//! handshake, carrying its domain and an optional text.
 
 use core::fmt;
 
@@ -7,18 +10,18 @@ use alloc::vec::Vec;
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
 
-use crate::rfc5321::types::{domain::Domain, text::Text};
+use crate::rfc5321::types::{domain::SmtpDomain, text::SmtpText};
 
 /// Server greeting sent upon connection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]
-pub struct Greeting<'a> {
+pub struct SmtpGreeting<'a> {
     /// The server's domain name
-    pub domain: Domain<'a>,
+    pub domain: SmtpDomain<'a>,
     /// Optional greeting text (from the first greeting line)
-    pub text: Option<Text<'a>>,
+    pub text: Option<SmtpText<'a>>,
 }
 
-impl Greeting<'_> {
+impl SmtpGreeting<'_> {
     /// Returns true if `buf` contains a complete greeting.
     ///
     /// A greeting is complete when the last CRLF-terminated line begins with
@@ -40,17 +43,18 @@ impl Greeting<'_> {
         last_line.len() >= 4 && last_line[3] == b' '
     }
 
-    pub fn parse<'a>(buf: &'a [u8]) -> Result<Greeting<'a>, Vec<Rich<'a, u8>>> {
+    /// Parses a greeting from raw bytes.
+    pub fn parse<'a>(buf: &'a [u8]) -> Result<SmtpGreeting<'a>, Vec<Rich<'a, u8>>> {
         parsers::greeting().parse(buf).into_result()
     }
 
     /// Creates a new greeting.
-    pub fn new<'a>(domain: Domain<'a>, text: Option<Text<'a>>) -> Greeting<'a> {
-        Greeting { domain, text }
+    pub fn new<'a>(domain: SmtpDomain<'a>, text: Option<SmtpText<'a>>) -> SmtpGreeting<'a> {
+        SmtpGreeting { domain, text }
     }
 }
 
-impl fmt::Display for Greeting<'_> {
+impl fmt::Display for SmtpGreeting<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "220 {}", self.domain)?;
 
@@ -63,12 +67,14 @@ impl fmt::Display for Greeting<'_> {
 }
 
 pub(crate) mod parsers {
+    //! Chumsky parser for the SMTP greeting.
+
     use alloc::vec::Vec;
 
     use chumsky::prelude::*;
 
     use crate::{
-        rfc5321::types::{domain::parsers::domain, greeting::Greeting, text::parsers::text},
+        rfc5321::types::{domain::parsers::domain, greeting::SmtpGreeting, text::parsers::text},
         utils::parsers::{Extra, crlf, sp},
     };
 
@@ -85,29 +91,29 @@ pub(crate) mod parsers {
     ///
     /// Only the domain and text from the first line are retained; continuation
     /// lines carry informational text that clients do not need to act on.
-    pub(crate) fn greeting<'a>() -> impl Parser<'a, &'a [u8], Greeting<'a>, Extra<'a>> + Clone {
-        // Single-line: "220 " domain [SP text] CRLF
+    pub(crate) fn greeting<'a>() -> impl Parser<'a, &'a [u8], SmtpGreeting<'a>, Extra<'a>> + Clone {
+        // NOTE: single-line: "220 " domain [SP text] CRLF
         let single = just(b"220" as &[u8])
             .ignore_then(sp())
             .ignore_then(domain())
             .then(sp().ignore_then(text()).or_not())
             .then_ignore(crlf())
-            .map(|(domain, text)| Greeting { domain, text });
+            .map(|(domain, text)| SmtpGreeting { domain, text });
 
-        // Multi-line first line: "220-" domain [SP text] CRLF
+        // NOTE: multi-line first line: "220-" domain [SP text] CRLF
         let multi_first = just(b"220" as &[u8])
             .ignore_then(just(b'-'))
             .ignore_then(domain())
             .then(sp().ignore_then(text()).or_not())
             .then_ignore(crlf());
 
-        // Continuation lines: "220-" [text] CRLF
+        // NOTE: continuation lines: "220-" [text] CRLF
         let multi_cont = just(b"220" as &[u8])
             .then_ignore(just(b'-'))
             .ignore_then(text().or_not())
             .then_ignore(crlf());
 
-        // Final line: "220 " [text] CRLF
+        // NOTE: final line: "220 " [text] CRLF
         let multi_last = just(b"220" as &[u8])
             .ignore_then(sp())
             .ignore_then(text().or_not())
@@ -118,7 +124,7 @@ pub(crate) mod parsers {
             .then(multi_last)
             .map(|((first, _conts), _last)| {
                 let (domain, text) = first;
-                Greeting { domain, text }
+                SmtpGreeting { domain, text }
             });
 
         choice((multi, single)).labelled("greeting")

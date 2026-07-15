@@ -1,7 +1,11 @@
-//! Module dedicated to the SMTP reply code.
+//! SMTP reply code (RFC 5321 §4.2).
+//!
+//! The 3-digit code opening every reply line, with constants for the
+//! codes defined by RFC 5321 and RFC 4954.
+
+use core::fmt;
 
 use alloc::vec::Vec;
-use core::fmt;
 
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
@@ -11,7 +15,7 @@ use chumsky::prelude::*;
 /// Each digit carries independent meaning: `class` (1st digit) signals the
 /// broad outcome, `subject` (2nd digit) and `detail` (3rd digit) refine it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Hash, ToStatic)]
-pub struct ReplyCode {
+pub struct SmtpReplyCode {
     /// First digit: 2 (positive completion), 3 (positive intermediate),
     /// 4 (transient negative), or 5 (permanent negative).
     pub class: u8,
@@ -21,8 +25,7 @@ pub struct ReplyCode {
     pub detail: u8,
 }
 
-impl ReplyCode {
-    // Positive Completion (2xx)
+impl SmtpReplyCode {
     /// 211 System status
     pub const SYSTEM_STATUS: Self = Self {
         class: 2,
@@ -226,7 +229,8 @@ impl ReplyCode {
         detail: 5,
     };
 
-    pub fn parse<'a>(bytes: &'a [u8]) -> Result<ReplyCode, Vec<Rich<'a, u8>>> {
+    /// Parses a reply code from raw bytes, consuming the whole input.
+    pub fn parse<'a>(bytes: &'a [u8]) -> Result<SmtpReplyCode, Vec<Rich<'a, u8>>> {
         parsers::reply_code()
             .then_ignore(end())
             .parse(bytes)
@@ -269,28 +273,30 @@ impl ReplyCode {
     }
 }
 
-impl fmt::Display for ReplyCode {
+impl fmt::Display for SmtpReplyCode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}{}{}", self.class, self.subject, self.detail)
     }
 }
 
 pub(crate) mod parsers {
+    //! Chumsky parser for the SMTP reply code.
+
     use chumsky::prelude::*;
 
-    use crate::{rfc5321::types::reply_code::ReplyCode, utils::parsers::Extra};
+    use crate::{rfc5321::types::reply_code::SmtpReplyCode, utils::parsers::Extra};
 
     /// SMTP reply code parser.
     ///
     /// ```abnf
     /// Reply-code = %x32-35 %x30-39 %x30-39
     /// ```
-    pub(crate) fn reply_code<'a>() -> impl Parser<'a, &'a [u8], ReplyCode, Extra<'a>> + Clone {
+    pub(crate) fn reply_code<'a>() -> impl Parser<'a, &'a [u8], SmtpReplyCode, Extra<'a>> + Clone {
         any()
             .filter(|b| matches!(b, b'2'..=b'5'))
             .then(any().filter(|b: &u8| b.is_ascii_digit()))
             .then(any().filter(|b: &u8| b.is_ascii_digit()))
-            .map(|((class, subject), detail)| ReplyCode {
+            .map(|((class, subject), detail)| SmtpReplyCode {
                 class: class - b'0',
                 subject: subject - b'0',
                 detail: detail - b'0',

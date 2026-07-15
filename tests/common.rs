@@ -1,7 +1,7 @@
 //! Shared helpers for provider integration tests.
 //!
-//! Each test drives the raw coroutine loop against a live SMTP
-//! server using blocking [`std::net`] I/O.
+//! Each test pumps the raw coroutine loop against a live SMTP
+//! server using blocking std I/O.
 
 #![allow(dead_code)]
 
@@ -20,8 +20,8 @@ use io_smtp::{
         rcpt::SmtpRcpt,
         rset::SmtpRset,
         types::{
-            domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath,
-            local_part::LocalPart, mailbox::Mailbox, reverse_path::ReversePath,
+            domain::SmtpDomain, ehlo_domain::SmtpEhloDomain, forward_path::SmtpForwardPath,
+            local_part::SmtpLocalPart, mailbox::SmtpMailbox, reverse_path::SmtpReversePath,
         },
     },
     sasl::{
@@ -77,12 +77,12 @@ fn read_chunk<S: Read>(stream: &mut S, buf: &mut [u8]) -> Vec<u8> {
 }
 
 fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
-    let domain = Domain::parse(b"pimalaya.org").unwrap();
-    let ehlo_domain: EhloDomain<'static> = domain.clone().into();
+    let domain = SmtpDomain::parse(b"pimalaya.org").unwrap();
+    let ehlo_domain: SmtpEhloDomain<'static> = domain.clone().into();
 
     let mut buf = [0u8; 4096];
 
-    // -- GREETING -----------------------------------------------------------
+    // NOTE: GREETING step.
 
     let mut coroutine = SmtpGreetingGet::new();
     let mut chunk: Vec<u8>;
@@ -100,7 +100,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
         }
     }
 
-    // -- HELO ---------------------------------------------------------------
+    // NOTE: HELO step.
 
     let mut coroutine = SmtpHelo::new(domain);
     let mut chunk: Vec<u8>;
@@ -120,7 +120,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
         }
     }
 
-    // -- EHLO ---------------------------------------------------------------
+    // NOTE: EHLO step.
 
     let mut coroutine = SmtpEhlo::new(ehlo_domain.clone());
     let mut chunk: Vec<u8>;
@@ -140,7 +140,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
         }
     }
 
-    // -- AUTH ---------------------------------------------------------------
+    // NOTE: AUTH step.
 
     match auth {
         Auth::None => {}
@@ -196,7 +196,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
         }
     }
 
-    // -- NOOP ---------------------------------------------------------------
+    // NOTE: NOOP step.
 
     let mut coroutine = SmtpNoop::new();
     let mut chunk: Vec<u8>;
@@ -216,18 +216,18 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
         }
     }
 
-    // -- Build paths (shared across the aborted and real transactions) -----
+    // NOTE: Build paths (shared across the aborted and real transactions) step.
 
     let (local, domain_part) = email.split_once('@').unwrap();
-    let mailbox = Mailbox {
-        local_part: LocalPart(local.to_owned().into()),
-        domain: Domain::parse(domain_part.as_bytes()).unwrap().into(),
+    let mailbox = SmtpMailbox {
+        local_part: SmtpLocalPart(local.to_owned().into()),
+        domain: SmtpDomain::parse(domain_part.as_bytes()).unwrap().into(),
     };
 
-    let reverse_path = ReversePath::Mailbox(mailbox.clone());
-    let forward_path = ForwardPath(mailbox);
+    let reverse_path = SmtpReversePath::SmtpMailbox(mailbox.clone());
+    let forward_path = SmtpForwardPath(mailbox);
 
-    // -- MAIL FROM -> RCPT TO -> RSET (aborted transaction) ----------------
+    // NOTE: MAIL FROM -> RCPT TO -> RSET (aborted transaction) step.
 
     let mut coroutine = SmtpMail::new(reverse_path.clone(), Vec::new());
     let mut chunk: Vec<u8>;
@@ -283,7 +283,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
         }
     }
 
-    // -- MAIL FROM -> RCPT TO -> DATA (actual send) ------------------------
+    // NOTE: MAIL FROM -> RCPT TO -> DATA (actual send) step.
 
     let eml = [
         &format!("From: io-smtp test <{email}>"),
@@ -315,7 +315,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
         }
     }
 
-    // -- QUIT ---------------------------------------------------------------
+    // NOTE: QUIT step.
 
     let mut coroutine = SmtpQuit::new();
     let mut chunk: Vec<u8>;

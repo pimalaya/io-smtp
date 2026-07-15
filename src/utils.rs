@@ -1,6 +1,10 @@
-//! Functions that may come in handy.
+//! Shared helpers spanning the RFC modules.
+//!
+//! Hosts the byte-escaping helper used by the coroutine traces and
+//! the chumsky parser building blocks shared by every wire-format
+//! parser.
 
-use alloc::{borrow::Cow, string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 
 /// Converts bytes into a ready-to-be-printed form.
 pub fn escape_byte_string(bytes: impl AsRef<[u8]>) -> String {
@@ -28,172 +32,17 @@ pub fn escape_byte_string(bytes: impl AsRef<[u8]>) -> String {
         .join("")
 }
 
-pub mod indicators {
-    //! Character class indicators for SMTP (RFC 5321).
-
-    /// Any 7-bit US-ASCII character, excluding NUL
-    ///
-    /// CHAR = %x01-7F
-    #[inline]
-    pub fn is_char(byte: u8) -> bool {
-        matches!(byte, 0x01..=0x7f)
-    }
-
-    /// Controls
-    ///
-    /// CTL = %x00-1F / %x7F
-    #[inline]
-    pub fn is_ctl(byte: u8) -> bool {
-        matches!(byte, 0x00..=0x1f | 0x7f)
-    }
-
-    /// SMTP atext characters (RFC 5321/5322)
-    ///
-    /// ```abnf
-    /// atext = ALPHA / DIGIT /
-    ///         "!" / "#" / "$" / "%" / "&" / "'" / "*" /
-    ///         "+" / "-" / "/" / "=" / "?" / "^" / "_" /
-    ///         "`" / "{" / "|" / "}" / "~"
-    /// ```
-    #[inline]
-    pub fn is_atext(byte: u8) -> bool {
-        byte.is_ascii_alphanumeric()
-            || matches!(
-                byte,
-                b'!' | b'#'
-                    | b'$'
-                    | b'%'
-                    | b'&'
-                    | b'\''
-                    | b'*'
-                    | b'+'
-                    | b'-'
-                    | b'/'
-                    | b'='
-                    | b'?'
-                    | b'^'
-                    | b'_'
-                    | b'`'
-                    | b'{'
-                    | b'|'
-                    | b'}'
-                    | b'~'
-            )
-    }
-
-    /// SMTP qtext characters (RFC 5321)
-    ///
-    /// ```abnf
-    /// qtext = %d32-33 / %d35-91 / %d93-126  ; printable except \ and "
-    /// ```
-    #[inline]
-    pub fn is_qtext(byte: u8) -> bool {
-        matches!(byte, 32..=33 | 35..=91 | 93..=126)
-    }
-
-    /// Text string characters for SMTP response text
-    ///
-    /// ```abnf
-    /// textstring = 1*(%d09 / %d32-126)  ; HT, SP, Printable US-ASCII
-    /// ```
-    #[inline]
-    pub fn is_text_char(byte: u8) -> bool {
-        byte == 0x09 || matches!(byte, 0x20..=0x7e)
-    }
-
-    /// Let-dig: alphanumeric character (RFC 5321)
-    ///
-    /// ```abnf
-    /// Let-dig = ALPHA / DIGIT
-    /// ```
-    #[inline]
-    pub fn is_let_dig(byte: u8) -> bool {
-        byte.is_ascii_alphanumeric()
-    }
-
-    /// Ldh-str character: alphanumeric or hyphen (RFC 5321)
-    ///
-    /// ```abnf
-    /// Ldh-str = *( ALPHA / DIGIT / "-" ) Let-dig
-    /// ```
-    #[inline]
-    pub fn is_ldh_str_char(byte: u8) -> bool {
-        byte.is_ascii_alphanumeric() || byte == b'-'
-    }
-
-    /// ESMTP keyword character (RFC 5321)
-    ///
-    /// ```abnf
-    /// esmtp-keyword = (ALPHA / DIGIT) *(ALPHA / DIGIT / "-")
-    /// ```
-    #[inline]
-    pub fn is_esmtp_keyword_char(byte: u8) -> bool {
-        byte.is_ascii_alphanumeric() || byte == b'-'
-    }
-
-    /// ESMTP value character (RFC 5321)
-    ///
-    /// ```abnf
-    /// esmtp-value = 1*(%d33-60 / %d62-126)  ; any CHAR excluding "=", SP, and CTL
-    /// ```
-    #[inline]
-    pub fn is_esmtp_value_char(byte: u8) -> bool {
-        matches!(byte, 33..=60 | 62..=126)
-    }
-
-    /// Reply code digit (RFC 5321)
-    #[inline]
-    pub fn is_digit(byte: u8) -> bool {
-        byte.is_ascii_digit()
-    }
-
-    /// Dcontent character for address literals (RFC 5321)
-    ///
-    /// ```abnf
-    /// dcontent = %d33-90 / %d94-126  ; printable except [ \ ]
-    /// ```
-    #[inline]
-    pub fn is_dcontent(byte: u8) -> bool {
-        matches!(byte, 33..=90 | 94..=126)
-    }
-}
-
-pub fn escape_quoted(unescaped: &str) -> Cow<'_, str> {
-    let mut escaped = Cow::Borrowed(unescaped);
-
-    if escaped.contains('\\') {
-        escaped = Cow::Owned(escaped.replace('\\', "\\\\"));
-    }
-
-    if escaped.contains('\"') {
-        escaped = Cow::Owned(escaped.replace('"', "\\\""));
-    }
-
-    escaped
-}
-
-pub fn unescape_quoted(escaped: &str) -> Cow<'_, str> {
-    let mut unescaped = Cow::Borrowed(escaped);
-
-    if unescaped.contains("\\\\") {
-        unescaped = Cow::Owned(unescaped.replace("\\\\", "\\"));
-    }
-
-    if unescaped.contains("\\\"") {
-        unescaped = Cow::Owned(unescaped.replace("\\\"", "\""));
-    }
-
-    unescaped
-}
-
 pub mod parsers {
     //! Chumsky parser helpers for SMTP byte-slice parsing.
 
+    #[cfg(test)]
+    use core::str::from_utf8;
+
     use alloc::{
+        format,
         string::{String, ToString},
         vec::Vec,
     };
-    use core::str::from_utf8;
 
     use chumsky::{
         error::{RichPattern, RichReason},
@@ -201,6 +50,8 @@ pub mod parsers {
         prelude::*,
     };
 
+    /// The extra parser context carried by every parser in this
+    /// crate: rich byte-level errors.
     pub type Extra<'a> = extra::Err<Rich<'a, u8>>;
 
     /// Format a single byte as a printable character or hex escape.
@@ -236,7 +87,7 @@ pub mod parsers {
                 let contexts: Vec<String> = e.contexts().map(|(p, _)| fmt_pattern(p)).collect();
 
                 let msg = match e.reason() {
-                    RichReason::Custom(msg) => format!("{msg}"),
+                    RichReason::Custom(msg) => msg.to_string(),
                     RichReason::ExpectedFound { expected, found } => {
                         let found_str = found
                             .as_ref()
@@ -279,8 +130,10 @@ pub mod parsers {
 
     /// Match the exact bytes in `kw` (case-insensitive ASCII).
     ///
-    /// Prefer `just(kw)` for case-sensitive matches — chumsky generates better
-    /// `ExpectedFound` errors automatically. Use this only when case-folding is needed.
+    /// Prefer `just(kw)` for case-sensitive matches: chumsky
+    /// generates better `ExpectedFound` errors automatically. Use
+    /// this only when case-folding is needed.
+    #[cfg(test)]
     pub fn tag_no_case<'src>(
         kw: &'static [u8],
     ) -> impl Parser<'src, &'src [u8], (), Extra<'src>> + Clone {
@@ -305,30 +158,6 @@ pub mod parsers {
             })
     }
 
-    /// Match zero or more bytes satisfying `f`, return the matched slice.
-    pub fn take_while<'src, F>(
-        f: F,
-    ) -> impl Parser<'src, &'src [u8], &'src [u8], Extra<'src>> + Clone
-    where
-        F: Fn(&u8) -> bool + Clone + 'src,
-    {
-        any().filter(move |b| f(b)).repeated().to_slice()
-    }
-
-    /// Match one or more bytes satisfying `f`, return the matched slice.
-    pub fn take_while1<'src, F>(
-        f: F,
-    ) -> impl Parser<'src, &'src [u8], &'src [u8], Extra<'src>> + Clone
-    where
-        F: Fn(&u8) -> bool + Clone + 'src,
-    {
-        any()
-            .filter(move |b| f(b))
-            .repeated()
-            .at_least(1)
-            .to_slice()
-    }
-
     #[cfg(test)]
     mod tests {
         use alloc::string::String;
@@ -346,7 +175,7 @@ pub mod parsers {
 
         #[test]
         fn expected_found_shows_printable_chars() {
-            // just(b'A') expects 'A', gets 'B'
+            // NOTE: just(b'A') expects 'A', gets 'B'
             let msg = parse_errors(just(b'A'), b"B");
             assert!(msg.contains("'A'"), "expected char literal in: {msg}");
             assert!(msg.contains("'B'"), "found char literal in: {msg}");
@@ -354,7 +183,7 @@ pub mod parsers {
 
         #[test]
         fn expected_found_shows_hex_for_non_printable() {
-            // just(b'\x01') expects 0x01, gets 0x02
+            // NOTE: just(b'\x01') expects 0x01, gets 0x02
             let msg = parse_errors(just(b'\x01'), b"\x02");
             assert!(msg.contains("0x01"), "expected hex in: {msg}");
             assert!(msg.contains("0x02"), "found hex in: {msg}");
@@ -362,14 +191,14 @@ pub mod parsers {
 
         #[test]
         fn expected_found_shows_end_of_input() {
-            // any() on empty input → "found end of input"
+            // NOTE: any() on empty input reports "found end of input"
             let msg = parse_errors(any(), b"");
             assert!(msg.contains("end of input"), "should mention EOF in: {msg}");
         }
 
         #[test]
         fn byte_position_is_included() {
-            // just(b"AB") on b"AC" fails at byte 1 (the 'C')
+            // NOTE: just(b"AB") on b"AC" fails at byte 1 (the 'C')
             let msg = parse_errors(just(b"AB" as &[u8]), b"AC");
             assert!(
                 msg.contains("byte"),
@@ -409,10 +238,11 @@ pub mod parsers {
 
         #[test]
         fn multiple_errors_are_joined_with_semicolon() {
-            // Use choice with two alternatives both failing — produces two errors
+            // NOTE: choice with two failing alternatives produces two
+            // errors; chumsky merges them into one ExpectedFound
+            // mentioning both 'A' and 'B'
             let parser = choice((just(b'A'), just(b'B')));
             let msg = parse_errors(parser, b"C");
-            // Should mention both 'A' and 'B' (chumsky merges into one ExpectedFound)
             assert!(
                 msg.contains("'A'") || msg.contains("'B'"),
                 "alternatives in: {msg}"

@@ -1,3 +1,9 @@
+//! Shared SMTP wire-format types (RFC 5321 §4.1.2 and §4.2).
+//!
+//! One module per grammar production: reply codes, responses, paths,
+//! domains, mailboxes, parameters and greetings, each pairing the
+//! owned type with its byte-slice parser.
+
 pub mod address_literal;
 pub mod atom;
 pub mod domain;

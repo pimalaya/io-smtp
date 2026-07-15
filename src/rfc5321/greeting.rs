@@ -44,20 +44,22 @@ use core::{fmt, mem};
 use alloc::{string::String, vec::Vec};
 
 use bounded_static::IntoBoundedStatic;
-use log::trace;
+use log::{debug, trace};
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc5321::types::greeting::Greeting,
+    rfc5321::types::greeting::SmtpGreeting,
     utils::{escape_byte_string, parsers::format_rich_errors},
 };
 
 /// Failure causes while reading the SMTP greeting.
 #[derive(Clone, Debug, Error)]
 pub enum SmtpGreetingGetError {
+    /// The stream reached EOF before a complete greeting arrived.
     #[error("SMTP greeting failed: reached unexpected EOF on stream")]
     Eof,
+    /// The banner could not be parsed as an SMTP greeting.
     #[error("SMTP greeting failed: parse error: {0}")]
     ParseResponse(String),
 }
@@ -70,6 +72,7 @@ pub struct SmtpGreetingGet {
 }
 
 impl SmtpGreetingGet {
+    /// Creates the coroutine.
     pub fn new() -> Self {
         Self {
             state: State::Read,
@@ -87,12 +90,10 @@ impl Default for SmtpGreetingGet {
 
 impl SmtpCoroutine for SmtpGreetingGet {
     type Yield = SmtpYield;
-    type Return = Result<Greeting<'static>, SmtpGreetingGetError>;
+    type Return = Result<SmtpGreeting<'static>, SmtpGreetingGetError>;
 
     fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            trace!("greeting: {}", self.state);
-
             if mem::take(&mut self.wants_read) {
                 return SmtpCoroutineState::Yielded(SmtpYield::WantsRead);
             }
@@ -103,25 +104,28 @@ impl SmtpCoroutine for SmtpGreetingGet {
                         return SmtpCoroutineState::Complete(Err(SmtpGreetingGetError::Eof));
                     }
                     Some(data) => {
-                        trace!("read SMTP bytes: {}", escape_byte_string(data));
+                        trace!("read bytes: {}", escape_byte_string(data));
                         self.buf.extend_from_slice(data);
 
-                        if !Greeting::is_complete(&self.buf) {
+                        if !SmtpGreeting::is_complete(&self.buf) {
                             self.wants_read = true;
                             continue;
                         }
 
                         self.state = State::Parse;
+                        debug!("greeting complete, parsing");
                     }
                     None => {
                         self.wants_read = true;
                     }
                 },
                 State::Parse => {
-                    return match Greeting::parse(&self.buf) {
+                    return match SmtpGreeting::parse(&self.buf) {
                         Ok(greeting) => {
                             let greeting = greeting.into_static();
                             let _ = mem::take(&mut self.buf);
+                            debug!("greeting parsed");
+                            trace!("{greeting:?}");
                             SmtpCoroutineState::Complete(Ok(greeting))
                         }
                         Err(errors) => {
@@ -153,7 +157,7 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::{coroutine::*, rfc5321::greeting::*};
 
     #[test]
     fn single_line_success_returns_ok() {
@@ -179,7 +183,7 @@ mod tests {
         let mut greeting = SmtpGreetingGet::new();
         expect_wants_read(&mut greeting);
 
-        // partial line: missing CRLF
+        // NOTE: partial line: missing CRLF
         match greeting.resume(Some(b"220 server.example.com")) {
             SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {}
             state => panic!("expected WantsRead, got {state:?}"),
@@ -191,7 +195,7 @@ mod tests {
         let mut greeting = SmtpGreetingGet::new();
         expect_wants_read(&mut greeting);
 
-        // 250 is not a valid greeting code
+        // NOTE: 250 is not a valid greeting code
         let err = expect_complete_err(&mut greeting, b"250 wrong code\r\n");
         assert!(matches!(err, SmtpGreetingGetError::ParseResponse(_)));
     }
@@ -205,8 +209,6 @@ mod tests {
         assert!(matches!(err, SmtpGreetingGetError::Eof));
     }
 
-    // --- utils
-
     fn expect_wants_read(cor: &mut SmtpGreetingGet) {
         match cor.resume(None) {
             SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {}
@@ -214,7 +216,7 @@ mod tests {
         }
     }
 
-    fn expect_complete_ok(cor: &mut SmtpGreetingGet, reply: &[u8]) -> Greeting<'static> {
+    fn expect_complete_ok(cor: &mut SmtpGreetingGet, reply: &[u8]) -> SmtpGreeting<'static> {
         match cor.resume(Some(reply)) {
             SmtpCoroutineState::Complete(Ok(value)) => value,
             state => panic!("expected Complete(Ok), got {state:?}"),

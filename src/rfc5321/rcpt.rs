@@ -14,8 +14,8 @@
 //!     rfc5321::{
 //!         rcpt::SmtpRcpt,
 //!         types::{
-//!             domain::Domain, ehlo_domain::EhloDomain, forward_path::ForwardPath,
-//!             local_part::LocalPart, mailbox::Mailbox,
+//!             domain::SmtpDomain, ehlo_domain::SmtpEhloDomain, forward_path::SmtpForwardPath,
+//!             local_part::SmtpLocalPart, mailbox::SmtpMailbox,
 //!         },
 //!     },
 //! };
@@ -25,9 +25,9 @@
 //!
 //! let mut buf = [0u8; 4096];
 //!
-//! let forward_path = ForwardPath(Mailbox {
-//!     local_part: LocalPart(Cow::Borrowed("alice")),
-//!     domain: EhloDomain::Domain(Domain(Cow::Borrowed("example.com"))),
+//! let forward_path = SmtpForwardPath(SmtpMailbox {
+//!     local_part: SmtpLocalPart(Cow::Borrowed("alice")),
+//!     domain: SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com"))),
 //! });
 //! let mut coroutine = SmtpRcpt::new(forward_path, Vec::new());
 //! let mut arg = None;
@@ -55,12 +55,14 @@ use alloc::{
 };
 
 use bounded_static::IntoBoundedStatic;
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc5321::types::{forward_path::ForwardPath, parameter::Parameter, reply_code::ReplyCode},
+    rfc5321::types::{
+        forward_path::SmtpForwardPath, parameter::SmtpParameter, reply_code::SmtpReplyCode,
+    },
     send::*,
     smtp_try,
 };
@@ -68,9 +70,9 @@ use crate::{
 /// The RCPT TO command (RFC 5321 §4.1.1.3).
 pub struct SmtpRcptCommand<'a> {
     /// The recipient's forward path.
-    pub forward_path: ForwardPath<'a>,
+    pub forward_path: SmtpForwardPath<'a>,
     /// Optional ESMTP parameters (e.g. DSN `NOTIFY=`, `ORCPT=`).
-    pub parameters: Vec<Parameter<'a>>,
+    pub parameters: Vec<SmtpParameter<'a>>,
 }
 
 impl<'a> From<SmtpRcptCommand<'a>> for Vec<u8> {
@@ -89,10 +91,17 @@ impl<'a> From<SmtpRcptCommand<'a>> for Vec<u8> {
 /// Failure causes during the SMTP RCPT TO exchange.
 #[derive(Clone, Debug, Error)]
 pub enum SmtpRcptError {
+    /// The server rejected the RCPT TO command.
     #[error("SMTP RCPT TO failed: rejected {code} {message}")]
-    Rejected { code: u16, message: String },
+    Rejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+    },
+    /// The underlying command exchange failed.
     #[error("SMTP RCPT TO failed: {0}")]
-    Send(#[from] SendSmtpCommandError),
+    Send(#[from] SmtpCommandSendError),
 }
 
 /// I/O-free SMTP RCPT TO coroutine.
@@ -104,14 +113,14 @@ impl SmtpRcpt {
     /// Pass an empty `parameters` vector for the bare `RCPT TO`
     /// form; non-empty entries are appended after the forward path
     /// (e.g. DSN `NOTIFY=`, `ORCPT=`).
-    pub fn new(forward_path: ForwardPath<'_>, parameters: Vec<Parameter<'_>>) -> Self {
+    pub fn new(forward_path: SmtpForwardPath<'_>, parameters: Vec<SmtpParameter<'_>>) -> Self {
         let cmd = SmtpRcptCommand {
             forward_path: forward_path.into_static(),
             parameters: parameters.into_iter().map(|p| p.into_static()).collect(),
         };
 
         Self {
-            state: State::Send(SendSmtpCommand::new(cmd)),
+            state: State::Send(SmtpCommandSend::new(cmd)),
         }
     }
 }
@@ -121,33 +130,27 @@ impl SmtpCoroutine for SmtpRcpt {
     type Return = Result<(), SmtpRcptError>;
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
-        loop {
-            trace!("rcpt: {}", self.state);
+        match &mut self.state {
+            State::Send(send) => {
+                let out = smtp_try!(send, arg);
 
-            match &mut self.state {
-                State::Send(send) => {
-                    let out = smtp_try!(send, arg);
-
-                    if out.response.code == ReplyCode::OK
-                        || out.response.code == ReplyCode::USER_NOT_LOCAL_WILL_FORWARD
-                    {
-                        return SmtpCoroutineState::Complete(Ok(()));
-                    }
-
-                    let code = out.response.code.code();
-                    let message = out.response.text().to_string();
-                    return SmtpCoroutineState::Complete(Err(SmtpRcptError::Rejected {
-                        code,
-                        message,
-                    }));
+                if out.response.code == SmtpReplyCode::OK
+                    || out.response.code == SmtpReplyCode::USER_NOT_LOCAL_WILL_FORWARD
+                {
+                    debug!("rcpt to accepted");
+                    return SmtpCoroutineState::Complete(Ok(()));
                 }
+
+                let code = out.response.code.code();
+                let message = out.response.text().to_string();
+                SmtpCoroutineState::Complete(Err(SmtpRcptError::Rejected { code, message }))
             }
         }
     }
 }
 
 enum State {
-    Send(SendSmtpCommand<SmtpRcptCommand<'static>>),
+    Send(SmtpCommandSend<SmtpRcptCommand<'static>>),
 }
 
 impl fmt::Display for State {
@@ -160,18 +163,24 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use alloc::borrow::Cow;
+    use alloc::{borrow::Cow, vec::Vec};
 
-    use crate::rfc5321::types::{
-        domain::Domain, ehlo_domain::EhloDomain, local_part::LocalPart, mailbox::Mailbox,
+    use crate::{
+        coroutine::*,
+        rfc5321::{
+            rcpt::*,
+            types::{
+                domain::SmtpDomain, ehlo_domain::SmtpEhloDomain, forward_path::SmtpForwardPath,
+                local_part::SmtpLocalPart, mailbox::SmtpMailbox,
+            },
+        },
+        send::SmtpCommandSendError,
     };
 
-    use super::*;
-
-    fn forward_path() -> ForwardPath<'static> {
-        ForwardPath(Mailbox {
-            local_part: LocalPart(Cow::Borrowed("alice")),
-            domain: EhloDomain::Domain(Domain(Cow::Borrowed("example.com"))),
+    fn forward_path() -> SmtpForwardPath<'static> {
+        SmtpForwardPath(SmtpMailbox {
+            local_part: SmtpLocalPart(Cow::Borrowed("alice")),
+            domain: SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com"))),
         })
     }
 
@@ -218,11 +227,9 @@ mod tests {
         let err = expect_complete_err(&mut rcpt, b"");
         assert!(matches!(
             err,
-            SmtpRcptError::Send(SendSmtpCommandError::Eof)
+            SmtpRcptError::Send(SmtpCommandSendError::Eof)
         ));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpRcpt, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

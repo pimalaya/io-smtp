@@ -20,7 +20,7 @@
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::types::{domain::Domain, ehlo_domain::EhloDomain},
+//!     rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
 //!     sasl::auth_login::{SmtpAuthLogin, SmtpAuthLoginOptions},
 //! };
 //!
@@ -30,7 +30,7 @@
 //! let mut buf = [0u8; 4096];
 //!
 //! let password = SecretString::from("secret".to_string());
-//! let domain = EhloDomain::Domain(Domain(Cow::Borrowed("client.example.org")));
+//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("client.example.org")));
 //! let opts = SmtpAuthLoginOptions::default();
 //! let mut coroutine = SmtpAuthLogin::new("alice", &password, domain, opts);
 //! let mut arg = None;
@@ -58,7 +58,7 @@ use alloc::{
 };
 
 use bounded_static::IntoBoundedStatic;
-use log::trace;
+use log::debug;
 use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
@@ -67,7 +67,7 @@ use crate::{
     rfc4954::auth_data::SmtpAuthData,
     rfc5321::{
         ehlo::{SmtpEhlo, SmtpEhloError},
-        types::{ehlo_domain::EhloDomain, reply_code::ReplyCode, text::Text},
+        types::{ehlo_domain::SmtpEhloDomain, reply_code::SmtpReplyCode, text::SmtpText},
     },
     send::*,
     smtp_try,
@@ -107,12 +107,21 @@ impl Default for SmtpAuthLoginOptions {
 /// Failure causes during the SMTP AUTH LOGIN exchange.
 #[derive(Debug, Error)]
 pub enum SmtpAuthLoginError {
+    /// The server rejected the authentication.
     #[error("SMTP AUTH LOGIN failed: rejected {code} {message}")]
-    Rejected { code: u16, message: String },
+    Rejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+    },
+    /// The server accepted before the expected challenge.
     #[error("SMTP AUTH LOGIN failed: server did not send the expected continuation request")]
     ExpectedContinuationRequest,
+    /// The underlying command exchange failed.
     #[error("SMTP AUTH LOGIN failed: {0}")]
-    Send(#[from] SendSmtpCommandError),
+    Send(#[from] SmtpCommandSendError),
+    /// The post-authentication capability refresh failed.
     #[error(transparent)]
     Ehlo(#[from] SmtpEhloError),
 }
@@ -122,19 +131,21 @@ pub struct SmtpAuthLogin {
     state: State,
     username: Option<Vec<u8>>,
     password: Option<Vec<u8>>,
-    domain: Option<EhloDomain<'static>>,
+    domain: Option<SmtpEhloDomain<'static>>,
     opts: SmtpAuthLoginOptions,
 }
 
 impl SmtpAuthLogin {
+    /// Creates the coroutine from the credentials and the client
+    /// identity used by the capability refresh.
     pub fn new(
         login: &str,
         password: &SecretString,
-        domain: EhloDomain<'_>,
+        domain: SmtpEhloDomain<'_>,
         opts: SmtpAuthLoginOptions,
     ) -> Self {
         Self {
-            state: State::Command(SendSmtpCommand::new(SmtpAuthLoginCommand)),
+            state: State::Command(SmtpCommandSend::new(SmtpAuthLoginCommand)),
             username: Some(login.as_bytes().to_vec()),
             password: Some(password.expose_secret().as_bytes().to_vec()),
             domain: Some(domain.into_static()),
@@ -149,13 +160,11 @@ impl SmtpCoroutine for SmtpAuthLogin {
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            trace!("auth login: {}", self.state);
-
             match &mut self.state {
                 State::Command(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code != ReplyCode::AUTH_CONTINUE {
+                    if out.response.code != SmtpReplyCode::AUTH_CONTINUE {
                         return SmtpCoroutineState::Complete(Err(self
                             .rejected_or_missing_challenge(
                                 out.response.code,
@@ -165,12 +174,13 @@ impl SmtpCoroutine for SmtpAuthLogin {
 
                     let username = self.username.take().expect("username taken twice");
                     let data = SmtpAuthData::r#continue(username.into_boxed_slice());
-                    self.state = State::Username(SendSmtpCommand::new(data));
+                    self.state = State::Username(SmtpCommandSend::new(data));
+                    debug!("challenge received, sending username");
                 }
                 State::Username(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code != ReplyCode::AUTH_CONTINUE {
+                    if out.response.code != SmtpReplyCode::AUTH_CONTINUE {
                         return SmtpCoroutineState::Complete(Err(self
                             .rejected_or_missing_challenge(
                                 out.response.code,
@@ -180,12 +190,13 @@ impl SmtpCoroutine for SmtpAuthLogin {
 
                     let password = self.password.take().expect("password taken twice");
                     let data = SmtpAuthData::r#continue(password.into_boxed_slice());
-                    self.state = State::Password(SendSmtpCommand::new(data));
+                    self.state = State::Password(SmtpCommandSend::new(data));
+                    debug!("challenge received, sending password");
                 }
                 State::Password(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == ReplyCode::AUTH_SUCCESSFUL {
+                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
                         self.advance_after_auth();
                         continue;
                     }
@@ -199,6 +210,7 @@ impl SmtpCoroutine for SmtpAuthLogin {
                 }
                 State::Ehlo(ehlo) => {
                     let _ = smtp_try!(ehlo, arg);
+                    debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
                 State::Done => return SmtpCoroutineState::Complete(Ok(())),
@@ -210,6 +222,7 @@ impl SmtpCoroutine for SmtpAuthLogin {
 impl SmtpAuthLogin {
     fn advance_after_auth(&mut self) {
         let _ = self.password.take();
+        debug!("authenticated");
         if self.opts.ensure_capabilities {
             let domain = self.domain.take().expect("domain taken twice");
             self.state = State::Ehlo(SmtpEhlo::new(domain));
@@ -220,11 +233,11 @@ impl SmtpAuthLogin {
 
     fn rejected_or_missing_challenge(
         &self,
-        code: ReplyCode,
-        text: &Text<'_>,
+        code: SmtpReplyCode,
+        text: &SmtpText<'_>,
     ) -> SmtpAuthLoginError {
         if code.is_success() {
-            // 2xx where we expected 334 (would mean the server
+            // NOTE: 2xx where we expected 334 (would mean the server
             // accepted before the challenge).
             SmtpAuthLoginError::ExpectedContinuationRequest
         } else {
@@ -237,9 +250,9 @@ impl SmtpAuthLogin {
 }
 
 enum State {
-    Command(SendSmtpCommand<SmtpAuthLoginCommand>),
-    Username(SendSmtpCommand<SmtpAuthData>),
-    Password(SendSmtpCommand<SmtpAuthData>),
+    Command(SmtpCommandSend<SmtpAuthLoginCommand>),
+    Username(SmtpCommandSend<SmtpAuthData>),
+    Password(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
     Done,
 }
@@ -258,14 +271,19 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use alloc::borrow::Cow;
+    use alloc::{borrow::Cow, string::ToString, vec::Vec};
 
-    use crate::rfc5321::types::domain::Domain;
+    use secrecy::SecretString;
 
-    use super::*;
+    use crate::{
+        coroutine::*,
+        rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
+        sasl::auth_login::*,
+        send::SmtpCommandSendError,
+    };
 
-    fn domain() -> EhloDomain<'static> {
-        EhloDomain::Domain(Domain(Cow::Borrowed("example.com")))
+    fn domain() -> SmtpEhloDomain<'static> {
+        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")))
     }
 
     fn password() -> SecretString {
@@ -352,11 +370,9 @@ mod tests {
         let err = expect_complete_err(&mut auth, b"");
         assert!(matches!(
             err,
-            SmtpAuthLoginError::Send(SendSmtpCommandError::Eof)
+            SmtpAuthLoginError::Send(SmtpCommandSendError::Eof)
         ));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpAuthLogin, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

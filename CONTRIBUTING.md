@@ -1,45 +1,27 @@
 # Contributing guide
 
-Thank you for investing your time in contributing to the I/O SMTP project.
+Thank you for investing your time in contributing to I/O SMTP.
 
-## Development
+Whether you are a human or an AI agent, read these in order before touching the code:
 
-The development environment is managed by [Nix](https://nixos.org/download.html).
-Running `nix-shell` will spawn a shell with everything you need to get started with the lib.
+1. the [Pimalaya README](https://github.com/pimalaya) for what the project is and how its repositories stack;
+2. the [Pimalaya CONTRIBUTING](https://github.com/pimalaya/.github/blob/master/CONTRIBUTING.md) guide, which chains to the shared architecture and guidelines;
+3. the inline header documentation, starting with src/lib.rs: it is the architecture document of this crate;
+4. the docs/ folder for the development history and living plans.
 
-If you do not want to use Nix, you can either use [rustup](https://rust-lang.github.io/rustup/index.html):
+Everything below documents only what differs from the Pimalaya standards.
 
-```
-rustup update
-```
+## Feature matrix
 
-or install manually the following dependencies:
+On top of the standard layered checks, io-smtp gates the SCRAM-SHA-256 mechanism behind the scram feature (it pulls the hmac, pbkdf2, rand and sha2 crates), so build both sides of that gate too:
 
-- [cargo](https://doc.rust-lang.org/cargo/)
-- [rustc](https://doc.rust-lang.org/stable/rustc/platform-support.html) (`>= 1.87`)
-
-## Build
-
-```
-cargo build
+```sh
+cargo build --no-default-features                    # coroutines only, no std leak
+cargo build --no-default-features --features scram   # coroutines + SCRAM-SHA-256
+cargo build --no-default-features --features client  # light client, no TLS deps
+cargo build --release                                # full client (default TLS + scram)
 ```
 
-## Test
+## Provider tests
 
-```
-cargo test
-```
-
-## Override dependencies
-
-All Pimalaya crates use `[patch.crates-io]` to point to sibling directories.
-If you want to build io-smtp against a locally modified dependency (e.g. `pimalaya-stream`), add the following to `Cargo.toml`:
-
-```toml
-[patch.crates-io]
-pimalaya-stream.path = "/path/to/stream"
-```
-
-## Commit style
-
-I/O SMTP follows the [conventional commits specification](https://www.conventionalcommits.org/en/v1.0.0/#summary).
+The tests folder ships ignored end-to-end tests against real servers: fastmail and gmail read credentials from environment variables (documented in each file's header), stalwart expects a local instance started with tests/stalwart.sh. Run one with cargo test --test followed by its name and -- --ignored.

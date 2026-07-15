@@ -1,4 +1,4 @@
-//! RFC 3461 — Simple Mail Transfer Protocol (SMTP) Service Extension
+//! RFC 3461: Simple Mail Transfer Protocol (SMTP) Service Extension
 //! for Delivery Status Notifications (DSNs).
 //!
 //! Provides type-safe ESMTP parameter constructors for MAIL FROM and

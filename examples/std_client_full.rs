@@ -11,7 +11,7 @@ use std::{borrow::Cow, env, error::Error};
 
 use io_smtp::{
     client::SmtpClientStd,
-    rfc5321::types::{domain::Domain, ehlo_domain::EhloDomain},
+    rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
 };
 use pimalaya_stream::{sasl::Sasl, tls::Tls};
 use url::Url;
@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let url = Url::parse(&env::var("URL")?)?;
     let domain = env::var("DOMAIN").unwrap_or_else(|_| "localhost".to_string());
-    let domain = EhloDomain::Domain(Domain(Cow::Owned(domain)));
+    let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Owned(domain)));
     let tls = Tls::default();
 
     let mut client = SmtpClientStd::connect(&url, &tls, false, domain.clone(), None::<Sasl>)?;

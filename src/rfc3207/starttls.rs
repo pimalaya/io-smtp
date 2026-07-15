@@ -48,10 +48,10 @@ use alloc::{
     vec::Vec,
 };
 
-use log::trace;
+use log::debug;
 use thiserror::Error;
 
-use crate::{coroutine::*, rfc5321::types::reply_code::ReplyCode, send::*, smtp_try};
+use crate::{coroutine::*, rfc5321::types::reply_code::SmtpReplyCode, send::*, smtp_try};
 
 /// The STARTTLS command (RFC 3207).
 pub struct SmtpStartTlsCommand;
@@ -65,10 +65,17 @@ impl From<SmtpStartTlsCommand> for Vec<u8> {
 /// Failure causes during the SMTP STARTTLS handshake.
 #[derive(Clone, Debug, Error)]
 pub enum SmtpStartTlsError {
+    /// The server rejected the STARTTLS command.
     #[error("SMTP STARTTLS failed: rejected {code} {message}")]
-    Rejected { code: u16, message: String },
+    Rejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+    },
+    /// The underlying command exchange failed.
     #[error("SMTP STARTTLS failed: {0}")]
-    Send(#[from] SendSmtpCommandError),
+    Send(#[from] SmtpCommandSendError),
 }
 
 /// I/O-free SMTP STARTTLS coroutine.
@@ -77,9 +84,10 @@ pub struct SmtpStartTls {
 }
 
 impl SmtpStartTls {
+    /// Creates the coroutine.
     pub fn new() -> Self {
         Self {
-            state: State::Send(SendSmtpCommand::new(SmtpStartTlsCommand)),
+            state: State::Send(SmtpCommandSend::new(SmtpStartTlsCommand)),
         }
     }
 }
@@ -95,31 +103,25 @@ impl SmtpCoroutine for SmtpStartTls {
     type Return = Result<Vec<u8>, SmtpStartTlsError>;
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
-        loop {
-            trace!("starttls: {}", self.state);
+        match &mut self.state {
+            State::Send(send) => {
+                let out = smtp_try!(send, arg);
 
-            match &mut self.state {
-                State::Send(send) => {
-                    let out = smtp_try!(send, arg);
-
-                    if out.response.code == ReplyCode::SERVICE_READY {
-                        return SmtpCoroutineState::Complete(Ok(Vec::new()));
-                    }
-
-                    let code = out.response.code.code();
-                    let message = out.response.text().to_string();
-                    return SmtpCoroutineState::Complete(Err(SmtpStartTlsError::Rejected {
-                        code,
-                        message,
-                    }));
+                if out.response.code == SmtpReplyCode::SERVICE_READY {
+                    debug!("starttls accepted, ready to upgrade");
+                    return SmtpCoroutineState::Complete(Ok(Vec::new()));
                 }
+
+                let code = out.response.code.code();
+                let message = out.response.text().to_string();
+                SmtpCoroutineState::Complete(Err(SmtpStartTlsError::Rejected { code, message }))
             }
         }
     }
 }
 
 enum State {
-    Send(SendSmtpCommand<SmtpStartTlsCommand>),
+    Send(SmtpCommandSend<SmtpStartTlsCommand>),
 }
 
 impl fmt::Display for State {
@@ -132,7 +134,9 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use alloc::vec::Vec;
+
+    use crate::{coroutine::*, rfc3207::starttls::*, send::SmtpCommandSendError};
 
     #[test]
     fn success_returns_empty_remaining() {
@@ -169,11 +173,9 @@ mod tests {
         let err = expect_complete_err(&mut starttls, b"");
         assert!(matches!(
             err,
-            SmtpStartTlsError::Send(SendSmtpCommandError::Eof)
+            SmtpStartTlsError::Send(SmtpCommandSendError::Eof)
         ));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpStartTls, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

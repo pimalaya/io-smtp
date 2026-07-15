@@ -18,7 +18,7 @@
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::types::{domain::Domain, ehlo_domain::EhloDomain},
+//!     rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
 //!     rfc7677::auth_scram_sha_256::{SmtpAuthScramSha256, SmtpAuthScramSha256Options},
 //! };
 //!
@@ -29,7 +29,7 @@
 //!
 //! let password = SecretString::from("secret".to_string());
 //! let nonce = b"fyko+d2lbbFgONRv9qkxdawL";
-//! let domain = EhloDomain::Domain(Domain(Cow::Borrowed("client.example.org")));
+//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("client.example.org")));
 //! let opts = SmtpAuthScramSha256Options::default();
 //! let mut coroutine = SmtpAuthScramSha256::new("alice", &password, nonce, domain, opts);
 //! let mut arg = None;
@@ -60,7 +60,7 @@ use alloc::{
 use base64::{Engine, engine::general_purpose::STANDARD as base64};
 use bounded_static::IntoBoundedStatic;
 use hmac::{Hmac, KeyInit, Mac};
-use log::trace;
+use log::debug;
 use pbkdf2::pbkdf2_hmac;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use sha2::{Digest, Sha256};
@@ -71,7 +71,7 @@ use crate::{
     rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
     rfc5321::{
         ehlo::{SmtpEhlo, SmtpEhloError},
-        types::{ehlo_domain::EhloDomain, reply_code::ReplyCode},
+        types::{ehlo_domain::SmtpEhloDomain, reply_code::SmtpReplyCode},
     },
     send::*,
     smtp_try,
@@ -104,16 +104,27 @@ impl Default for SmtpAuthScramSha256Options {
 /// Failure causes during the SMTP AUTH SCRAM-SHA-256 exchange.
 #[derive(Debug, Error)]
 pub enum SmtpAuthScramSha256Error {
+    /// The server rejected the authentication.
     #[error("SMTP AUTH SCRAM-SHA-256 failed: rejected {code} {message}")]
-    Rejected { code: u16, message: String },
+    Rejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+    },
+    /// The server-first-message could not be parsed.
     #[error("SMTP AUTH SCRAM-SHA-256 failed: server-first-message parse error: {0}")]
     ParseServerFirst(String),
+    /// The server nonce does not extend the client nonce.
     #[error("SMTP AUTH SCRAM-SHA-256 failed: server nonce does not start with client nonce")]
     NonceMismatch,
+    /// The server signature does not match the expected one.
     #[error("SMTP AUTH SCRAM-SHA-256 failed: server signature mismatch")]
     ServerSignatureMismatch,
+    /// The underlying command exchange failed.
     #[error("SMTP AUTH SCRAM-SHA-256 failed: {0}")]
-    Send(#[from] SendSmtpCommandError),
+    Send(#[from] SmtpCommandSendError),
+    /// The post-authentication capability refresh failed.
     #[error(transparent)]
     Ehlo(#[from] SmtpEhloError),
 }
@@ -125,17 +136,19 @@ pub struct SmtpAuthScramSha256 {
     state: State,
     client_first_bare: Vec<u8>,
     password: SecretString,
-    domain: Option<EhloDomain<'static>>,
+    domain: Option<SmtpEhloDomain<'static>>,
     expected_server_sig: Vec<u8>,
     opts: SmtpAuthScramSha256Options,
 }
 
 impl SmtpAuthScramSha256 {
+    /// Creates the coroutine from the credentials, the client nonce
+    /// and the client identity used by the capability refresh.
     pub fn new(
         username: &str,
         password: &SecretString,
         nonce: &[u8],
-        domain: EhloDomain<'_>,
+        domain: SmtpEhloDomain<'_>,
         opts: SmtpAuthScramSha256Options,
     ) -> Self {
         let encoded_username = sasl_name(username);
@@ -156,7 +169,7 @@ impl SmtpAuthScramSha256 {
         };
 
         Self {
-            state: State::SendInitial(SendSmtpCommand::new(cmd)),
+            state: State::SendInitial(SmtpCommandSend::new(cmd)),
             client_first_bare,
             password: password.clone(),
             domain: Some(domain.into_static()),
@@ -249,6 +262,7 @@ impl SmtpAuthScramSha256 {
     }
 
     fn advance_after_auth(&mut self) {
+        debug!("authenticated");
         if self.opts.ensure_capabilities {
             let domain = self.domain.take().expect("domain taken twice");
             self.state = State::Ehlo(SmtpEhlo::new(domain));
@@ -264,13 +278,11 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            trace!("auth scram: {}", self.state);
-
             match &mut self.state {
                 State::SendInitial(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code != ReplyCode::AUTH_CONTINUE {
+                    if out.response.code != SmtpReplyCode::AUTH_CONTINUE {
                         let code = out.response.code.code();
                         let message = out.response.text().to_string();
                         return SmtpCoroutineState::Complete(Err(
@@ -303,12 +315,13 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
                     };
 
                     let data = SmtpAuthData::r#continue(client_final.into_boxed_slice());
-                    self.state = State::SendFinal(SendSmtpCommand::new(data));
+                    self.state = State::SendFinal(SmtpCommandSend::new(data));
+                    debug!("server-first received, sending client-final");
                 }
                 State::SendFinal(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code != ReplyCode::AUTH_SUCCESSFUL {
+                    if out.response.code != SmtpReplyCode::AUTH_SUCCESSFUL {
                         let code = out.response.code.code();
                         let message = out.response.text().to_string();
                         return SmtpCoroutineState::Complete(Err(
@@ -336,6 +349,7 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
                 }
                 State::Ehlo(ehlo) => {
                     let _ = smtp_try!(ehlo, arg);
+                    debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
                 State::Done => return SmtpCoroutineState::Complete(Ok(())),
@@ -345,8 +359,8 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
 }
 
 enum State {
-    SendInitial(SendSmtpCommand<SmtpAuthCommand<'static>>),
-    SendFinal(SendSmtpCommand<SmtpAuthData>),
+    SendInitial(SmtpCommandSend<SmtpAuthCommand<'static>>),
+    SendFinal(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
     Done,
 }
@@ -400,12 +414,20 @@ fn strip_enhanced_status(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use crate::rfc5321::types::domain::Domain;
+    use alloc::{borrow::Cow, format, string::ToString, vec::Vec};
 
-    use super::*;
+    use base64::{Engine, engine::general_purpose::STANDARD as base64};
+    use secrecy::SecretString;
 
-    fn domain() -> EhloDomain<'static> {
-        EhloDomain::Domain(Domain(Cow::Borrowed("example.com")))
+    use crate::{
+        coroutine::*,
+        rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
+        rfc7677::auth_scram_sha_256::*,
+        send::SmtpCommandSendError,
+    };
+
+    fn domain() -> SmtpEhloDomain<'static> {
+        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")))
     }
 
     fn password() -> SecretString {
@@ -495,11 +517,9 @@ mod tests {
         let err = expect_complete_err(&mut auth, b"");
         assert!(matches!(
             err,
-            SmtpAuthScramSha256Error::Send(SendSmtpCommandError::Eof)
+            SmtpAuthScramSha256Error::Send(SmtpCommandSendError::Eof)
         ));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpAuthScramSha256, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

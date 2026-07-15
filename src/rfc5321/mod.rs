@@ -1,12 +1,9 @@
-//! RFC 5321 — Simple Mail Transfer Protocol.
+//! RFC 5321: Simple Mail Transfer Protocol.
 //!
-//! Each sub-module exposes a command type (`SmtpEhloCommand`, `SmtpHeloCommand`,
-//! `SmtpMailCommand`, `SmtpRcptCommand`, `SmtpDataCommand`, `SmtpNoopCommand`,
-//! `SmtpRsetCommand`, `SmtpRawCommand`, `SmtpQuitCommand`) that implements
-//! `From<T> for Vec<u8>` for wire serialisation, alongside the I/O-free
-//! coroutine that drives the full request/response exchange.  The `types`
-//! module covers shared wire-format primitives: reply codes, responses, paths,
-//! domains, and greetings.
+//! Each sub-module pairs a command type, serialisable to wire bytes,
+//! with the I/O-free coroutine running the full request/response
+//! exchange. The [`types`] module covers the shared wire-format
+//! primitives: reply codes, responses, paths, domains and greetings.
 
 pub mod data;
 pub mod ehlo;

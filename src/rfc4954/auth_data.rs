@@ -13,8 +13,10 @@ use thiserror::Error;
 /// Errors that can occur while parsing auth data.
 #[derive(Debug, Error)]
 pub enum SmtpAuthDataError {
+    /// The input carries no terminating CRLF yet.
     #[error("Parse SMTP auth data error: incomplete input")]
     Incomplete,
+    /// The base64 payload could not be decoded.
     #[error("Parse SMTP auth data error: {0}")]
     Base64(String),
 }

@@ -8,8 +8,9 @@
 
 let
   inherit (pkgs)
-    pkg-config
     cargo-deny
+    openssl
+    pkg-config
     ;
 
   shell = pimalaya.mkShell {
@@ -23,11 +24,16 @@ let
 
 in
 shell.overrideAttrs (prev: {
+  LD_LIBRARY_PATH = "${prev.LD_LIBRARY_PATH or ""}:" + (pkgs.lib.makeLibraryPath [
+    openssl
+  ]);
+
   nativeBuildInputs = (prev.nativeBuildInputs or [ ]) ++ [
     pkg-config
   ];
 
   buildInputs = (prev.buildInputs or [ ]) ++ [
     cargo-deny
+    openssl
   ];
 })

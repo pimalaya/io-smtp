@@ -1,4 +1,4 @@
-//! RFC 7628 — A Set of Simple Authentication and Security Layer
+//! RFC 7628: A Set of Simple Authentication and Security Layer
 //! (SASL) Mechanisms for OAuth.
 //!
 //! Provides the OAUTHBEARER SASL mechanism for authenticating SMTP

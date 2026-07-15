@@ -10,7 +10,7 @@ use io_smtp::{
     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
     rfc5321::greeting::SmtpGreetingGet,
 };
-use rustls::{ClientConfig, pki_types::ServerName};
+use rustls::{ClientConfig, crypto::ring, pki_types::ServerName};
 use rustls_platform_verifier::ConfigVerifierExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -28,9 +28,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(465);
 
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
+    ring::default_provider().install_default().ok();
 
     let config = Arc::new(ClientConfig::with_platform_verifier()?);
     let connector = TlsConnector::from(config);

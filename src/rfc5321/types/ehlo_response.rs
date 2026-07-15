@@ -1,11 +1,14 @@
-//! Module dedicated to the SMTP EHLO response.
+//! SMTP EHLO response (RFC 5321 §4.1.1.1).
+//!
+//! The multi-line reply to EHLO carrying the server domain and its
+//! capability lines.
 
 use alloc::{borrow::Cow, vec::Vec};
 
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
 
-use crate::rfc5321::types::{domain::Domain, text::Text};
+use crate::rfc5321::types::{domain::SmtpDomain, text::SmtpText};
 
 /// EHLO response containing server capabilities.
 ///
@@ -14,16 +17,16 @@ use crate::rfc5321::types::{domain::Domain, text::Text};
 /// `"STARTTLS"`).  Individual RFC modules are responsible for parsing
 /// the parameters of their own capability.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]
-pub struct EhloResponse<'a> {
+pub struct SmtpEhloResponse<'a> {
     /// The server's domain name.
-    pub domain: Domain<'a>,
+    pub domain: SmtpDomain<'a>,
     /// Optional greeting text on the first line.
-    pub greet: Option<Text<'a>>,
+    pub greet: Option<SmtpText<'a>>,
     /// Server capabilities as raw keyword strings.
     pub capabilities: Vec<Cow<'a, str>>,
 }
 
-impl EhloResponse<'_> {
+impl SmtpEhloResponse<'_> {
     /// Returns true if `buf` contains a complete EHLO response.
     pub fn is_complete(buf: &[u8]) -> bool {
         if !buf.ends_with(b"\r\n") {
@@ -41,7 +44,8 @@ impl EhloResponse<'_> {
         last_line.len() >= 4 && last_line[3] == b' '
     }
 
-    pub fn parse<'a>(buf: &'a [u8]) -> Result<EhloResponse<'a>, Vec<Rich<'a, u8>>> {
+    /// Parses an EHLO response from raw bytes.
+    pub fn parse<'a>(buf: &'a [u8]) -> Result<SmtpEhloResponse<'a>, Vec<Rich<'a, u8>>> {
         parsers::ehlo_response().parse(buf).into_result()
     }
 
@@ -68,13 +72,15 @@ impl EhloResponse<'_> {
             .find(|cap| {
                 cap.split_ascii_whitespace()
                     .next()
-                    .map_or(false, |k| k.eq_ignore_ascii_case(keyword))
+                    .is_some_and(|k| k.eq_ignore_ascii_case(keyword))
             })
             .map(|cap| cap.as_ref())
     }
 }
 
 pub(crate) mod parsers {
+    //! Chumsky parser for the SMTP EHLO response.
+
     use core::str::from_utf8;
 
     use alloc::{borrow::Cow, vec::Vec};
@@ -83,7 +89,7 @@ pub(crate) mod parsers {
 
     use crate::{
         rfc5321::types::{
-            domain::parsers::domain as domain_parser, ehlo_response::EhloResponse,
+            domain::parsers::domain as domain_parser, ehlo_response::SmtpEhloResponse,
             text::parsers::text as text_parser,
         },
         utils::parsers::{Extra, crlf, sp},
@@ -112,7 +118,8 @@ pub(crate) mod parsers {
     ///                  "250" SP ehlo-line CRLF )
     /// ehlo-line      = ehlo-keyword *( SP ehlo-param )
     /// ```
-    pub(crate) fn ehlo_response<'a>() -> impl Parser<'a, &'a [u8], EhloResponse<'a>, Extra<'a>> {
+    pub(crate) fn ehlo_response<'a>() -> impl Parser<'a, &'a [u8], SmtpEhloResponse<'a>, Extra<'a>>
+    {
         just(b"250" as &[u8])
             .ignore_then(choice((just(b'-').to(true), just(b' ').to(false))))
             .then(domain_parser())
@@ -144,7 +151,7 @@ pub(crate) mod parsers {
                     }
                 }
 
-                EhloResponse {
+                SmtpEhloResponse {
                     domain,
                     greet,
                     capabilities,

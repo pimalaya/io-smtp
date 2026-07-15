@@ -8,7 +8,7 @@ use bounded_static_derive::ToStatic;
 ///
 /// Format: class.subject.detail (e.g., 2.1.0, 5.7.1)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ToStatic)]
-pub struct EnhancedStatusCode {
+pub struct SmtpEnhancedStatusCode {
     /// Class: 2 (success), 4 (temporary failure), or 5 (permanent failure)
     pub class: u8,
     /// Subject: 0-999
@@ -17,7 +17,7 @@ pub struct EnhancedStatusCode {
     pub detail: u16,
 }
 
-impl EnhancedStatusCode {
+impl SmtpEnhancedStatusCode {
     /// Creates a new enhanced status code.
     ///
     /// Returns `None` if class is not 2, 4, or 5.
@@ -49,7 +49,7 @@ impl EnhancedStatusCode {
     }
 }
 
-impl fmt::Display for EnhancedStatusCode {
+impl fmt::Display for SmtpEnhancedStatusCode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}.{}.{}", self.class, self.subject, self.detail)
     }

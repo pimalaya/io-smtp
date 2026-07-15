@@ -1,10 +1,11 @@
 //! SIZE EHLO capability (RFC 1870).
 
+use core::num::ParseIntError;
+
 use alloc::{
     borrow::{Cow, ToOwned},
     string::String,
 };
-use core::num::ParseIntError;
 
 use thiserror::Error;
 
@@ -31,9 +32,11 @@ pub struct SmtpSizeCapability(pub u64);
 /// Error returned when parsing a SIZE capability string fails.
 #[derive(Debug, Error)]
 pub enum SmtpSizeCapabilityError {
+    /// The capability line does not start with the SIZE keyword.
     #[error("Invalid capability: expected SIZE, got {0}")]
     InvalidKey(Cow<'static, str>),
-    #[error("Invalid capabliity SIZE value `{1}`")]
+    /// The SIZE value is not a valid integer.
+    #[error("Invalid capability SIZE value `{1}`")]
     InvalidValue(#[source] ParseIntError, String),
 }
 
@@ -51,12 +54,12 @@ impl SmtpSizeCapability {
 
         let size = parts.next().unwrap_or("0");
 
-        return match size.parse::<u64>() {
+        match size.parse::<u64>() {
             Ok(size) => Ok(Self(size)),
             Err(err) => {
-                let size = size.to_owned().into();
+                let size = size.to_owned();
                 Err(SmtpSizeCapabilityError::InvalidValue(err, size))
             }
-        };
+        }
     }
 }

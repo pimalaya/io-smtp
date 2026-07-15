@@ -14,7 +14,7 @@
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
 //!     rfc5321::{
 //!         ehlo::SmtpEhlo,
-//!         types::{domain::Domain, ehlo_domain::EhloDomain},
+//!         types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
 //!     },
 //! };
 //!
@@ -23,7 +23,7 @@
 //!
 //! let mut buf = [0u8; 4096];
 //!
-//! let domain = EhloDomain::Domain(Domain(Cow::Borrowed("example.com")));
+//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")));
 //! let mut coroutine = SmtpEhlo::new(domain);
 //! let mut arg = None;
 //!
@@ -53,19 +53,19 @@ use alloc::{
 };
 
 use bounded_static::IntoBoundedStatic;
-use log::trace;
+use log::{debug, trace};
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc5321::types::{ehlo_domain::EhloDomain, ehlo_response::EhloResponse},
+    rfc5321::types::{ehlo_domain::SmtpEhloDomain, ehlo_response::SmtpEhloResponse},
     utils::{escape_byte_string, parsers::format_rich_errors},
 };
 
 /// The EHLO command (RFC 5321 §4.1.1.1).
 pub struct SmtpEhloCommand<'a> {
     /// The client's domain or address literal.
-    pub domain: EhloDomain<'a>,
+    pub domain: SmtpEhloDomain<'a>,
 }
 
 impl<'a> From<SmtpEhloCommand<'a>> for Vec<u8> {
@@ -80,8 +80,10 @@ impl<'a> From<SmtpEhloCommand<'a>> for Vec<u8> {
 /// Failure causes during the SMTP EHLO exchange.
 #[derive(Clone, Debug, Error)]
 pub enum SmtpEhloError {
+    /// The stream reached EOF before a complete reply arrived.
     #[error("SMTP EHLO failed: reached unexpected EOF on stream")]
     Eof,
+    /// The reply could not be parsed as an EHLO response.
     #[error("SMTP EHLO failed: parse error: {0}")]
     ParseResponse(String),
 }
@@ -95,7 +97,9 @@ pub struct SmtpEhlo {
 }
 
 impl SmtpEhlo {
-    pub fn new(domain: EhloDomain<'_>) -> Self {
+    /// Creates the coroutine from the client identity sent to the
+    /// server.
+    pub fn new(domain: SmtpEhloDomain<'_>) -> Self {
         let bytes = SmtpEhloCommand {
             domain: domain.into_static(),
         }
@@ -116,10 +120,9 @@ impl SmtpCoroutine for SmtpEhlo {
 
     fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
-            trace!("ehlo: {}", self.state);
-
             if let Some(bytes) = self.wants_write.take() {
                 self.state = State::Read;
+                debug!("ehlo sent, awaiting response");
                 return SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes));
             }
 
@@ -134,25 +137,28 @@ impl SmtpCoroutine for SmtpEhlo {
                         return SmtpCoroutineState::Complete(Err(SmtpEhloError::Eof));
                     }
                     Some(data) => {
-                        trace!("read SMTP bytes: {}", escape_byte_string(data));
+                        trace!("read bytes: {}", escape_byte_string(data));
                         self.buf.extend_from_slice(data);
 
-                        if !EhloResponse::is_complete(&self.buf) {
+                        if !SmtpEhloResponse::is_complete(&self.buf) {
                             self.wants_read = true;
                             continue;
                         }
 
                         self.state = State::Parse;
+                        debug!("ehlo response complete, parsing");
                     }
                     None => {
                         self.wants_read = true;
                     }
                 },
                 State::Parse => {
-                    return match EhloResponse::parse(&self.buf) {
+                    return match SmtpEhloResponse::parse(&self.buf) {
                         Ok(response) => {
                             let capabilities = response.into_static().capabilities;
                             let _ = mem::take(&mut self.buf);
+                            debug!("ehlo response parsed");
+                            trace!("{capabilities:?}");
                             SmtpCoroutineState::Complete(Ok(capabilities))
                         }
                         Err(errors) => {
@@ -184,12 +190,18 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use crate::rfc5321::types::domain::Domain;
+    use alloc::{borrow::Cow, vec::Vec};
 
-    use super::*;
+    use crate::{
+        coroutine::*,
+        rfc5321::{
+            ehlo::*,
+            types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
+        },
+    };
 
-    fn ehlo_domain() -> EhloDomain<'static> {
-        EhloDomain::Domain(Domain(Cow::Borrowed("example.com")))
+    fn ehlo_domain() -> SmtpEhloDomain<'static> {
+        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")))
     }
 
     #[test]
@@ -248,8 +260,6 @@ mod tests {
         let err = expect_complete_err(&mut ehlo, b"");
         assert!(matches!(err, SmtpEhloError::Eof));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpEhlo, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {

@@ -48,7 +48,7 @@ use core::fmt::{self, Write};
 
 use alloc::{borrow::Cow, string::String, vec::Vec};
 
-use log::trace;
+use log::{debug, trace};
 use thiserror::Error;
 
 use crate::{coroutine::*, send::*, smtp_try};
@@ -70,8 +70,9 @@ impl<'a> From<SmtpRawCommand<'a>> for Vec<u8> {
 /// Failure causes during the SMTP raw exchange.
 #[derive(Clone, Debug, Error)]
 pub enum SmtpRawError {
+    /// The underlying command exchange failed.
     #[error("SMTP raw command failed: {0}")]
-    Send(#[from] SendSmtpCommandError),
+    Send(#[from] SmtpCommandSendError),
 }
 
 /// I/O-free SMTP raw passthrough coroutine.
@@ -84,7 +85,7 @@ impl SmtpRaw {
     /// CRLF (e.g. `NOOP`, `VRFY foo@bar`, `HELP`).
     pub fn new(command: impl Into<Cow<'static, str>>) -> Self {
         Self {
-            state: State::Send(SendSmtpCommand::new(SmtpRawCommand {
+            state: State::Send(SmtpCommandSend::new(SmtpRawCommand {
                 line: command.into(),
             })),
         }
@@ -96,37 +97,36 @@ impl SmtpCoroutine for SmtpRaw {
     type Return = Result<String, SmtpRawError>;
 
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
-        loop {
-            trace!("raw: {}", self.state);
+        match &mut self.state {
+            State::Send(send) => {
+                let out = smtp_try!(send, arg);
 
-            match &mut self.state {
-                State::Send(send) => {
-                    let out = smtp_try!(send, arg);
+                // NOTE: reconstruct the full reply text from the
+                // parsed response: every line carries the same
+                // 3-digit code, continuation lines use `-`, the final
+                // line a space. Any reply code is a valid answer
+                // here, including 4xx and 5xx; only transport/parse
+                // failures are errors.
+                let response = out.response;
+                let lines = response.lines.as_ref();
+                let last = lines.len() - 1;
 
-                    // Reconstruct the full reply text from the parsed
-                    // response: every line carries the same 3-digit code,
-                    // continuation lines use `-`, the final line a space.
-                    // Any reply code is a valid answer here, including 4xx
-                    // and 5xx; only transport/parse failures are errors.
-                    let response = out.response;
-                    let lines = response.lines.as_ref();
-                    let last = lines.len() - 1;
-
-                    let mut reply = String::new();
-                    for (i, line) in lines.iter().enumerate() {
-                        let sep = if i == last { ' ' } else { '-' };
-                        let _ = write!(reply, "{}{sep}{line}\r\n", response.code);
-                    }
-
-                    return SmtpCoroutineState::Complete(Ok(reply));
+                let mut reply = String::new();
+                for (i, line) in lines.iter().enumerate() {
+                    let sep = if i == last { ' ' } else { '-' };
+                    let _ = write!(reply, "{}{sep}{line}\r\n", response.code);
                 }
+
+                debug!("raw reply received");
+                trace!("{reply:?}");
+                SmtpCoroutineState::Complete(Ok(reply))
             }
         }
     }
 }
 
 enum State {
-    Send(SendSmtpCommand<SmtpRawCommand<'static>>),
+    Send(SmtpCommandSend<SmtpRawCommand<'static>>),
 }
 
 impl fmt::Display for State {
@@ -139,7 +139,9 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use alloc::{string::String, vec::Vec};
+
+    use crate::{coroutine::*, rfc5321::raw::*, send::SmtpCommandSendError};
 
     #[test]
     fn success_returns_reply() {
@@ -180,10 +182,8 @@ mod tests {
         expect_wants_read(&mut raw);
 
         let err = expect_complete_err(&mut raw, b"");
-        assert!(matches!(err, SmtpRawError::Send(SendSmtpCommandError::Eof)));
+        assert!(matches!(err, SmtpRawError::Send(SmtpCommandSendError::Eof)));
     }
-
-    // --- utils
 
     fn expect_wants_write(cor: &mut SmtpRaw, arg: Option<&[u8]>) -> Vec<u8> {
         match cor.resume(arg) {
