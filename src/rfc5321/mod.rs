@@ -2,8 +2,8 @@
 //!
 //! Each sub-module pairs a command type, serialisable to wire bytes,
 //! with the I/O-free coroutine running the full request/response
-//! exchange. The [`types`] module covers the shared wire-format
-//! primitives: reply codes, responses, paths, domains and greetings.
+//! exchange. The shared wire-format primitives flatten directly into
+//! this module: reply codes, responses, paths, domains and greetings.
 
 pub mod data;
 pub mod ehlo;
@@ -15,4 +15,7 @@ pub mod quit;
 pub mod raw;
 pub mod rcpt;
 pub mod rset;
-pub mod types;
+mod types;
+
+#[doc(inline)]
+pub use types::*;

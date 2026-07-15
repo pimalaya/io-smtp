@@ -11,7 +11,7 @@
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::{mail::SmtpMail, types::reverse_path::SmtpReversePath},
+//!     rfc5321::{SmtpReversePath, mail::SmtpMail},
 //! };
 //!
 //! // Ready stream needed (TCP-connected, TLS-negociated, EHLO consumed)
@@ -50,9 +50,7 @@ use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc5321::types::{
-        parameter::SmtpParameter, reply_code::SmtpReplyCode, reverse_path::SmtpReversePath,
-    },
+    rfc5321::{SmtpParameter, SmtpReplyCode, SmtpReversePath},
     send::*,
     smtp_try,
 };
@@ -155,7 +153,7 @@ mod tests {
 
     use crate::{
         coroutine::*,
-        rfc5321::{mail::*, types::reverse_path::SmtpReversePath},
+        rfc5321::{SmtpReversePath, mail::*},
         send::SmtpCommandSendError,
     };
 

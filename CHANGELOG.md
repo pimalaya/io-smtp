@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prefixed every RFC 5321 wire type with the strict `Smtp` domain prefix (`SmtpDomain`, `SmtpMailbox`, `SmtpGreeting`, `SmtpResponse`, `SmtpReplyCode`, `SmtpText`, `SmtpVec1`, `SmtpAtom`, `SmtpAddressLiteral`, `SmtpEhloDomain`, `SmtpEhloResponse`, `SmtpForwardPath`, `SmtpReversePath`, `SmtpLocalPart`, `SmtpParameter`), along with `SmtpEnhancedStatusCode`, `SmtpDsnRet` and `SmtpDsnNotify`.
 - Renamed the send coroutine family to the target-first naming convention: `SendSmtpCommand` is now `SmtpCommandSend` (`SmtpCommandSendOk`, `SmtpCommandSendError` along).
 - Moved the free helpers onto their types: `envid` and `orcpt_rfc822` became `SmtpParameter::envid` and `SmtpParameter::orcpt_rfc822`, `default_alpn` became `SmtpClientStd::default_alpn`; the crate-root utils module is no longer public and dropped its unused helpers (quoted-string escaping, character-class predicates, generic parser combinators).
+- Flattened the RFC 5321 wire types into the rfc5321 module path: `rfc5321::types::domain::SmtpDomain` is now `rfc5321::SmtpDomain`, the types submodule becoming an internal detail.
 - Bumped pimalaya-stream to 0.1.
 
 ## [0.1.0] - 2026-06-03

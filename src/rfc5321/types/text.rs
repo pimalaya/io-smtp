@@ -52,7 +52,7 @@ pub(crate) mod parsers {
 
     use chumsky::prelude::*;
 
-    use crate::{rfc5321::types::text::SmtpText, utils::parsers::Extra};
+    use crate::{rfc5321::SmtpText, utils::parsers::Extra};
 
     /// SMTP text string parser.
     ///

@@ -11,7 +11,7 @@ use std::{borrow::Cow, env, error::Error};
 
 use io_smtp::{
     client::SmtpClientStd,
-    rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
+    rfc5321::{SmtpDomain, SmtpEhloDomain},
 };
 use pimalaya_stream::{sasl::Sasl, tls::Tls};
 use url::Url;

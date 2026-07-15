@@ -12,7 +12,7 @@ use alloc::borrow::Cow;
 
 use bounded_static::{IntoBoundedStatic, ToBoundedStatic};
 
-use crate::rfc5321::types::atom::SmtpAtom;
+use crate::rfc5321::SmtpAtom;
 
 /// SMTP address literal.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

@@ -35,8 +35,8 @@
 //! module per RFC. [`rfc5321`] hosts the SMTP core: the coroutines
 //! for the greeting, the EHLO and HELO handshakes, the mail
 //! transaction (MAIL FROM, RCPT TO, DATA with dot-stuffing), NOOP,
-//! RSET, QUIT and a raw passthrough, next to the wire-format types in
-//! [`rfc5321::types`] (reply codes, responses, paths, domains,
+//! RSET, QUIT and a raw passthrough, next to the flattened
+//! wire-format types (reply codes, responses, paths, domains,
 //! parameters). The extensions follow: [`rfc1870`] (message size
 //! declaration), [`rfc3207`] (STARTTLS), [`rfc3461`] (delivery status
 //! notifications), [`rfc3463`] (enhanced status codes) and [`rfc4954`]

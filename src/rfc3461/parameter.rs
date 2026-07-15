@@ -21,7 +21,7 @@ use core::ops::BitOr;
 
 use alloc::{borrow::Cow, string::String, vec::Vec};
 
-use crate::rfc5321::types::{atom::SmtpAtom, parameter::SmtpParameter};
+use crate::rfc5321::{SmtpAtom, SmtpParameter};
 
 /// The value of the `RET` ESMTP parameter on `MAIL FROM`.
 ///

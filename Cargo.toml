@@ -1,6 +1,6 @@
 [package]
 name = "io-smtp"
-description = "SMTP client library"
+description = "SMTP client library for Rust"
 version = "0.1.0"
 authors = ["soywod <pimalaya.org@posteo.net>"]
 rust-version = "1.87"

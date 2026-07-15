@@ -51,7 +51,7 @@ use alloc::{
 use log::debug;
 use thiserror::Error;
 
-use crate::{coroutine::*, rfc5321::types::reply_code::SmtpReplyCode, send::*, smtp_try};
+use crate::{coroutine::*, rfc5321::SmtpReplyCode, send::*, smtp_try};
 
 /// The STARTTLS command (RFC 3207).
 pub struct SmtpStartTlsCommand;

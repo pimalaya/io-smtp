@@ -8,12 +8,7 @@ use std::borrow::Cow;
 use io_smtp::{
     coroutine::*,
     rfc5321::{
-        ehlo::*,
-        greeting::*,
-        noop::*,
-        quit::*,
-        rset::*,
-        types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain, greeting::SmtpGreeting},
+        SmtpDomain, SmtpEhloDomain, SmtpGreeting, ehlo::*, greeting::*, noop::*, quit::*, rset::*,
     },
 };
 

@@ -14,7 +14,7 @@
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
 //!     rfc5321::{
 //!         ehlo::SmtpEhlo,
-//!         types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
+//!         SmtpDomain, SmtpEhloDomain,
 //!     },
 //! };
 //!
@@ -58,7 +58,7 @@ use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc5321::types::{ehlo_domain::SmtpEhloDomain, ehlo_response::SmtpEhloResponse},
+    rfc5321::{SmtpEhloDomain, SmtpEhloResponse},
     utils::{escape_byte_string, parsers::format_rich_errors},
 };
 
@@ -194,10 +194,7 @@ mod tests {
 
     use crate::{
         coroutine::*,
-        rfc5321::{
-            ehlo::*,
-            types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
-        },
+        rfc5321::{SmtpDomain, SmtpEhloDomain, ehlo::*},
     };
 
     fn ehlo_domain() -> SmtpEhloDomain<'static> {

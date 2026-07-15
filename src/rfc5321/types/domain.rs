@@ -51,7 +51,7 @@ pub(crate) mod parsers {
 
     use chumsky::prelude::*;
 
-    use crate::{rfc5321::types::domain::SmtpDomain, utils::parsers::Extra};
+    use crate::{rfc5321::SmtpDomain, utils::parsers::Extra};
 
     /// SMTP domain parser.
     ///

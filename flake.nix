@@ -1,10 +1,9 @@
 {
-  description = "SMTP client library, written in Rust";
+  description = "SMTP client library for Rust";
 
   inputs = {
     nixpkgs = {
-      # until crates.io fix fully backported
-      url = "github:nixos/nixpkgs?tag=25.11&rev=c767db50e209f33ffce3c18165b36101079d367d";
+      url = "github:nixos/nixpkgs/nixos-25.11";
     };
     fenix = {
       url = "github:nix-community/fenix/monthly";

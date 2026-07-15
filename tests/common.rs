@@ -11,18 +11,9 @@ use io_smtp::{
     coroutine::*,
     message::SmtpMessageSend,
     rfc5321::{
-        ehlo::SmtpEhlo,
-        greeting::SmtpGreetingGet,
-        helo::SmtpHelo,
-        mail::SmtpMail,
-        noop::SmtpNoop,
-        quit::SmtpQuit,
-        rcpt::SmtpRcpt,
-        rset::SmtpRset,
-        types::{
-            domain::SmtpDomain, ehlo_domain::SmtpEhloDomain, forward_path::SmtpForwardPath,
-            local_part::SmtpLocalPart, mailbox::SmtpMailbox, reverse_path::SmtpReversePath,
-        },
+        SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpLocalPart, SmtpMailbox, SmtpReversePath,
+        ehlo::SmtpEhlo, greeting::SmtpGreetingGet, helo::SmtpHelo, mail::SmtpMail, noop::SmtpNoop,
+        quit::SmtpQuit, rcpt::SmtpRcpt, rset::SmtpRset,
     },
     sasl::{
         auth_login::{SmtpAuthLogin, SmtpAuthLoginOptions},

@@ -47,7 +47,7 @@ pub(crate) mod parsers {
 
     use chumsky::prelude::*;
 
-    use crate::{rfc5321::types::atom::SmtpAtom, utils::parsers::Extra};
+    use crate::{rfc5321::SmtpAtom, utils::parsers::Extra};
 
     /// SMTP atom parser.
     ///

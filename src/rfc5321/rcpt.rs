@@ -13,10 +13,8 @@
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
 //!     rfc5321::{
 //!         rcpt::SmtpRcpt,
-//!         types::{
-//!             domain::SmtpDomain, ehlo_domain::SmtpEhloDomain, forward_path::SmtpForwardPath,
-//!             local_part::SmtpLocalPart, mailbox::SmtpMailbox,
-//!         },
+//!         SmtpDomain, SmtpEhloDomain, SmtpForwardPath,
+//!         SmtpLocalPart, SmtpMailbox,
 //!     },
 //! };
 //!
@@ -60,9 +58,7 @@ use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc5321::types::{
-        forward_path::SmtpForwardPath, parameter::SmtpParameter, reply_code::SmtpReplyCode,
-    },
+    rfc5321::{SmtpForwardPath, SmtpParameter, SmtpReplyCode},
     send::*,
     smtp_try,
 };
@@ -168,11 +164,7 @@ mod tests {
     use crate::{
         coroutine::*,
         rfc5321::{
-            rcpt::*,
-            types::{
-                domain::SmtpDomain, ehlo_domain::SmtpEhloDomain, forward_path::SmtpForwardPath,
-                local_part::SmtpLocalPart, mailbox::SmtpMailbox,
-            },
+            SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpLocalPart, SmtpMailbox, rcpt::*,
         },
         send::SmtpCommandSendError,
     };

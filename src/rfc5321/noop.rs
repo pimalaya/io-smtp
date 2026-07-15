@@ -47,7 +47,7 @@ use alloc::{
 use log::debug;
 use thiserror::Error;
 
-use crate::{coroutine::*, rfc5321::types::reply_code::SmtpReplyCode, send::*, smtp_try};
+use crate::{coroutine::*, rfc5321::SmtpReplyCode, send::*, smtp_try};
 
 /// The NOOP command (RFC 5321 §4.1.1.9).
 pub struct SmtpNoopCommand<'a> {

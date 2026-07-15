@@ -16,7 +16,7 @@
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
+//!     rfc5321::{SmtpDomain, SmtpEhloDomain},
 //!     rfc7628::auth_oauthbearer::{SmtpAuthOauthbearer, SmtpAuthOauthbearerOptions},
 //! };
 //!
@@ -65,8 +65,8 @@ use crate::{
     coroutine::*,
     rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
     rfc5321::{
+        SmtpEhloDomain, SmtpReplyCode,
         ehlo::{SmtpEhlo, SmtpEhloError},
-        types::{ehlo_domain::SmtpEhloDomain, reply_code::SmtpReplyCode},
     },
     send::*,
     smtp_try,
@@ -320,7 +320,7 @@ mod tests {
 
     use crate::{
         coroutine::*,
-        rfc5321::types::{domain::SmtpDomain, ehlo_domain::SmtpEhloDomain},
+        rfc5321::{SmtpDomain, SmtpEhloDomain},
         rfc7628::auth_oauthbearer::*,
         send::SmtpCommandSendError,
     };

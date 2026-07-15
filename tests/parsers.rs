@@ -4,10 +4,7 @@
 //! method and asserts the result. When a user reports a parsing failure,
 //! add a test case here so the behaviour is preserved forever.
 
-use io_smtp::rfc5321::types::{
-    domain::SmtpDomain, ehlo_response::SmtpEhloResponse, greeting::SmtpGreeting,
-    reply_code::SmtpReplyCode, response::SmtpResponse,
-};
+use io_smtp::rfc5321::{SmtpDomain, SmtpEhloResponse, SmtpGreeting, SmtpReplyCode, SmtpResponse};
 
 // NOTE: ReplyCode tests below.
 

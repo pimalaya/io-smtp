@@ -9,7 +9,7 @@ use alloc::borrow::Cow;
 
 use bounded_static_derive::ToStatic;
 
-use crate::rfc5321::types::atom::SmtpAtom;
+use crate::rfc5321::SmtpAtom;
 
 /// An ESMTP parameter (keyword[=value]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]

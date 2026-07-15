@@ -13,9 +13,9 @@
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
 //!     message::SmtpMessageSend,
-//!     rfc5321::types::{
-//!         domain::SmtpDomain, ehlo_domain::SmtpEhloDomain, forward_path::SmtpForwardPath,
-//!         local_part::SmtpLocalPart, mailbox::SmtpMailbox, reverse_path::SmtpReversePath,
+//!     rfc5321::{
+//!         SmtpDomain, SmtpEhloDomain, SmtpForwardPath,
+//!         SmtpLocalPart, SmtpMailbox, SmtpReversePath,
 //!     },
 //! };
 //!
@@ -68,10 +68,10 @@ use thiserror::Error;
 use crate::{
     coroutine::*,
     rfc5321::{
+        SmtpForwardPath, SmtpReversePath,
         data::{SmtpData, SmtpDataError},
         mail::{SmtpMail, SmtpMailError},
         rcpt::{SmtpRcpt, SmtpRcptError},
-        types::{forward_path::SmtpForwardPath, reverse_path::SmtpReversePath},
     },
     smtp_try,
 };

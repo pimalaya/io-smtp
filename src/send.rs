@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc5321::types::response::SmtpResponse,
+    rfc5321::SmtpResponse,
     utils::{escape_byte_string, parsers::format_rich_errors},
 };
 

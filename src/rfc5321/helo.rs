@@ -14,7 +14,7 @@
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::{helo::SmtpHelo, types::domain::SmtpDomain},
+//!     rfc5321::{SmtpDomain, helo::SmtpHelo},
 //! };
 //!
 //! // Ready stream needed (TCP-connected, TLS-negociated, greeting consumed)
@@ -54,7 +54,7 @@ use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc5321::types::{domain::SmtpDomain, reply_code::SmtpReplyCode},
+    rfc5321::{SmtpDomain, SmtpReplyCode},
     send::*,
     smtp_try,
 };
@@ -149,7 +149,7 @@ mod tests {
 
     use crate::{
         coroutine::*,
-        rfc5321::{helo::*, types::domain::SmtpDomain},
+        rfc5321::{SmtpDomain, helo::*},
         send::SmtpCommandSendError,
     };
 

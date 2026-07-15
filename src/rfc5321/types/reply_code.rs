@@ -284,7 +284,7 @@ pub(crate) mod parsers {
 
     use chumsky::prelude::*;
 
-    use crate::{rfc5321::types::reply_code::SmtpReplyCode, utils::parsers::Extra};
+    use crate::{rfc5321::SmtpReplyCode, utils::parsers::Extra};
 
     /// SMTP reply code parser.
     ///

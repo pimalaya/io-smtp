@@ -49,7 +49,7 @@ use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc5321::types::greeting::SmtpGreeting,
+    rfc5321::SmtpGreeting,
     utils::{escape_byte_string, parsers::format_rich_errors},
 };
 
