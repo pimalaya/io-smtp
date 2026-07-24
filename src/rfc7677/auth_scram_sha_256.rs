@@ -88,7 +88,8 @@ pub struct SmtpAuthScramSha256Options {
     /// Ignored (SCRAM always sends client-first SASL-IR); kept for
     /// option surface parity with the other SASL coroutines.
     pub initial_request: bool,
-    /// Refresh capabilities with an `EHLO` after a successful auth.
+    /// Whether to refresh capabilities with an `EHLO` after a successful auth.
+    /// Disabled by default because the mechanism does not add a security layer.
     pub ensure_capabilities: bool,
 }
 
@@ -96,7 +97,7 @@ impl Default for SmtpAuthScramSha256Options {
     fn default() -> Self {
         Self {
             initial_request: true,
-            ensure_capabilities: true,
+            ensure_capabilities: false,
         }
     }
 }
@@ -432,6 +433,11 @@ mod tests {
 
     fn password() -> SecretString {
         SecretString::from("pencil".to_string())
+    }
+
+    #[test]
+    fn capabilities_are_not_refreshed_by_default() {
+        assert!(!SmtpAuthScramSha256Options::default().ensure_capabilities);
     }
 
     #[test]

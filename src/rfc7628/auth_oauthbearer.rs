@@ -81,7 +81,8 @@ pub struct SmtpAuthOauthbearerOptions {
     /// `true` selects SASL-IR (inline credentials); `false` selects
     /// the non-IR challenge-response flow.
     pub initial_request: bool,
-    /// Refresh capabilities with an `EHLO` after a successful auth.
+    /// Whether to refresh capabilities with an `EHLO` after a successful auth.
+    /// Disabled by default because the mechanism does not add a security layer.
     pub ensure_capabilities: bool,
 }
 
@@ -89,7 +90,7 @@ impl Default for SmtpAuthOauthbearerOptions {
     fn default() -> Self {
         Self {
             initial_request: true,
-            ensure_capabilities: true,
+            ensure_capabilities: false,
         }
     }
 }
@@ -334,8 +335,22 @@ mod tests {
     }
 
     #[test]
-    fn ir_success_then_ehlo_returns_ok() {
+    fn ir_success_does_not_send_ehlo_by_default() {
         let opts = SmtpAuthOauthbearerOptions::default();
+        let mut auth =
+            SmtpAuthOauthbearer::new(&token(), Some("alice@example.com"), domain(), opts);
+
+        let _ = expect_wants_write(&mut auth, None);
+        expect_wants_read(&mut auth);
+        expect_complete_ok(&mut auth, b"235 OK\r\n");
+    }
+
+    #[test]
+    fn ir_success_with_ehlo_returns_ok() {
+        let opts = SmtpAuthOauthbearerOptions {
+            initial_request: true,
+            ensure_capabilities: true,
+        };
         let mut auth =
             SmtpAuthOauthbearer::new(&token(), Some("alice@example.com"), domain(), opts);
 
