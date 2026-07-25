@@ -516,19 +516,27 @@ impl SmtpClientStd {
         domain: SmtpEhloDomain<'_>,
         sasl: Option<impl Into<Sasl>>,
     ) -> Result<Self, SmtpClientStdError> {
-        let Some(host) = url.host_str() else {
-            return Err(SmtpClientStdError::UrlMissingHost(url.to_string()));
-        };
-
         let (stream, is_tls) = match url.scheme() {
-            scheme if scheme.eq_ignore_ascii_case("smtp") => (
-                StreamStd::connect_tcp(host, url.port().unwrap_or(25))?,
-                false,
-            ),
-            scheme if scheme.eq_ignore_ascii_case("smtps") => (
-                StreamStd::connect_tls(host, url.port().unwrap_or(465), tls)?,
-                true,
-            ),
+            scheme if scheme.eq_ignore_ascii_case("smtp") => {
+                let host = tcp_host(url)?;
+                (
+                    StreamStd::connect_tcp(host, url.port().unwrap_or(25))?,
+                    false,
+                )
+            }
+            scheme if scheme.eq_ignore_ascii_case("smtps") => {
+                let host = tcp_host(url)?;
+                (
+                    StreamStd::connect_tls(host, url.port().unwrap_or(465), tls)?,
+                    true,
+                )
+            }
+            // NOTE: a `unix://` URL reaches a local socket proxy such as
+            // sirup: no host and no TLS. SMTP has no PREAUTH greeting, so
+            // authentication is skipped only when no SASL config is passed.
+            scheme if scheme.eq_ignore_ascii_case("unix") => {
+                (StreamStd::connect_unix(url.path())?, false)
+            }
             scheme => {
                 let url = url.to_string();
                 let scheme = scheme.to_string();
@@ -609,6 +617,13 @@ impl SmtpClientStd {
 
         Ok(client)
     }
+}
+
+/// Extracts the host from a TCP-bound SMTP URL (`smtp`/`smtps`), erroring
+/// when it carries none. The `unix` scheme does not go through here.
+fn tcp_host(url: &Url) -> Result<&str, SmtpClientStdError> {
+    url.host_str()
+        .ok_or_else(|| SmtpClientStdError::UrlMissingHost(url.to_string()))
 }
 
 /// Pumps any standard-shape SMTP coroutine inline against a concrete
