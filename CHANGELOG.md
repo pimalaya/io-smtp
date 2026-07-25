@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-07-26
+
+### Added
+
+- Added `SmtpClientStd::default_port`, returning the default SMTP port for a scheme (465 for `smtps`, 25 otherwise).
+
+  Exposed so config-based callers derive the fallback port identically to `connect`, which now shares the same helper.
+
 ## [0.2.2] - 2026-07-25
 
 ### Added
@@ -121,7 +129,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Enables `trace!("<op>: {}", self.state)` for uniform protocol tracing.
 
-[unreleased]: https://github.com/pimalaya/io-smtp/compare/v0.2.2..HEAD
+[unreleased]: https://github.com/pimalaya/io-smtp/compare/v0.2.3..HEAD
+[0.2.3]: https://github.com/pimalaya/io-smtp/compare/v0.2.2..v0.2.3
 [0.2.2]: https://github.com/pimalaya/io-smtp/compare/v0.2.1..v0.2.2
 [0.2.1]: https://github.com/pimalaya/io-smtp/compare/v0.2.0..v0.2.1
 [0.2.0]: https://github.com/pimalaya/io-smtp/compare/v0.1.0..v0.2.0
