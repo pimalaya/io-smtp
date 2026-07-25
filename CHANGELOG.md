@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-25
+
 ### Fixed
 
 - Disabled the post-authentication `EHLO` capability refresh by default.
+
+  A plain SASL authentication adds no security layer, so re-reading capabilities is unnecessary. The extra `EHLO` also broke sending through servers that treat it as a session reset (e.g. Proton Bridge, which then rejected `MAIL FROM` with `no such user`). Re-enable it per mechanism via the `ensure_capabilities` option when a server advertises capabilities only after auth.
 
 ## [0.2.0] - 2026-07-15
 
