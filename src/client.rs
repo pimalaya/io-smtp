@@ -215,6 +215,15 @@ impl SmtpClientStd {
         vec![String::from("smtp")]
     }
 
+    /// Default SMTP port for `scheme`: 465 for `smtps`, 25 otherwise.
+    pub fn default_port(scheme: &str) -> u16 {
+        if scheme.eq_ignore_ascii_case("smtps") {
+            465
+        } else {
+            25
+        }
+    }
+
     /// Replaces the underlying stream; useful after a caller-managed TLS
     /// upgrade or reconnection.
     pub fn set_stream<S: Read + Write + Send + 'static>(&mut self, stream: S) {
@@ -520,14 +529,18 @@ impl SmtpClientStd {
             scheme if scheme.eq_ignore_ascii_case("smtp") => {
                 let host = tcp_host(url)?;
                 (
-                    StreamStd::connect_tcp(host, url.port().unwrap_or(25))?,
+                    StreamStd::connect_tcp(host, url.port().unwrap_or(Self::default_port(scheme)))?,
                     false,
                 )
             }
             scheme if scheme.eq_ignore_ascii_case("smtps") => {
                 let host = tcp_host(url)?;
                 (
-                    StreamStd::connect_tls(host, url.port().unwrap_or(465), tls)?,
+                    StreamStd::connect_tls(
+                        host,
+                        url.port().unwrap_or(Self::default_port(scheme)),
+                        tls,
+                    )?,
                     true,
                 )
             }
