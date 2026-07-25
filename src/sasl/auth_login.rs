@@ -86,22 +86,14 @@ impl From<SmtpAuthLoginCommand> for Vec<u8> {
 }
 
 /// Options for [`SmtpAuthLogin::new`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SmtpAuthLoginOptions {
     /// Ignored (LOGIN has no SASL-IR variant); kept for option
     /// surface parity with the other SASL coroutines.
     pub initial_request: bool,
-    /// Refresh capabilities with an `EHLO` after a successful auth.
+    /// Whether to refresh capabilities with an `EHLO` after a successful auth.
+    /// Disabled by default because the mechanism does not add a security layer.
     pub ensure_capabilities: bool,
-}
-
-impl Default for SmtpAuthLoginOptions {
-    fn default() -> Self {
-        Self {
-            initial_request: false,
-            ensure_capabilities: true,
-        }
-    }
 }
 
 /// Failure causes during the SMTP AUTH LOGIN exchange.
@@ -291,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn success_then_ehlo_returns_ok() {
+    fn success_does_not_send_ehlo_by_default() {
         let opts = SmtpAuthLoginOptions::default();
         let mut auth = SmtpAuthLogin::new("alice", &password(), domain(), opts);
 
@@ -305,8 +297,24 @@ mod tests {
         let _password = expect_wants_write(&mut auth, Some(b"334 UGFzc3dvcmQ6\r\n"));
 
         expect_wants_read(&mut auth);
-        let _ehlo = expect_wants_write(&mut auth, Some(b"235 OK\r\n"));
+        expect_complete_ok(&mut auth, b"235 OK\r\n");
+    }
 
+    #[test]
+    fn success_with_ehlo_returns_ok() {
+        let opts = SmtpAuthLoginOptions {
+            initial_request: false,
+            ensure_capabilities: true,
+        };
+        let mut auth = SmtpAuthLogin::new("alice", &password(), domain(), opts);
+
+        let _ = expect_wants_write(&mut auth, None);
+        expect_wants_read(&mut auth);
+        let _ = expect_wants_write(&mut auth, Some(b"334 VXNlcm5hbWU6\r\n"));
+        expect_wants_read(&mut auth);
+        let _ = expect_wants_write(&mut auth, Some(b"334 UGFzc3dvcmQ6\r\n"));
+        expect_wants_read(&mut auth);
+        let _ehlo = expect_wants_write(&mut auth, Some(b"235 OK\r\n"));
         expect_wants_read(&mut auth);
         expect_complete_ok(&mut auth, b"250 server.example.com\r\n");
     }

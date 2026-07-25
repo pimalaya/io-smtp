@@ -298,10 +298,9 @@ impl SmtpClientStd {
 
     // NOTE: Authentication methods below.
 
-    /// Runs [`SmtpAuthAnonymous`] (`AUTH ANONYMOUS`, RFC 4505).  Refreshes the
-    /// capability list with an `EHLO` after a successful authentication. The
-    /// optional `trace` token is sent in cleartext for server-side logging; do
-    /// not put credentials in it.
+    /// Runs [`SmtpAuthAnonymous`] (`AUTH ANONYMOUS`, RFC 4505). The optional
+    /// `trace` token is sent in cleartext for server-side logging; do not put
+    /// credentials in it.
     pub fn auth_anonymous(
         &mut self,
         trace: Option<&str>,
@@ -314,10 +313,8 @@ impl SmtpClientStd {
         ))
     }
 
-    /// Runs [`SmtpAuthLogin`] (`AUTH LOGIN`, legacy SASL mechanism).  Refreshes
-    /// the capability list with an `EHLO` after a successful
-    /// authentication. Prefer [`auth_plain`] or [`auth_scram_sha256`] when the
-    /// server supports them.
+    /// Runs [`SmtpAuthLogin`] (`AUTH LOGIN`, legacy SASL mechanism). Prefer
+    /// [`auth_plain`] or [`auth_scram_sha256`] when the server supports them.
     ///
     /// [`auth_plain`]: SmtpClientStd::auth_plain
     /// [`auth_scram_sha256`]: SmtpClientStd::auth_scram_sha256
@@ -335,8 +332,7 @@ impl SmtpClientStd {
         ))
     }
 
-    /// Runs [`SmtpAuthPlain`] (`AUTH PLAIN`, RFC 4616). Refreshes the
-    /// capability list with an `EHLO` after a successful authentication.
+    /// Runs [`SmtpAuthPlain`] (`AUTH PLAIN`, RFC 4616).
     pub fn auth_plain(
         &mut self,
         login: &str,
@@ -351,10 +347,9 @@ impl SmtpClientStd {
         ))
     }
 
-    /// Runs [`SmtpAuthOauthbearer`] (`AUTH OAUTHBEARER`, RFC 7628).  Refreshes
-    /// the capability list with an `EHLO` after a successful
-    /// authentication. The `token` is an OAuth 2.0 bearer access token: the
-    /// connection **must** be TLS-protected before calling this method.
+    /// Runs [`SmtpAuthOauthbearer`] (`AUTH OAUTHBEARER`, RFC 7628). The `token`
+    /// is an OAuth 2.0 bearer access token: the connection **must** be
+    /// TLS-protected before calling this method.
     pub fn auth_oauthbearer(
         &mut self,
         token: &SecretString,
@@ -370,10 +365,9 @@ impl SmtpClientStd {
     }
 
     /// Runs [`SmtpAuthXoauth2`] (`AUTH XOAUTH2`, Google's pre-standard OAuth
-    /// 2.0 SASL mechanism). Refreshes the capability list with an `EHLO` after
-    /// a successful authentication. The `token` is an OAuth 2.0 bearer access
-    /// token: the connection **must** be TLS-protected before calling this
-    /// method. Prefer [`auth_oauthbearer`] on servers that support both.
+    /// 2.0 SASL mechanism). The `token` is an OAuth 2.0 bearer access token:
+    /// the connection **must** be TLS-protected before calling this method.
+    /// Prefer [`auth_oauthbearer`] on servers that support both.
     ///
     /// [`auth_oauthbearer`]: SmtpClientStd::auth_oauthbearer
     pub fn auth_xoauth2(
@@ -390,10 +384,9 @@ impl SmtpClientStd {
         ))
     }
 
-    /// Runs [`SmtpAuthScramSha256`] (`AUTH SCRAM-SHA-256`, RFC 7677).
-    /// Refreshes the capability list with an `EHLO` after a successful
-    /// authentication. `nonce` must be printable ASCII (no commas); the
-    /// standard recommends at least 18 bytes of cryptographic randomness.
+    /// Runs [`SmtpAuthScramSha256`] (`AUTH SCRAM-SHA-256`, RFC 7677). `nonce`
+    /// must be printable ASCII (no commas); the standard recommends at least
+    /// 18 bytes of cryptographic randomness.
     #[cfg(feature = "scram")]
     pub fn auth_scram_sha256(
         &mut self,
