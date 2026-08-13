@@ -52,11 +52,23 @@
 //! Code spanning the RFC modules lives at the crate root:
 //! [`coroutine`] defines the coroutine contract and the smtp_try
 //! macro, [`send`] the base send-one-command coroutine, [`message`]
-//! the composite whole-message send coroutine, the private utils module the shared
+//! the composite whole-message send coroutine, [`session`] the
+//! composite session-opening coroutine, the private utils module the shared
 //! byte-escaping and parser helpers, and [`client`] the optional
 //! std-blocking client (client feature) exposing one method per
 //! coroutine plus, with a TLS feature enabled, an end-to-end connect
 //! covering transport, STARTTLS and SASL.
+//!
+//! ## Opening a session
+//!
+//! [`session`] provides `SmtpSessionOpen`, the composite coroutine
+//! covering everything between an address and an authenticated session:
+//! transport selection, the greeting, the EHLO exchange, the optional
+//! STARTTLS upgrade with a second EHLO over TLS, and the SASL exchange.
+//! It yields transport requests (connect this socket, upgrade that one)
+//! alongside the usual reads and writes, so a caller on any runtime
+//! answers them with its own sockets and inherits the ordering. The std
+//! client is a thirty-line pump over it.
 //!
 //! ## Conventions
 //!
@@ -86,4 +98,5 @@ pub mod rfc7628;
 pub mod rfc7677;
 pub mod sasl;
 pub mod send;
+pub mod session;
 pub(crate) mod utils;

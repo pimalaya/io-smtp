@@ -3,6 +3,14 @@
 //! both the non-IR and SASL-IR (RFC 4954 §4) flows. Prefer
 //! OAUTHBEARER (RFC 7628) on servers that support both.
 //!
+//! The mechanism itself lives in io-sasl: this coroutine holds the SMTP
+//! half of the exchange, the `AUTH XOAUTH2` command, the challenges,
+//! the final reply and the capability refresh, and asks [`SaslXoauth2`]
+//! what to put in each response. The rejection dance is the
+//! mechanism's: a challenge carrying the error JSON is answered with
+//! the empty response Google documents, and the JSON comes back out
+//! when the exchange is declared over.
+//!
 //! XOAUTH2: <https://developers.google.com/workspace/gmail/imap/xoauth2-protocol>
 //!
 //! # Example
@@ -53,19 +61,24 @@ use core::fmt;
 use alloc::{
     borrow::Cow,
     string::{String, ToString},
-    vec,
     vec::Vec,
 };
 
-use base64::{Engine, engine::general_purpose::STANDARD as base64};
 use bounded_static::IntoBoundedStatic;
+use io_sasl::{
+    coroutine::*,
+    xoauth2::{SaslXoauth2, SaslXoauth2Creds, SaslXoauth2Error},
+};
 use log::debug;
-use secrecy::{ExposeSecret, SecretBox, SecretString};
+use secrecy::{SecretBox, SecretString};
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
+    rfc4954::{
+        auth::SmtpAuthCommand,
+        auth_data::{SmtpAuthChallengeError, SmtpAuthData, parse_challenge},
+    },
     rfc5321::{
         SmtpEhloDomain, SmtpReplyCode,
         ehlo::{SmtpEhlo, SmtpEhloError},
@@ -105,12 +118,33 @@ pub enum SmtpAuthXoauth2Error {
     Rejected {
         /// The reply code.
         code: u16,
-        /// The reply text, or the decoded error detail.
+        /// The reply text.
         message: String,
+    },
+    /// The server rejected the authentication after describing why in
+    /// a challenge.
+    #[error("SMTP AUTH XOAUTH2 failed: rejected {code} {message} ({err})")]
+    RejectedWithError {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+        /// The error payload extracted from the challenge.
+        err: String,
     },
     /// The server accepted before the expected challenge.
     #[error("SMTP AUTH XOAUTH2 failed: server did not send the expected continuation request")]
     ExpectedContinuationRequest,
+    /// The challenge carried a payload that is not valid base64.
+    #[error("SMTP AUTH XOAUTH2 failed: {0}")]
+    Challenge(#[from] SmtpAuthChallengeError),
+    /// The mechanism refused the exchange.
+    ///
+    /// A rejected token whose exchange the server ended with a success
+    /// reply lands here, carrying the JSON it sent, as does a challenge
+    /// arriving out of order.
+    #[error("SMTP AUTH XOAUTH2 failed: {0}")]
+    Mechanism(#[from] SaslXoauth2Error),
     /// The underlying command exchange failed.
     #[error("SMTP AUTH XOAUTH2 failed: {0}")]
     Send(#[from] SmtpCommandSendError),
@@ -119,13 +153,11 @@ pub enum SmtpAuthXoauth2Error {
     Ehlo(#[from] SmtpEhloError),
 }
 
-/// I/O-free SMTP AUTH XOAUTH2 coroutine. The connection MUST be
-/// TLS-protected before calling this.
+/// I/O-free SMTP AUTH XOAUTH2 coroutine.
 pub struct SmtpAuthXoauth2 {
     state: State,
+    mechanism: SaslXoauth2,
     domain: Option<SmtpEhloDomain<'static>>,
-    payload: Option<Vec<u8>>,
-    error_detail: Option<String>,
     opts: SmtpAuthXoauth2Options,
 }
 
@@ -138,29 +170,47 @@ impl SmtpAuthXoauth2 {
         domain: SmtpEhloDomain<'_>,
         opts: SmtpAuthXoauth2Options,
     ) -> Self {
-        let payload = build_payload(username, token);
-
-        let state = if opts.initial_request {
-            let cmd = SmtpAuthCommand {
-                mechanism: Cow::Borrowed(XOAUTH2),
-                initial_response: Some(SecretBox::new(payload.clone().into_boxed_slice())),
-            };
-            State::Send(SmtpCommandSend::new(cmd))
-        } else {
-            let cmd = SmtpAuthCommand {
-                mechanism: Cow::Borrowed(XOAUTH2),
-                initial_response: None,
-            };
-            State::Send(SmtpCommandSend::new(cmd))
-        };
+        let mechanism = SaslXoauth2::new(SaslXoauth2Creds {
+            username: username.to_string(),
+            token: token.clone(),
+        });
 
         Self {
-            state,
+            state: State::Start,
+            mechanism,
             domain: Some(domain.into_static()),
-            payload: Some(payload),
-            error_detail: None,
             opts,
         }
+    }
+
+    // helper that resumes the SASL coroutine
+    fn resume_sasl(&mut self, arg: SaslArg<'_>) -> Result<Option<Vec<u8>>, SmtpAuthXoauth2Error> {
+        match self.mechanism.resume(arg) {
+            SaslCoroutineState::Yielded(SaslYield::WantsWrite(payload)) => Ok(Some(payload)),
+            SaslCoroutineState::Yielded(SaslYield::WantsRead) => Ok(None),
+            SaslCoroutineState::Complete(result) => result.map(|()| None).map_err(Into::into),
+        }
+    }
+
+    // helper that ends a rejected exchange, with the JSON the
+    // mechanism captured when the server sent one
+    fn rejected(&mut self, code: u16, message: String) -> SmtpAuthXoauth2Error {
+        match self.mechanism.resume(SaslArg::Done) {
+            SaslCoroutineState::Complete(Err(SaslXoauth2Error::Rejected(err))) => {
+                SmtpAuthXoauth2Error::RejectedWithError { code, message, err }
+            }
+            _ => SmtpAuthXoauth2Error::Rejected { code, message },
+        }
+    }
+
+    // helper that moves to the capability refresh, or completes
+    fn advance_after_auth(&mut self) -> Option<State> {
+        debug!("authenticated");
+
+        let domain = self.domain.take()?;
+        self.opts
+            .ensure_capabilities
+            .then(|| State::Ehlo(SmtpEhlo::new(domain)))
     }
 }
 
@@ -171,146 +221,167 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             match &mut self.state {
-                State::Send(send) => {
+                State::Start => {
+                    let payload = match self.resume_sasl(SaslArg::None) {
+                        Ok(payload) => payload,
+                        Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                    };
+
+                    let (initial_response, pending) = match payload {
+                        Some(payload) if self.opts.initial_request => {
+                            (Some(SecretBox::new(payload.into_boxed_slice())), None)
+                        }
+                        payload => (None, payload),
+                    };
+
+                    let cmd = SmtpAuthCommand {
+                        mechanism: Cow::Borrowed(XOAUTH2),
+                        initial_response,
+                    };
+
+                    self.state = State::Send {
+                        send: SmtpCommandSend::new(cmd),
+                        pending,
+                    };
+                    debug!("{}", self.state);
+                }
+                State::Send { send, pending } => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
-                        if self.opts.initial_request {
-                            self.advance_after_auth();
-                            continue;
-                        }
-                        return SmtpCoroutineState::Complete(Err(
-                            SmtpAuthXoauth2Error::ExpectedContinuationRequest,
-                        ));
-                    }
-
                     if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
-                        if self.opts.initial_request {
-                            // NOTE: the server is asking us to ack
-                            // the JSON error detail (XOAUTH2 failure
-                            // flow).
-                            let text = out.response.text().0.trim_start();
-                            if let Ok(detail_bytes) = base64.decode(text.as_bytes()) {
-                                self.error_detail = String::from_utf8(detail_bytes).ok();
+                        // NOTE: with the credentials still held back this is
+                        // the empty challenge inviting them; with them already
+                        // inlined it carries the rejection JSON, which only
+                        // the mechanism reads and answers.
+                        let payload = match pending.take() {
+                            Some(payload) => payload,
+                            None => {
+                                let challenge = match parse_challenge(&out.response.text().0) {
+                                    Ok(challenge) => challenge,
+                                    Err(err) => {
+                                        return SmtpCoroutineState::Complete(Err(err.into()));
+                                    }
+                                };
+
+                                match self.resume_sasl(SaslArg::Input(&challenge)) {
+                                    Ok(payload) => payload.unwrap_or_default(),
+                                    Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                                }
                             }
+                        };
 
-                            let ack = SmtpAuthData::r#continue(vec![0x01u8]);
-                            self.state = State::AckError(SmtpCommandSend::new(ack));
-                            debug!("error detail received, acknowledging");
-                            continue;
-                        }
-
-                        // NOTE: non-IR: send the credentials now.
-                        let payload = self.payload.take().expect("payload taken twice");
                         let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
                         self.state = State::Continue(SmtpCommandSend::new(data));
-                        debug!("challenge received, sending credentials");
+                        debug!("{}", self.state);
                         continue;
+                    }
+
+                    // NOTE: with the credentials inlined there is nothing left
+                    // to send, so the final reply ends the exchange here rather
+                    // than after a continuation. Without them, a server
+                    // accepting now never asked for what it is authenticating.
+                    let inlined = pending.is_none();
+
+                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
+                        if !inlined {
+                            let err = SmtpAuthXoauth2Error::ExpectedContinuationRequest;
+                            return SmtpCoroutineState::Complete(Err(err));
+                        }
+
+                        if let Err(err) = self.resume_sasl(SaslArg::Done) {
+                            return SmtpCoroutineState::Complete(Err(err));
+                        }
+
+                        match self.advance_after_auth() {
+                            Some(next) => {
+                                self.state = next;
+                                debug!("{}", self.state);
+                                continue;
+                            }
+                            None => return SmtpCoroutineState::Complete(Ok(())),
+                        }
                     }
 
                     let code = out.response.code.code();
                     let message = out.response.text().to_string();
-                    return SmtpCoroutineState::Complete(Err(SmtpAuthXoauth2Error::Rejected {
-                        code,
-                        message,
-                    }));
+                    let err = self.rejected(code, message);
+                    return SmtpCoroutineState::Complete(Err(err));
                 }
                 State::Continue(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
-                        self.advance_after_auth();
+                    if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
+                        let challenge = match parse_challenge(&out.response.text().0) {
+                            Ok(challenge) => challenge,
+                            Err(err) => return SmtpCoroutineState::Complete(Err(err.into())),
+                        };
+
+                        let payload = match self.resume_sasl(SaslArg::Input(&challenge)) {
+                            Ok(payload) => payload.unwrap_or_default(),
+                            Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                        };
+
+                        let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
+                        self.state = State::Continue(SmtpCommandSend::new(data));
+                        debug!("{}", self.state);
                         continue;
                     }
 
-                    if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
-                        let text = out.response.text().0.trim_start();
-                        if let Ok(detail_bytes) = base64.decode(text.as_bytes()) {
-                            self.error_detail = String::from_utf8(detail_bytes).ok();
+                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
+                        // NOTE: the final reply ends the exchange, and the
+                        // mechanism is told so rather than dropped: a token the
+                        // server rejected mid-exchange is reported here, with
+                        // the JSON that explained it, rather than read as a
+                        // success.
+                        if let Err(err) = self.resume_sasl(SaslArg::Done) {
+                            return SmtpCoroutineState::Complete(Err(err));
                         }
 
-                        let ack = SmtpAuthData::r#continue(vec![0x01u8]);
-                        self.state = State::AckError(SmtpCommandSend::new(ack));
-                        debug!("error detail received, acknowledging");
-                        continue;
+                        match self.advance_after_auth() {
+                            Some(next) => {
+                                self.state = next;
+                                debug!("{}", self.state);
+                                continue;
+                            }
+                            None => return SmtpCoroutineState::Complete(Ok(())),
+                        }
                     }
 
                     let code = out.response.code.code();
                     let message = out.response.text().to_string();
-                    return SmtpCoroutineState::Complete(Err(SmtpAuthXoauth2Error::Rejected {
-                        code,
-                        message,
-                    }));
-                }
-                State::AckError(send) => {
-                    let _ = smtp_try!(send, arg);
-
-                    let message = self
-                        .error_detail
-                        .take()
-                        .unwrap_or_else(|| "authentication failed".into());
-
-                    return SmtpCoroutineState::Complete(Err(SmtpAuthXoauth2Error::Rejected {
-                        code: 535,
-                        message,
-                    }));
+                    let err = self.rejected(code, message);
+                    return SmtpCoroutineState::Complete(Err(err));
                 }
                 State::Ehlo(ehlo) => {
                     let _ = smtp_try!(ehlo, arg);
                     debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
-                State::Done => return SmtpCoroutineState::Complete(Ok(())),
             }
         }
     }
 }
 
-impl SmtpAuthXoauth2 {
-    fn advance_after_auth(&mut self) {
-        let _ = self.payload.take();
-        debug!("authenticated");
-        if self.opts.ensure_capabilities {
-            let domain = self.domain.take().expect("domain taken twice");
-            self.state = State::Ehlo(SmtpEhlo::new(domain));
-        } else {
-            self.state = State::Done;
-        }
-    }
-}
-
 enum State {
-    Send(SmtpCommandSend<SmtpAuthCommand<'static>>),
+    Start,
+    Send {
+        send: SmtpCommandSend<SmtpAuthCommand<'static>>,
+        pending: Option<Vec<u8>>,
+    },
     Continue(SmtpCommandSend<SmtpAuthData>),
-    AckError(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
-    Done,
 }
 
 impl fmt::Display for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Send(_) => f.write_str("send auth xoauth2"),
+            Self::Start => f.write_str("start mechanism"),
+            Self::Send { pending, .. } if pending.is_some() => f.write_str("send auth xoauth2"),
+            Self::Send { .. } => f.write_str("send auth xoauth2 with ir"),
             Self::Continue(_) => f.write_str("send credentials"),
-            Self::AckError(_) => f.write_str("ack error detail"),
             Self::Ehlo(_) => f.write_str("refresh capabilities"),
-            Self::Done => f.write_str("done"),
         }
     }
-}
-
-/// Build the XOAUTH2 wire payload:
-/// `user=<u>\x01auth=Bearer <t>\x01\x01`.
-fn build_payload(username: &str, token: &SecretString) -> Vec<u8> {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(b"user=");
-    payload.extend_from_slice(username.as_bytes());
-    payload.push(0x01);
-    payload.extend_from_slice(b"auth=Bearer ");
-    payload.extend_from_slice(token.expose_secret().as_bytes());
-    payload.push(0x01);
-    payload.push(0x01);
-    payload
 }
 
 #[cfg(test)]
@@ -360,37 +431,27 @@ mod tests {
     }
 
     #[test]
-    fn ir_success_without_ehlo_returns_ok() {
-        let opts = SmtpAuthXoauth2Options {
-            initial_request: true,
-            ensure_capabilities: false,
-        };
-        let mut auth = SmtpAuthXoauth2::new("alice@example.com", &token(), domain(), opts);
-        let _ = expect_wants_write(&mut auth, None);
-        expect_wants_read(&mut auth);
-        expect_complete_ok(&mut auth, b"235 OK\r\n");
-    }
-
-    #[test]
-    fn error_detail_returns_rejected() {
-        let opts = SmtpAuthXoauth2Options {
-            initial_request: true,
-            ensure_capabilities: false,
-        };
+    fn error_detail_returns_rejected_with_error() {
+        let opts = SmtpAuthXoauth2Options::default();
         let mut auth = SmtpAuthXoauth2::new("alice@example.com", &token(), domain(), opts);
         let _ = expect_wants_write(&mut auth, None);
         expect_wants_read(&mut auth);
 
+        // NOTE: the JSON is read and acknowledged by the mechanism, which
+        // hands it back once the server ends the exchange.
         let challenge = b"334 eyJzdGF0dXMiOiI0MDEifQ==\r\n";
-        let _ack = expect_wants_write(&mut auth, Some(challenge));
+        let ack = expect_wants_write(&mut auth, Some(challenge));
+        assert_eq!(ack, b"\r\n");
+
         expect_wants_read(&mut auth);
 
         let err = expect_complete_err(&mut auth, b"535 authentication failed\r\n");
-        let SmtpAuthXoauth2Error::Rejected { code, message } = err else {
-            panic!("expected SmtpAuthXoauth2Error::Rejected, got {err:?}");
+        let SmtpAuthXoauth2Error::RejectedWithError { code, message, err } = err else {
+            panic!("expected SmtpAuthXoauth2Error::RejectedWithError, got {err:?}");
         };
         assert_eq!(code, 535);
-        assert!(message.contains("status") || message.contains("401"));
+        assert_eq!(message, "authentication failed");
+        assert_eq!(err, r#"{"status":"401"}"#);
     }
 
     #[test]

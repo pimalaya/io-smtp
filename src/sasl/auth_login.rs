@@ -2,6 +2,12 @@
 //! pre-IETF). Prefer [`auth_plain`] or [`auth_scram_sha_256`] when
 //! the server supports them.
 //!
+//! The mechanism itself lives in io-sasl: this coroutine holds the SMTP
+//! half of the exchange, the `AUTH LOGIN` command, the two 334
+//! challenges, the final reply and the capability refresh, and asks
+//! [`SaslLogin`] what each prompt is answered with. Nothing here knows
+//! that the username comes before the password.
+//!
 //! Background: <https://datatracker.ietf.org/doc/html/draft-murchison-sasl-login>
 //!
 //! [`auth_plain`]: crate::sasl::auth_plain
@@ -53,18 +59,26 @@
 use core::fmt;
 
 use alloc::{
+    borrow::Cow,
     string::{String, ToString},
     vec::Vec,
 };
 
 use bounded_static::IntoBoundedStatic;
+use io_sasl::{
+    coroutine::*,
+    login::{SaslLogin, SaslLoginCreds, SaslLoginError},
+};
 use log::debug;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc4954::auth_data::SmtpAuthData,
+    rfc4954::{
+        auth::SmtpAuthCommand,
+        auth_data::{SmtpAuthChallengeError, SmtpAuthData, parse_challenge},
+    },
     rfc5321::{
         SmtpEhloDomain, SmtpReplyCode, SmtpText,
         ehlo::{SmtpEhlo, SmtpEhloError},
@@ -75,15 +89,6 @@ use crate::{
 
 /// The SASL mechanism name as it appears on the wire.
 pub const LOGIN: &str = "LOGIN";
-
-/// The AUTH LOGIN command (no formal RFC).
-pub struct SmtpAuthLoginCommand;
-
-impl From<SmtpAuthLoginCommand> for Vec<u8> {
-    fn from(_: SmtpAuthLoginCommand) -> Vec<u8> {
-        b"AUTH LOGIN\r\n".to_vec()
-    }
-}
 
 /// Options for [`SmtpAuthLogin::new`].
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -110,6 +115,16 @@ pub enum SmtpAuthLoginError {
     /// The server accepted before the expected challenge.
     #[error("SMTP AUTH LOGIN failed: server did not send the expected continuation request")]
     ExpectedContinuationRequest,
+    /// The challenge carried a payload that is not valid base64.
+    #[error("SMTP AUTH LOGIN failed: {0}")]
+    Challenge(#[from] SmtpAuthChallengeError),
+    /// The mechanism refused the exchange.
+    ///
+    /// A prompt arriving once LOGIN has nothing left to say lands here
+    /// rather than in a framing error of this crate's, only the
+    /// mechanism knowing how many prompts it answers.
+    #[error("SMTP AUTH LOGIN failed: {0}")]
+    Mechanism(#[from] SaslLoginError),
     /// The underlying command exchange failed.
     #[error("SMTP AUTH LOGIN failed: {0}")]
     Send(#[from] SmtpCommandSendError),
@@ -121,8 +136,7 @@ pub enum SmtpAuthLoginError {
 /// I/O-free SMTP AUTH LOGIN coroutine.
 pub struct SmtpAuthLogin {
     state: State,
-    username: Option<Vec<u8>>,
-    password: Option<Vec<u8>>,
+    mechanism: SaslLogin,
     domain: Option<SmtpEhloDomain<'static>>,
     opts: SmtpAuthLoginOptions,
 }
@@ -136,12 +150,62 @@ impl SmtpAuthLogin {
         domain: SmtpEhloDomain<'_>,
         opts: SmtpAuthLoginOptions,
     ) -> Self {
+        let mechanism = SaslLogin::new(SaslLoginCreds {
+            username: login.to_string(),
+            password: password.clone(),
+        });
+
         Self {
-            state: State::Command(SmtpCommandSend::new(SmtpAuthLoginCommand)),
-            username: Some(login.as_bytes().to_vec()),
-            password: Some(password.expose_secret().as_bytes().to_vec()),
+            state: State::Start,
+            mechanism,
             domain: Some(domain.into_static()),
             opts,
+        }
+    }
+
+    // helper that resumes the SASL coroutine
+    fn resume_sasl(&mut self, arg: SaslArg<'_>) -> Result<Option<Vec<u8>>, SmtpAuthLoginError> {
+        match self.mechanism.resume(arg) {
+            SaslCoroutineState::Yielded(SaslYield::WantsWrite(payload)) => Ok(Some(payload)),
+            SaslCoroutineState::Yielded(SaslYield::WantsRead) => Ok(None),
+            SaslCoroutineState::Complete(result) => result.map(|()| None).map_err(Into::into),
+        }
+    }
+
+    // helper that answers a challenge with the next mechanism payload
+    fn wants_continue(&mut self, text: &SmtpText<'_>) -> Result<State, SmtpAuthLoginError> {
+        let challenge = parse_challenge(&text.0)?;
+        let payload = self
+            .resume_sasl(SaslArg::Input(&challenge))?
+            .unwrap_or_default();
+        let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
+        Ok(State::Password(SmtpCommandSend::new(data)))
+    }
+
+    // helper that moves to the capability refresh, or completes
+    fn advance_after_auth(&mut self) -> Option<State> {
+        debug!("authenticated");
+
+        let domain = self.domain.take()?;
+        self.opts
+            .ensure_capabilities
+            .then(|| State::Ehlo(SmtpEhlo::new(domain)))
+    }
+
+    // helper that tells a rejection from a premature acceptance
+    fn rejected_or_missing_challenge(
+        code: SmtpReplyCode,
+        text: &SmtpText<'_>,
+    ) -> SmtpAuthLoginError {
+        if code.is_success() {
+            // NOTE: 2xx where we expected 334, which would mean the server
+            // accepted before it asked for the next prompt.
+            SmtpAuthLoginError::ExpectedContinuationRequest
+        } else {
+            SmtpAuthLoginError::Rejected {
+                code: code.code(),
+                message: text.to_string(),
+            }
         }
     }
 }
@@ -153,110 +217,106 @@ impl SmtpCoroutine for SmtpAuthLogin {
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             match &mut self.state {
+                State::Start => {
+                    let cmd = SmtpAuthCommand {
+                        mechanism: Cow::Borrowed(LOGIN),
+                        initial_response: None,
+                    };
+
+                    self.state = State::Command(SmtpCommandSend::new(cmd));
+                    debug!("{}", self.state);
+                }
                 State::Command(send) => {
                     let out = smtp_try!(send, arg);
 
                     if out.response.code != SmtpReplyCode::AUTH_CONTINUE {
-                        return SmtpCoroutineState::Complete(Err(self
-                            .rejected_or_missing_challenge(
-                                out.response.code,
-                                out.response.text(),
-                            )));
+                        let err = Self::rejected_or_missing_challenge(
+                            out.response.code,
+                            out.response.text(),
+                        );
+                        return SmtpCoroutineState::Complete(Err(err));
                     }
 
-                    let username = self.username.take().expect("username taken twice");
-                    let data = SmtpAuthData::r#continue(username.into_boxed_slice());
+                    // NOTE: the first prompt is answered from the mechanism's
+                    // opening payload rather than from the challenge, LOGIN
+                    // speaking first whatever the server writes in it.
+                    let payload = match self.resume_sasl(SaslArg::None) {
+                        Ok(payload) => payload.unwrap_or_default(),
+                        Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                    };
+
+                    let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
                     self.state = State::Username(SmtpCommandSend::new(data));
-                    debug!("challenge received, sending username");
+                    debug!("{}", self.state);
                 }
                 State::Username(send) => {
                     let out = smtp_try!(send, arg);
 
                     if out.response.code != SmtpReplyCode::AUTH_CONTINUE {
-                        return SmtpCoroutineState::Complete(Err(self
-                            .rejected_or_missing_challenge(
-                                out.response.code,
-                                out.response.text(),
-                            )));
+                        let err = Self::rejected_or_missing_challenge(
+                            out.response.code,
+                            out.response.text(),
+                        );
+                        return SmtpCoroutineState::Complete(Err(err));
                     }
 
-                    let password = self.password.take().expect("password taken twice");
-                    let data = SmtpAuthData::r#continue(password.into_boxed_slice());
-                    self.state = State::Password(SmtpCommandSend::new(data));
-                    debug!("challenge received, sending password");
+                    self.state = match self.wants_continue(out.response.text()) {
+                        Ok(state) => state,
+                        Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                    };
+                    debug!("{}", self.state);
                 }
                 State::Password(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
-                        self.advance_after_auth();
-                        continue;
+                    if out.response.code != SmtpReplyCode::AUTH_SUCCESSFUL {
+                        let code = out.response.code.code();
+                        let message = out.response.text().to_string();
+                        let err = SmtpAuthLoginError::Rejected { code, message };
+                        return SmtpCoroutineState::Complete(Err(err));
                     }
 
-                    let code = out.response.code.code();
-                    let message = out.response.text().to_string();
-                    return SmtpCoroutineState::Complete(Err(SmtpAuthLoginError::Rejected {
-                        code,
-                        message,
-                    }));
+                    // NOTE: the final reply ends the exchange, and the
+                    // mechanism is told so rather than dropped, so that a
+                    // mechanism with something left to verify can refuse.
+                    if let Err(err) = self.resume_sasl(SaslArg::Done) {
+                        return SmtpCoroutineState::Complete(Err(err));
+                    }
+
+                    match self.advance_after_auth() {
+                        Some(next) => {
+                            self.state = next;
+                            debug!("{}", self.state);
+                        }
+                        None => return SmtpCoroutineState::Complete(Ok(())),
+                    }
                 }
                 State::Ehlo(ehlo) => {
                     let _ = smtp_try!(ehlo, arg);
                     debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
-                State::Done => return SmtpCoroutineState::Complete(Ok(())),
-            }
-        }
-    }
-}
-
-impl SmtpAuthLogin {
-    fn advance_after_auth(&mut self) {
-        let _ = self.password.take();
-        debug!("authenticated");
-        if self.opts.ensure_capabilities {
-            let domain = self.domain.take().expect("domain taken twice");
-            self.state = State::Ehlo(SmtpEhlo::new(domain));
-        } else {
-            self.state = State::Done;
-        }
-    }
-
-    fn rejected_or_missing_challenge(
-        &self,
-        code: SmtpReplyCode,
-        text: &SmtpText<'_>,
-    ) -> SmtpAuthLoginError {
-        if code.is_success() {
-            // NOTE: 2xx where we expected 334 (would mean the server
-            // accepted before the challenge).
-            SmtpAuthLoginError::ExpectedContinuationRequest
-        } else {
-            SmtpAuthLoginError::Rejected {
-                code: code.code(),
-                message: text.to_string(),
             }
         }
     }
 }
 
 enum State {
-    Command(SmtpCommandSend<SmtpAuthLoginCommand>),
+    Start,
+    Command(SmtpCommandSend<SmtpAuthCommand<'static>>),
     Username(SmtpCommandSend<SmtpAuthData>),
     Password(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
-    Done,
 }
 
 impl fmt::Display for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Start => f.write_str("start mechanism"),
             Self::Command(_) => f.write_str("send auth login"),
             Self::Username(_) => f.write_str("send username"),
             Self::Password(_) => f.write_str("send password"),
             Self::Ehlo(_) => f.write_str("refresh capabilities"),
-            Self::Done => f.write_str("done"),
         }
     }
 }
@@ -291,10 +351,12 @@ mod tests {
         assert_eq!(bytes, b"AUTH LOGIN\r\n");
 
         expect_wants_read(&mut auth);
-        let _username = expect_wants_write(&mut auth, Some(b"334 VXNlcm5hbWU6\r\n"));
+        let username = expect_wants_write(&mut auth, Some(b"334 VXNlcm5hbWU6\r\n"));
+        assert_eq!(username, b"YWxpY2U=\r\n");
 
         expect_wants_read(&mut auth);
-        let _password = expect_wants_write(&mut auth, Some(b"334 UGFzc3dvcmQ6\r\n"));
+        let password = expect_wants_write(&mut auth, Some(b"334 UGFzc3dvcmQ6\r\n"));
+        assert_eq!(password, b"c2VjcmV0\r\n");
 
         expect_wants_read(&mut auth);
         expect_complete_ok(&mut auth, b"235 OK\r\n");
@@ -317,22 +379,6 @@ mod tests {
         let _ehlo = expect_wants_write(&mut auth, Some(b"235 OK\r\n"));
         expect_wants_read(&mut auth);
         expect_complete_ok(&mut auth, b"250 server.example.com\r\n");
-    }
-
-    #[test]
-    fn success_without_ehlo_returns_ok() {
-        let opts = SmtpAuthLoginOptions {
-            initial_request: false,
-            ensure_capabilities: false,
-        };
-        let mut auth = SmtpAuthLogin::new("alice", &password(), domain(), opts);
-        let _ = expect_wants_write(&mut auth, None);
-        expect_wants_read(&mut auth);
-        let _ = expect_wants_write(&mut auth, Some(b"334 VXNlcm5hbWU6\r\n"));
-        expect_wants_read(&mut auth);
-        let _ = expect_wants_write(&mut auth, Some(b"334 UGFzc3dvcmQ6\r\n"));
-        expect_wants_read(&mut auth);
-        expect_complete_ok(&mut auth, b"235 OK\r\n");
     }
 
     #[test]
@@ -366,6 +412,38 @@ mod tests {
             panic!("expected SmtpAuthLoginError::Rejected, got {err:?}");
         };
         assert_eq!(code, 504);
+    }
+
+    #[test]
+    fn success_before_password_returns_expected_continuation_error() {
+        let opts = SmtpAuthLoginOptions::default();
+        let mut auth = SmtpAuthLogin::new("alice", &password(), domain(), opts);
+        let _ = expect_wants_write(&mut auth, None);
+        expect_wants_read(&mut auth);
+        let _ = expect_wants_write(&mut auth, Some(b"334 VXNlcm5hbWU6\r\n"));
+        expect_wants_read(&mut auth);
+
+        // NOTE: the password was never asked for, so the server authenticated
+        // on a username alone.
+        let err = expect_complete_err(&mut auth, b"235 OK\r\n");
+        let SmtpAuthLoginError::ExpectedContinuationRequest = err else {
+            panic!("expected SmtpAuthLoginError::ExpectedContinuationRequest, got {err:?}");
+        };
+    }
+
+    #[test]
+    fn invalid_challenge_returns_challenge_error() {
+        let opts = SmtpAuthLoginOptions::default();
+        let mut auth = SmtpAuthLogin::new("alice", &password(), domain(), opts);
+        let _ = expect_wants_write(&mut auth, None);
+        expect_wants_read(&mut auth);
+        let _ = expect_wants_write(&mut auth, Some(b"334 VXNlcm5hbWU6\r\n"));
+        expect_wants_read(&mut auth);
+
+        let err = expect_complete_err(&mut auth, b"334 not base64 at all\r\n");
+        let SmtpAuthLoginError::Challenge(SmtpAuthChallengeError::Base64(_)) = err else {
+            panic!("expected SmtpAuthLoginError::Challenge, got {err:?}");
+        };
     }
 
     #[test]

@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `session` module and its `SmtpSessionOpen` coroutine, the composite covering everything between an address and an authenticated SMTP session: transport selection, the greeting, the EHLO exchange, the optional STARTTLS upgrade with a second EHLO over TLS, and the SASL exchange.
+
+  It yields transport requests (`WantsTcpConnect`, `WantsTlsConnect`, `WantsUnixConnect`, `WantsTlsUpgrade`) alongside the usual reads and writes, so a caller on any runtime answers them with its own sockets and inherits the handshake ordering instead of reimplementing it. The scheme table moved with it as `SmtpSessionTransport::from_url` (`smtp://` on 25, `smtps://` on 465, `unix://` on a socket path, an explicit port winning over the default). The SCRAM-SHA-256 client nonce travels with the credentials rather than being generated, so the coroutine stays free of both I/O and randomness.
+
+- Added the `client::SmtpClient` and `client::SmtpClientAsync` traits. Implement one `run` method, inherit every command.
+
+  The `Yield = SmtpYield` bound on `run` makes the surface self-selecting: coroutines that every client wraps identically are defaulted methods, and one declaring its own yield vocabulary falls outside the trait, which is where implementations are expected to diverge anyway. `SmtpClientAsync` declares `-> impl Future<..> + Send` with `Send` as a supertrait, so anything built from a default body survives `tokio::spawn`; a plain `async fn` in a trait cannot express that. `SmtpClient` carries no `Send` bound on purpose, since a blocking call returns a value rather than a future and the bound would exclude a thread-affine client such as a JNI bridge. Neither trait is dyn-compatible: the dynamism this crate needs lives at `client::SmtpStream`.
+
+- Added `rfc4954::auth_data::parse_challenge` and its `SmtpAuthChallengeError`, decoding the payload a `334` challenge carries. Every SASL coroutine reports a challenge that is not valid base64 through its own `Challenge` variant instead of ignoring it.
+
+- Added the tokio session example, answering the session coroutine's transport requests with tokio sockets and tokio-rustls, then implementing `SmtpClientAsync` over the same socket.
+
+- Added the `url` cargo feature, gating `SmtpSessionTransport::from_url` and the two URL variants of `SmtpSessionOpenError`. The TLS provider features enable it.
+
+- Added `session::default_alpn` and `session::default_port`, the protocol constants formerly reachable only through `SmtpClientStd`. They now live in the coroutine core, so a caller answering `WantsTlsConnect` on another runtime gets the ALPN list without the `client` feature. `SmtpClientStd::default_alpn` and `SmtpClientStd::default_port` remain as delegating shims.
+
+### Changed
+
+- Replaced the trailing `SmtpClientStd::connect` parameters with `SmtpSessionOpenOptions`, and made it return the EHLO capabilities. **Breaking.**
+
+  `connect(url, tls, starttls, domain, sasl)` becomes `connect(url, tls, domain, sasl, opts)` returning `(SmtpClientStd, Vec<Cow<'static, str>>)`, where `opts` carries `starttls` and the capability lines are those of the last EHLO, so reading them no longer costs an extra round trip. The body is now a pump over `SmtpSessionOpen`.
+
+- Removed the `SmtpClientStdError` variants `UrlMissingHost`, `UrlUnsupportedScheme`, `StartTlsOverTls` and `ScramSha256NotEnabled`, replaced by a single `SessionOpen` variant wrapping `SmtpSessionOpenError`. **Breaking.**
+
+- Moved the command methods off `SmtpClientStd` and onto the `SmtpClient` trait. **Breaking.**
+
+  Callers add `use io_smtp::client::SmtpClient;`. The methods keep their names and semantics. Argument types that were borrowed or `impl Into<..>` are now owned or `'static`, so one signature serves both the blocking and the async trait: `SmtpEhloDomain<'static>`, `Cow<'static, str>` for `raw`, and a `Vec<SmtpForwardPath<'static>>` rather than an `impl IntoIterator` for `send`.
+
+- Renamed `client::SmtpClientStdError` to `client::SmtpClientError` and gave it a `Transport` variant. **Breaking.**
+
+  It is now the error type of both client traits rather than of one concrete client, so the name no longer says `Std`. `Transport` carries a boxed error for implementors whose I/O is not `std::io::Error`, such as a JNI upcall.
+
+- Took the SASL mechanisms from io-sasl, replacing the six hand-written exchanges. **Breaking.**
+
+  Each coroutine keeps the SMTP half of its exchange, the `AUTH` command, the `334` challenges, the final reply and the capability refresh, and asks the mechanism what each response carries. The wire bytes are unchanged for ANONYMOUS, LOGIN, PLAIN, XOAUTH2 and SCRAM-SHA-256. Every error type gained a `Mechanism` variant carrying the mechanism's own failure and a `Challenge` variant for an undecodable payload; PLAIN, ANONYMOUS and XOAUTH2 lost `UnexpectedContinuationRequest`, a prompt arriving once a mechanism has nothing left to say now being refused by the mechanism, which is the only party that knows how many messages it exchanges. The `scram` feature keeps `rand` and enables `io-sasl/scram`; `hmac`, `pbkdf2` and `sha2` moved to dev-dependencies with RFC 5802 leaving this crate.
+
+- Took the SASL vocabulary from io-sasl too: `SmtpSessionOpen` and `SmtpClientStd::connect` now take `io_sasl::mechanism::Sasl` rather than `pimalaya_stream::sasl::Sasl`. **Breaking.**
+
+  The credential structs gained their `Creds` suffix (`SaslPlainCreds`, `SaslLoginCreds`, ...) and the SCRAM ones carry the client nonce and the channel binding, so `SmtpSessionOpen::new` no longer takes a separate `nonce` argument. `SmtpClientStd::connect` draws a nonce for SCRAM credentials that carry none, an empty nonce being no nonce at all as far as RFC 5802 is concerned. io-sasl computes more mechanisms than this crate frames, so `SmtpSessionOpenError` gained `UnsupportedMechanism`, naming what it was handed rather than skipping it silently; `ScramSha256NotEnabled` is gone, a build without the `scram` feature having no SCRAM credentials to be handed in the first place.
+
+- `SmtpAuthPlain::new` takes the RFC 4616 authorization identity, and `SmtpAuthOauthbearer::new` takes the account username, the host and the port. **Breaking.**
+
+  The SMTP OAUTHBEARER payload was missing the `host` and `port` fields of the GS2 header that RFC 7628 section 3.1 defines, so a server checking what the token was presented for saw nothing to check.
+
+- `SmtpAuthScramSha256::new` takes a single `SaslScramCreds` in place of the username, password and nonce triple. **Breaking.**
+
+  The credentials also carry the channel binding, which decides whether the exchange announces `SCRAM-SHA-256` or `SCRAM-SHA-256-PLUS`, so a caller extracting binding material from its TLS session no longer has it dropped on the floor.
+
+- Removed `sasl::auth_login::SmtpAuthLoginCommand`, the LOGIN exchange using `rfc4954::auth::SmtpAuthCommand` like every other mechanism. **Breaking.** It rendered the same `AUTH LOGIN\r\n` bytes.
+
+- Made pimalaya-stream an optional dependency again, enabled by the TLS provider features.
+
+  Nothing outside the std client reaches for it now that the SASL vocabulary comes from io-sasl, so a no_std build of the coroutine core no longer pulls in a crate that wraps sockets and TLS sessions.
+
+### Fixed
+
+- Refused the TLS upgrade when the server sends bytes past the STARTTLS `220` reply. **Behaviour change.**
+
+  RFC 3207 forbids trailing bytes, so their presence means an attacker injected plaintext commands the server would replay inside the TLS session. `SmtpSessionOpen` now fails with `SmtpSessionOpenError::StartTlsInjection` instead of upgrading.
+
+- Made `SmtpStartTls` actually return the bytes read past the `220` reply, as its contract promised.
+
+  It delegated to `SmtpCommandSend`, which consumes its whole read buffer and never completes while a trailing line is pending, so the returned vector was always empty and an injected command either stalled the exchange or surfaced as a parse error. The coroutine now owns its read loop, splits the reply at its terminating line and hands the remainder back. Its public API and error type are unchanged.
+
+- Refused a SCRAM-SHA-256 exchange the server ended without proving itself. **Behaviour change.**
+
+  A success reply arriving in place of the server-final-message was reported as a success, with the server signature never verified, and one carrying a signature that did not decode was accepted just the same: mutual authentication skipped by omission. The mechanism is now told when the exchange ends and refuses both, with `SaslScramError::ServerSignatureNotVerified`. RFC 4954 section 4 lets a server send its final message in the success reply, and that form is read and verified rather than discarded.
+
+- Reported the JSON a server sends when it rejects an XOAUTH2 or OAUTHBEARER token.
+
+  The detail was decoded, then dropped in favour of a hard-coded 535 and the text of whatever reply followed. Both errors gained a `RejectedWithError` variant carrying the reply code, the reply text and the payload the server actually sent.
+
 ## [0.2.3] - 2026-07-26
 
 ### Added

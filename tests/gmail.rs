@@ -1,3 +1,11 @@
+// NOTE: the shared helpers open sockets through pimalaya-stream, which
+// only exists once a TLS provider feature is on.
+#![cfg(any(
+    feature = "rustls-aws",
+    feature = "rustls-ring",
+    feature = "native-tls"
+))]
+
 mod common;
 
 use std::env;

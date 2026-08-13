@@ -21,6 +21,33 @@ pub enum SmtpAuthDataError {
     Base64(String),
 }
 
+/// Errors that can occur while decoding a server challenge.
+#[derive(Clone, Debug, Error)]
+pub enum SmtpAuthChallengeError {
+    /// The challenge payload could not be decoded.
+    #[error("Parse SMTP auth challenge error: {0}")]
+    Base64(String),
+}
+
+/// Decodes the payload a server challenge carries.
+///
+/// The text of a 334 reply is the base64 of the SASL message the
+/// mechanism has to answer, empty when the mechanism expects no
+/// message. The same encoding carries the final server message when a
+/// server puts it in the 235 reply instead, as RFC 4954 section 4
+/// allows.
+pub fn parse_challenge(text: &str) -> Result<Vec<u8>, SmtpAuthChallengeError> {
+    let payload = text.trim();
+
+    if payload.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    base64
+        .decode(payload)
+        .map_err(|err| SmtpAuthChallengeError::Base64(err.to_string()))
+}
+
 /// Data line used during SMTP AUTH exchange.
 ///
 /// Holds the raw binary data, i.e., a `Vec<u8>`, *not* the BASE64

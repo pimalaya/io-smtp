@@ -1,6 +1,14 @@
 //! SMTP SASL OAUTHBEARER coroutine; supports both the non-IR and
 //! SASL-IR (RFC 4954 §4) flows.
 //!
+//! The mechanism itself lives in io-sasl: this coroutine holds the SMTP
+//! half of the exchange, the `AUTH OAUTHBEARER` command, the
+//! challenges, the final reply and the capability refresh, and asks
+//! [`SaslOauthbearer`] what to put in each response. The rejection
+//! dance is the mechanism's: a challenge carrying the error JSON is
+//! answered with the single `%x01` of RFC 7628 section 3.2.3, and the
+//! JSON comes back out when the exchange is declared over.
+//!
 //! OAUTHBEARER: <https://www.rfc-editor.org/rfc/rfc7628>
 //!
 //! # Example
@@ -28,7 +36,8 @@
 //! let token = SecretString::from("ya29.tokenvalue".to_string());
 //! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("client.example.org")));
 //! let opts = SmtpAuthOauthbearerOptions::default();
-//! let mut coroutine = SmtpAuthOauthbearer::new(&token, Some("alice@example.org"), domain, opts);
+//! let mut coroutine =
+//!     SmtpAuthOauthbearer::new("alice@example.org", "smtp.example.org", 587, &token, domain, opts);
 //! let mut arg = None;
 //!
 //! loop {
@@ -51,19 +60,24 @@ use core::fmt;
 use alloc::{
     borrow::Cow,
     string::{String, ToString},
-    vec,
     vec::Vec,
 };
 
-use base64::{Engine, engine::general_purpose::STANDARD as base64};
 use bounded_static::IntoBoundedStatic;
+use io_sasl::{
+    coroutine::*,
+    rfc7628::oauthbearer::{SaslOauthbearer, SaslOauthbearerCreds, SaslOauthbearerError},
+};
 use log::debug;
-use secrecy::{ExposeSecret, SecretBox, SecretString};
+use secrecy::{SecretBox, SecretString};
 use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc4954::{auth::SmtpAuthCommand, auth_data::SmtpAuthData},
+    rfc4954::{
+        auth::SmtpAuthCommand,
+        auth_data::{SmtpAuthChallengeError, SmtpAuthData, parse_challenge},
+    },
     rfc5321::{
         SmtpEhloDomain, SmtpReplyCode,
         ehlo::{SmtpEhlo, SmtpEhloError},
@@ -103,12 +117,33 @@ pub enum SmtpAuthOauthbearerError {
     Rejected {
         /// The reply code.
         code: u16,
-        /// The reply text, or the decoded error detail.
+        /// The reply text.
         message: String,
+    },
+    /// The server rejected the authentication after describing why in
+    /// a challenge.
+    #[error("SMTP AUTH OAUTHBEARER failed: rejected {code} {message} ({err})")]
+    RejectedWithError {
+        /// The reply code.
+        code: u16,
+        /// The reply text.
+        message: String,
+        /// The error payload extracted from the challenge.
+        err: String,
     },
     /// The server accepted before the expected challenge.
     #[error("SMTP AUTH OAUTHBEARER failed: server did not send the expected continuation request")]
     ExpectedContinuationRequest,
+    /// The challenge carried a payload that is not valid base64.
+    #[error("SMTP AUTH OAUTHBEARER failed: {0}")]
+    Challenge(#[from] SmtpAuthChallengeError),
+    /// The mechanism refused the exchange.
+    ///
+    /// A rejected token whose exchange the server ended with a success
+    /// reply lands here, carrying the JSON it sent, as does a challenge
+    /// arriving out of order.
+    #[error("SMTP AUTH OAUTHBEARER failed: {0}")]
+    Mechanism(#[from] SaslOauthbearerError),
     /// The underlying command exchange failed.
     #[error("SMTP AUTH OAUTHBEARER failed: {0}")]
     Send(#[from] SmtpCommandSendError),
@@ -118,49 +153,76 @@ pub enum SmtpAuthOauthbearerError {
 }
 
 /// I/O-free SMTP AUTH OAUTHBEARER coroutine. The connection MUST be
-/// TLS-protected before calling this. The optional `username` is
-/// embedded in the GS2 header; most servers ignore it.
+/// TLS-protected, the bearer token travelling in the clear otherwise.
 pub struct SmtpAuthOauthbearer {
     state: State,
+    mechanism: SaslOauthbearer,
     domain: Option<SmtpEhloDomain<'static>>,
-    payload: Option<Vec<u8>>,
-    error_detail: Option<String>,
     opts: SmtpAuthOauthbearerOptions,
 }
 
 impl SmtpAuthOauthbearer {
-    /// Creates the coroutine from the bearer token, an optional
-    /// authorization identity and the client identity used by the
-    /// capability refresh.
+    /// Creates the coroutine from the account identity, the server
+    /// being contacted, the bearer token and the client identity used
+    /// by the capability refresh.
+    ///
+    /// `host` and `port` travel verbatim in the GS2 header and should
+    /// match the server the stream is connected to, RFC 7628 section
+    /// 3.1 making them part of what the token is presented for.
     pub fn new(
+        username: &str,
+        host: &str,
+        port: u16,
         token: &SecretString,
-        username: Option<&str>,
         domain: SmtpEhloDomain<'_>,
         opts: SmtpAuthOauthbearerOptions,
     ) -> Self {
-        let payload = build_payload(token, username);
-
-        let state = if opts.initial_request {
-            let cmd = SmtpAuthCommand {
-                mechanism: Cow::Borrowed(OAUTHBEARER),
-                initial_response: Some(SecretBox::new(payload.clone().into_boxed_slice())),
-            };
-            State::Send(SmtpCommandSend::new(cmd))
-        } else {
-            let cmd = SmtpAuthCommand {
-                mechanism: Cow::Borrowed(OAUTHBEARER),
-                initial_response: None,
-            };
-            State::Send(SmtpCommandSend::new(cmd))
-        };
+        let mechanism = SaslOauthbearer::new(SaslOauthbearerCreds {
+            username: username.to_string(),
+            host: host.to_string(),
+            port,
+            token: token.clone(),
+        });
 
         Self {
-            state,
+            state: State::Start,
+            mechanism,
             domain: Some(domain.into_static()),
-            payload: Some(payload),
-            error_detail: None,
             opts,
         }
+    }
+
+    // helper that resumes the SASL coroutine
+    fn resume_sasl(
+        &mut self,
+        arg: SaslArg<'_>,
+    ) -> Result<Option<Vec<u8>>, SmtpAuthOauthbearerError> {
+        match self.mechanism.resume(arg) {
+            SaslCoroutineState::Yielded(SaslYield::WantsWrite(payload)) => Ok(Some(payload)),
+            SaslCoroutineState::Yielded(SaslYield::WantsRead) => Ok(None),
+            SaslCoroutineState::Complete(result) => result.map(|()| None).map_err(Into::into),
+        }
+    }
+
+    // helper that ends a rejected exchange, with the JSON the
+    // mechanism captured when the server sent one
+    fn rejected(&mut self, code: u16, message: String) -> SmtpAuthOauthbearerError {
+        match self.mechanism.resume(SaslArg::Done) {
+            SaslCoroutineState::Complete(Err(SaslOauthbearerError::Rejected(err))) => {
+                SmtpAuthOauthbearerError::RejectedWithError { code, message, err }
+            }
+            _ => SmtpAuthOauthbearerError::Rejected { code, message },
+        }
+    }
+
+    // helper that moves to the capability refresh, or completes
+    fn advance_after_auth(&mut self) -> Option<State> {
+        debug!("authenticated");
+
+        let domain = self.domain.take()?;
+        self.opts
+            .ensure_capabilities
+            .then(|| State::Ehlo(SmtpEhlo::new(domain)))
     }
 }
 
@@ -171,146 +233,167 @@ impl SmtpCoroutine for SmtpAuthOauthbearer {
     fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             match &mut self.state {
-                State::Send(send) => {
+                State::Start => {
+                    let payload = match self.resume_sasl(SaslArg::None) {
+                        Ok(payload) => payload,
+                        Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                    };
+
+                    let (initial_response, pending) = match payload {
+                        Some(payload) if self.opts.initial_request => {
+                            (Some(SecretBox::new(payload.into_boxed_slice())), None)
+                        }
+                        payload => (None, payload),
+                    };
+
+                    let cmd = SmtpAuthCommand {
+                        mechanism: Cow::Borrowed(OAUTHBEARER),
+                        initial_response,
+                    };
+
+                    self.state = State::Send {
+                        send: SmtpCommandSend::new(cmd),
+                        pending,
+                    };
+                    debug!("{}", self.state);
+                }
+                State::Send { send, pending } => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
-                        if self.opts.initial_request {
-                            self.advance_after_auth();
-                            continue;
-                        }
-                        return SmtpCoroutineState::Complete(Err(
-                            SmtpAuthOauthbearerError::ExpectedContinuationRequest,
-                        ));
-                    }
-
                     if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
-                        if self.opts.initial_request {
-                            let text = out.response.text().0.trim_start();
-                            if let Ok(detail_bytes) = base64.decode(text.as_bytes()) {
-                                self.error_detail = String::from_utf8(detail_bytes).ok();
+                        // NOTE: with the credentials still held back this is
+                        // the empty challenge inviting them; with them already
+                        // inlined it carries the rejection JSON, which only
+                        // the mechanism reads and answers.
+                        let payload = match pending.take() {
+                            Some(payload) => payload,
+                            None => {
+                                let challenge = match parse_challenge(&out.response.text().0) {
+                                    Ok(challenge) => challenge,
+                                    Err(err) => {
+                                        return SmtpCoroutineState::Complete(Err(err.into()));
+                                    }
+                                };
+
+                                match self.resume_sasl(SaslArg::Input(&challenge)) {
+                                    Ok(payload) => payload.unwrap_or_default(),
+                                    Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                                }
                             }
+                        };
 
-                            let ack = SmtpAuthData::r#continue(vec![0x01u8]);
-                            self.state = State::AckError(SmtpCommandSend::new(ack));
-                            debug!("error detail received, acknowledging");
-                            continue;
-                        }
-
-                        let payload = self.payload.take().expect("payload taken twice");
                         let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
                         self.state = State::Continue(SmtpCommandSend::new(data));
-                        debug!("challenge received, sending credentials");
+                        debug!("{}", self.state);
                         continue;
+                    }
+
+                    // NOTE: with the credentials inlined there is nothing left
+                    // to send, so the final reply ends the exchange here rather
+                    // than after a continuation. Without them, a server
+                    // accepting now never asked for what it is authenticating.
+                    let inlined = pending.is_none();
+
+                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
+                        if !inlined {
+                            let err = SmtpAuthOauthbearerError::ExpectedContinuationRequest;
+                            return SmtpCoroutineState::Complete(Err(err));
+                        }
+
+                        if let Err(err) = self.resume_sasl(SaslArg::Done) {
+                            return SmtpCoroutineState::Complete(Err(err));
+                        }
+
+                        match self.advance_after_auth() {
+                            Some(next) => {
+                                self.state = next;
+                                debug!("{}", self.state);
+                                continue;
+                            }
+                            None => return SmtpCoroutineState::Complete(Ok(())),
+                        }
                     }
 
                     let code = out.response.code.code();
                     let message = out.response.text().to_string();
-                    return SmtpCoroutineState::Complete(Err(SmtpAuthOauthbearerError::Rejected {
-                        code,
-                        message,
-                    }));
+                    let err = self.rejected(code, message);
+                    return SmtpCoroutineState::Complete(Err(err));
                 }
                 State::Continue(send) => {
                     let out = smtp_try!(send, arg);
 
-                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
-                        self.advance_after_auth();
+                    if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
+                        let challenge = match parse_challenge(&out.response.text().0) {
+                            Ok(challenge) => challenge,
+                            Err(err) => return SmtpCoroutineState::Complete(Err(err.into())),
+                        };
+
+                        let payload = match self.resume_sasl(SaslArg::Input(&challenge)) {
+                            Ok(payload) => payload.unwrap_or_default(),
+                            Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                        };
+
+                        let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
+                        self.state = State::Continue(SmtpCommandSend::new(data));
+                        debug!("{}", self.state);
                         continue;
                     }
 
-                    if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
-                        let text = out.response.text().0.trim_start();
-                        if let Ok(detail_bytes) = base64.decode(text.as_bytes()) {
-                            self.error_detail = String::from_utf8(detail_bytes).ok();
+                    if out.response.code == SmtpReplyCode::AUTH_SUCCESSFUL {
+                        // NOTE: the final reply ends the exchange, and the
+                        // mechanism is told so rather than dropped: a token the
+                        // server rejected mid-exchange is reported here, with
+                        // the JSON that explained it, rather than read as a
+                        // success.
+                        if let Err(err) = self.resume_sasl(SaslArg::Done) {
+                            return SmtpCoroutineState::Complete(Err(err));
                         }
 
-                        let ack = SmtpAuthData::r#continue(vec![0x01u8]);
-                        self.state = State::AckError(SmtpCommandSend::new(ack));
-                        debug!("error detail received, acknowledging");
-                        continue;
+                        match self.advance_after_auth() {
+                            Some(next) => {
+                                self.state = next;
+                                debug!("{}", self.state);
+                                continue;
+                            }
+                            None => return SmtpCoroutineState::Complete(Ok(())),
+                        }
                     }
 
                     let code = out.response.code.code();
                     let message = out.response.text().to_string();
-                    return SmtpCoroutineState::Complete(Err(SmtpAuthOauthbearerError::Rejected {
-                        code,
-                        message,
-                    }));
-                }
-                State::AckError(send) => {
-                    let _ = smtp_try!(send, arg);
-
-                    let message = self
-                        .error_detail
-                        .take()
-                        .unwrap_or_else(|| "authentication failed".into());
-
-                    return SmtpCoroutineState::Complete(Err(SmtpAuthOauthbearerError::Rejected {
-                        code: 535,
-                        message,
-                    }));
+                    let err = self.rejected(code, message);
+                    return SmtpCoroutineState::Complete(Err(err));
                 }
                 State::Ehlo(ehlo) => {
                     let _ = smtp_try!(ehlo, arg);
                     debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
-                State::Done => return SmtpCoroutineState::Complete(Ok(())),
             }
         }
     }
 }
 
-impl SmtpAuthOauthbearer {
-    fn advance_after_auth(&mut self) {
-        let _ = self.payload.take();
-        debug!("authenticated");
-        if self.opts.ensure_capabilities {
-            let domain = self.domain.take().expect("domain taken twice");
-            self.state = State::Ehlo(SmtpEhlo::new(domain));
-        } else {
-            self.state = State::Done;
-        }
-    }
-}
-
 enum State {
-    Send(SmtpCommandSend<SmtpAuthCommand<'static>>),
+    Start,
+    Send {
+        send: SmtpCommandSend<SmtpAuthCommand<'static>>,
+        pending: Option<Vec<u8>>,
+    },
     Continue(SmtpCommandSend<SmtpAuthData>),
-    AckError(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
-    Done,
 }
 
 impl fmt::Display for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Send(_) => f.write_str("send auth oauthbearer"),
+            Self::Start => f.write_str("start mechanism"),
+            Self::Send { pending, .. } if pending.is_some() => f.write_str("send auth oauthbearer"),
+            Self::Send { .. } => f.write_str("send auth oauthbearer with ir"),
             Self::Continue(_) => f.write_str("send credentials"),
-            Self::AckError(_) => f.write_str("ack error detail"),
             Self::Ehlo(_) => f.write_str("refresh capabilities"),
-            Self::Done => f.write_str("done"),
         }
     }
-}
-
-/// Build the OAUTHBEARER wire payload:
-/// `n,` [`a=<u>`] `,\x01auth=Bearer <t>\x01\x01`.
-fn build_payload(token: &SecretString, username: Option<&str>) -> Vec<u8> {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(b"n,");
-    if let Some(user) = username {
-        payload.extend_from_slice(b"a=");
-        payload.extend_from_slice(user.as_bytes());
-    }
-    payload.push(b',');
-    payload.push(0x01);
-    payload.extend_from_slice(b"auth=Bearer ");
-    payload.extend_from_slice(token.expose_secret().as_bytes());
-    payload.push(0x01);
-    payload.push(0x01);
-    payload
 }
 
 #[cfg(test)]
@@ -334,11 +417,20 @@ mod tests {
         SecretString::from("ya29.tokenvalue".to_string())
     }
 
+    fn auth(opts: SmtpAuthOauthbearerOptions) -> SmtpAuthOauthbearer {
+        SmtpAuthOauthbearer::new(
+            "alice@example.com",
+            "smtp.example.com",
+            587,
+            &token(),
+            domain(),
+            opts,
+        )
+    }
+
     #[test]
     fn ir_success_does_not_send_ehlo_by_default() {
-        let opts = SmtpAuthOauthbearerOptions::default();
-        let mut auth =
-            SmtpAuthOauthbearer::new(&token(), Some("alice@example.com"), domain(), opts);
+        let mut auth = auth(SmtpAuthOauthbearerOptions::default());
 
         let _ = expect_wants_write(&mut auth, None);
         expect_wants_read(&mut auth);
@@ -347,12 +439,10 @@ mod tests {
 
     #[test]
     fn ir_success_with_ehlo_returns_ok() {
-        let opts = SmtpAuthOauthbearerOptions {
+        let mut auth = auth(SmtpAuthOauthbearerOptions {
             initial_request: true,
             ensure_capabilities: true,
-        };
-        let mut auth =
-            SmtpAuthOauthbearer::new(&token(), Some("alice@example.com"), domain(), opts);
+        });
 
         let _ = expect_wants_write(&mut auth, None);
         expect_wants_read(&mut auth);
@@ -362,57 +452,61 @@ mod tests {
     }
 
     #[test]
-    fn ir_success_without_ehlo_returns_ok() {
-        let opts = SmtpAuthOauthbearerOptions {
-            initial_request: true,
-            ensure_capabilities: false,
-        };
-        let mut auth = SmtpAuthOauthbearer::new(&token(), None, domain(), opts);
-        let _ = expect_wants_write(&mut auth, None);
-        expect_wants_read(&mut auth);
-        expect_complete_ok(&mut auth, b"235 OK\r\n");
+    fn ir_sends_the_gs2_header_with_host_and_port() {
+        let mut auth = auth(SmtpAuthOauthbearerOptions::default());
+
+        let bytes = expect_wants_write(&mut auth, None);
+        let line = String::from_utf8(bytes).expect("utf8 command");
+        let payload = line
+            .trim_end()
+            .rsplit_once(' ')
+            .map(|(_, ir)| ir.to_string())
+            .expect("inline initial response");
+        let payload = base64_decode(&payload);
+
+        assert!(payload.contains("n,a=alice@example.com,"));
+        assert!(payload.contains("host=smtp.example.com"));
+        assert!(payload.contains("port=587"));
     }
 
     #[test]
-    fn error_detail_returns_rejected() {
-        let opts = SmtpAuthOauthbearerOptions {
-            initial_request: true,
-            ensure_capabilities: false,
-        };
-        let mut auth = SmtpAuthOauthbearer::new(&token(), None, domain(), opts);
+    fn error_detail_returns_rejected_with_error() {
+        let mut auth = auth(SmtpAuthOauthbearerOptions::default());
         let _ = expect_wants_write(&mut auth, None);
         expect_wants_read(&mut auth);
 
+        // NOTE: the JSON is read and acknowledged by the mechanism, which
+        // hands it back once the server ends the exchange.
         let challenge = b"334 eyJzdGF0dXMiOiI0MDEifQ==\r\n";
         let _ack = expect_wants_write(&mut auth, Some(challenge));
         expect_wants_read(&mut auth);
 
         let err = expect_complete_err(&mut auth, b"535 authentication failed\r\n");
-        let SmtpAuthOauthbearerError::Rejected { code, message } = err else {
-            panic!("expected SmtpAuthOauthbearerError::Rejected, got {err:?}");
+        let SmtpAuthOauthbearerError::RejectedWithError { code, message, err } = err else {
+            panic!("expected SmtpAuthOauthbearerError::RejectedWithError, got {err:?}");
         };
         assert_eq!(code, 535);
-        assert!(message.contains("status") || message.contains("401"));
+        assert_eq!(message, "authentication failed");
+        assert_eq!(err, r#"{"status":"401"}"#);
     }
 
     #[test]
     fn rejected_returns_rejected_error() {
-        let opts = SmtpAuthOauthbearerOptions::default();
-        let mut auth = SmtpAuthOauthbearer::new(&token(), None, domain(), opts);
+        let mut auth = auth(SmtpAuthOauthbearerOptions::default());
         let _ = expect_wants_write(&mut auth, None);
         expect_wants_read(&mut auth);
 
         let err = expect_complete_err(&mut auth, b"504 mechanism disabled\r\n");
-        let SmtpAuthOauthbearerError::Rejected { code, .. } = err else {
+        let SmtpAuthOauthbearerError::Rejected { code, message } = err else {
             panic!("expected SmtpAuthOauthbearerError::Rejected, got {err:?}");
         };
         assert_eq!(code, 504);
+        assert_eq!(message, "mechanism disabled");
     }
 
     #[test]
     fn eof_returns_eof_error() {
-        let opts = SmtpAuthOauthbearerOptions::default();
-        let mut auth = SmtpAuthOauthbearer::new(&token(), None, domain(), opts);
+        let mut auth = auth(SmtpAuthOauthbearerOptions::default());
         let _ = expect_wants_write(&mut auth, None);
         expect_wants_read(&mut auth);
 
@@ -421,6 +515,13 @@ mod tests {
             err,
             SmtpAuthOauthbearerError::Send(SmtpCommandSendError::Eof)
         ));
+    }
+
+    fn base64_decode(input: &str) -> String {
+        use base64::{Engine, engine::general_purpose::STANDARD as base64};
+
+        let bytes = base64.decode(input).expect("base64 payload");
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     fn expect_wants_write(cor: &mut SmtpAuthOauthbearer, arg: Option<&[u8]>) -> Vec<u8> {

@@ -6,7 +6,7 @@
 
 use std::{env, error::Error, net::TcpStream, sync::Arc};
 
-use io_smtp::client::SmtpClientStd;
+use io_smtp::client::{SmtpClient, SmtpClientStd};
 use rustls::{ClientConfig, ClientConnection, StreamOwned, crypto::ring, pki_types::ServerName};
 use rustls_platform_verifier::ConfigVerifierExt;
 

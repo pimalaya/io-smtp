@@ -17,12 +17,13 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["scram", "rustls-ring"]
-scram = ["dep:hmac", "dep:pbkdf2", "dep:rand", "dep:sha2"]
+scram = ["dep:rand", "io-sasl/scram"]
+url = ["dep:url"]
 client = []
-rustls-ring = ["client", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:url"]
-rustls-aws  = ["client", "pimalaya-stream/rustls-aws", "dep:anyhow", "dep:url"]
-native-tls  = ["client", "pimalaya-stream/native-tls", "dep:anyhow", "dep:url"]
-vendored = ["pimalaya-stream?/vendored"]
+rustls-ring = ["client", "url", "pimalaya-stream/rustls-ring", "dep:anyhow"]
+rustls-aws  = ["client", "url", "pimalaya-stream/rustls-aws", "dep:anyhow"]
+native-tls  = ["client", "url", "pimalaya-stream/native-tls", "dep:anyhow"]
+vendored = ["pimalaya-stream/vendored"]
 
 [[example]]
 name = "std_coroutine"
@@ -31,6 +32,11 @@ path = "examples/std_coroutine.rs"
 [[example]]
 name = "tokio_coroutine"
 path = "examples/tokio_coroutine.rs"
+
+[[example]]
+name = "tokio_session"
+path = "examples/tokio_session.rs"
+required-features = ["url"]
 
 [[example]]
 name = "std_client_light"
@@ -44,6 +50,9 @@ required-features = ["rustls-ring"]
 
 [dev-dependencies]
 env_logger = "0.11"
+hmac = "0.13"
+pbkdf2 = { version = "0.13", features = ["hmac"] }
+sha2 = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 rustls-platform-verifier = "0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
@@ -56,12 +65,14 @@ base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 bounded-static = { version = "0.8", default-features = false, features = ["alloc"] }
 bounded-static-derive = { version = "0.8", default-features = false }
 chumsky = { version = "0.13", default-features = false }
-hmac = { version = "0.13", optional = true, default-features = false }
+io-sasl = { version = "0.1", default-features = false }
 log = { version = "0.4", default-features = false }
-pbkdf2 = { version = "0.13.0", optional = true, default-features = false, features = ["hmac"] }
-pimalaya-stream = { version = "0.1", default-features = false, optional = true }
+pimalaya-stream = { version = "0.2", default-features = false, optional = true }
 rand = { version = "0.10", optional = true }
 secrecy = { version = "0.10", default-features = false }
-sha2 = { version = "0.11", optional = true, default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2.2", default-features = false, optional = true }
+
+[patch.crates-io]
+io-sasl.git = "https://github.com/pimalaya/io-sasl"
+pimalaya-stream.git = "https://github.com/pimalaya/stream"

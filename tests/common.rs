@@ -4,6 +4,13 @@
 //! server using blocking std I/O.
 
 #![allow(dead_code)]
+// NOTE: the helpers open sockets through pimalaya-stream, which only
+// exists once a TLS provider feature is on.
+#![cfg(any(
+    feature = "rustls-aws",
+    feature = "rustls-ring",
+    feature = "native-tls"
+))]
 
 use std::io::{Read, Write};
 
@@ -138,6 +145,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
         Auth::Plain { username, password } => {
             let password = SecretString::from(password);
             let mut coroutine = SmtpAuthPlain::new(
+                None::<&str>,
                 &username,
                 &password,
                 ehlo_domain.clone(),
