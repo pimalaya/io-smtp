@@ -27,7 +27,10 @@ use io_smtp::{
         auth_plain::{SmtpAuthPlain, SmtpAuthPlainOptions},
     },
 };
-use pimalaya_stream::{std::stream::StreamStd, tls::Tls};
+use pimalaya_stream::{
+    stream::{Stream, TcpConnectOptions, TlsConnectOptions},
+    tls::Tls,
+};
 use secrecy::SecretString;
 
 /// Auth mechanism to use for a test run.
@@ -49,7 +52,8 @@ pub enum Auth {
 /// ```
 pub fn run_smtp(host: &str, auth: Auth, email: &str) {
     let _ = env_logger::try_init();
-    let stream = StreamStd::connect_tcp(host, 25).expect("TCP connect");
+    let opts = TcpConnectOptions::default();
+    let stream = Stream::connect_tcp(host, 25, opts).expect("TCP connect");
     run(stream, auth, email)
 }
 
@@ -65,7 +69,11 @@ pub fn run_smtp(host: &str, auth: Auth, email: &str) {
 /// ```
 pub fn run_smtps(host: &str, port: u16, auth: Auth, email: &str) {
     let _ = env_logger::try_init();
-    let stream = StreamStd::connect_tls(host, port, &Tls::default()).expect("TLS connect");
+    let opts = TlsConnectOptions {
+        tls: Tls::default(),
+        ..Default::default()
+    };
+    let stream = Stream::connect_tls(host, port, opts).expect("TLS connect");
     run(stream, auth, email)
 }
 

@@ -1,4 +1,4 @@
-# I/O SMTP [![Documentation](https://img.shields.io/docsrs/io-smtp?style=flat&logo=docs.rs&logoColor=white)](https://docs.rs/io-smtp/latest/io_smtp) [![Matrix](https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white)](https://matrix.to/#/#pimalaya:matrix.org) [![Mastodon](https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white)](https://fosstodon.org/@pimalaya)
+# I/O SMTP [![Documentation](https://img.shields.io/docsrs/io-smtp?style=flat&logo=docs.rs&logoColor=white)](https://docs.rs/io-smtp/latest/io_smtp) [![Matrix](https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white)](https://matrix.to/#/#pimalaya:matrix.org) [![Mastodon](https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white)](https://fosstodon.org/@pimalaya) [![Sponsor](https://img.shields.io/badge/sponsor-pink?style=flat&logo=github-sponsors&logoColor=white)](https://pimalaya.org/sponsor/)
 
 SMTP client library for Rust
 
@@ -22,14 +22,14 @@ This library is composed of 3 feature-gated layers:
 
 ## Features
 
-- **I/O-free** coroutines: no_std state machines; no sockets, no async runtime, run them from any blocking, async or fuzz harness.
+- **I/O-free coroutines**: no_std state machines; no sockets, no async runtime, run them from any blocking, async or fuzz harness.
 - **Message submission**: greeting, capability discovery, sender and recipient declaration, message data with automatic dot-stuffing, session reset and teardown, plus an all-in-one send.
 - **STARTTLS**: upgrade a plain connection to an encrypted one, detecting bytes injected before the handshake.
 - **Authentication**: the PLAIN, LOGIN, ANONYMOUS, XOAUTH2, OAUTHBEARER and SCRAM-SHA-256 mechanisms, with or without inline initial response.
 - **Delivery status notifications**: ask the server to report successful, failed or delayed delivery, per recipient.
 - **Server limits and diagnostics**: declared maximum message size and enhanced status codes.
-- Light standard, blocking client wrapping a stream you opened and secured yourself.
-- Full standard, blocking client with **TLS** support:
+- **Light client**: a standard, blocking client wrapping a stream you opened and secured yourself.
+- **Full client** with **TLS** support:
   - [Rustls](https://crates.io/crates/rustls) with ring crypto (requires `rustls-ring` feature, enabled by default)
   - [Rustls](https://crates.io/crates/rustls) with aws crypto (requires `rustls-aws` feature)
   - [Native TLS](https://crates.io/crates/native-tls) (requires `native-tls` feature)
@@ -67,11 +67,11 @@ The LOGIN and XOAUTH2 mechanisms have no RFC: they follow the historical draft a
 
 ## Usage
 
-The whole API is documented on [docs.rs](https://docs.rs/io-smtp/latest/io_smtp), including runnable snippets for every coroutine and client.
+See documentation at [docs.rs](https://docs.rs/io-smtp/latest/io_smtp).
 
 ## Examples
 
-Complete runnable programs live in [./examples](./examples); the tests also demonstrate real usage.
+See complete examples at [./examples](./examples).
 
 ## License
 
@@ -97,7 +97,7 @@ Special thanks to the [NLnet foundation](https://nlnet.nl/) and the [European Co
 - 2024 → 2026: [NGI Zero Core](https://nlnet.nl/project/Pimalaya-PIM/)
 - 2026 → 2027: [NGI Zero Commons Fund](https://nlnet.nl/project/Pimalaya-pimdir/)
 
-If you appreciate the project, feel free to donate using one of the following providers:
+This program is part of Pimalaya, free software funded entirely by grants and donations. If you find it useful, consider [sponsoring](https://pimalaya.org/sponsor/) its development:
 
 [![GitHub](https://img.shields.io/badge/-GitHub%20Sponsors-fafbfc?logo=GitHub%20Sponsors)](https://github.com/sponsors/soywod)
 [![Ko-fi](https://img.shields.io/badge/-Ko--fi-ff5e5a?logo=Ko-fi&logoColor=ffffff)](https://ko-fi.com/soywod)

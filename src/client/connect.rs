@@ -13,7 +13,10 @@ use std::io::{self, Read, Write};
 use io_sasl::mechanism::Sasl;
 #[cfg(feature = "scram")]
 use io_sasl::rfc5802::SaslScramCreds;
-use pimalaya_stream::{std::stream::StreamStd, tls::Tls};
+use pimalaya_stream::{
+    stream::{Stream, TcpConnectOptions, TlsConnectOptions, UnixConnectOptions},
+    tls::Tls,
+};
 #[cfg(feature = "scram")]
 use rand::{RngExt, distr::Alphanumeric, rng};
 use url::Url;
@@ -47,7 +50,7 @@ impl SmtpClientStd {
     /// credentials.
     ///
     /// Every protocol decision belongs to [`SmtpSessionOpen`]; this
-    /// method only answers its transport requests with [`StreamStd`].
+    /// method only answers its transport requests with [`Stream`].
     /// A caller on another runtime pumps the same coroutine with its
     /// own sockets.
     ///
@@ -63,7 +66,7 @@ impl SmtpClientStd {
         let transport = SmtpSessionTransport::from_url(url)?;
         let sasl = sasl.map(Into::into).map(with_client_nonce);
         let mut session = SmtpSessionOpen::new(transport, domain, sasl, opts);
-        let mut stream: Option<StreamStd> = None;
+        let mut stream: Option<Stream> = None;
         let mut buf = [0u8; READ_BUFFER_SIZE];
         let mut arg: Option<&[u8]> = None;
 
@@ -83,16 +86,23 @@ impl SmtpClientStd {
                     host,
                     port,
                 }) => {
-                    stream = Some(StreamStd::connect_tcp(host, port)?);
+                    let opts = TcpConnectOptions::default();
+                    stream = Some(Stream::connect_tcp(host, port, opts)?);
                 }
                 SmtpCoroutineState::Yielded(SmtpSessionOpenYield::WantsTlsConnect {
                     host,
                     port,
                 }) => {
-                    stream = Some(StreamStd::connect_tls(host, port, tls)?);
+                    let opts = TlsConnectOptions {
+                        tls: tls.clone(),
+                        ..Default::default()
+                    };
+
+                    stream = Some(Stream::connect_tls(host, port, opts)?);
                 }
                 SmtpCoroutineState::Yielded(SmtpSessionOpenYield::WantsUnixConnect(path)) => {
-                    stream = Some(StreamStd::connect_unix(path)?);
+                    let opts = UnixConnectOptions::default();
+                    stream = Some(Stream::connect_unix(path, opts)?);
                 }
                 SmtpCoroutineState::Yielded(SmtpSessionOpenYield::WantsTlsUpgrade) => {
                     let plain = stream.take().ok_or_else(missing)?;

@@ -18,10 +18,10 @@
 //! end-to-end. It owns no protocol logic of its own: the ordering, the
 //! scheme table and the SASL dispatch all live in [`SmtpSessionOpen`],
 //! and [`connect`] only answers its transport, read and write requests
-//! with a [`StreamStd`].
+//! with a [`Stream`].
 //!
 //! [`SmtpSessionOpen`]: crate::session::SmtpSessionOpen
-//! [`StreamStd`]: pimalaya_stream::std::stream::StreamStd
+//! [`Stream`]: pimalaya_stream::stream::Stream
 //! [`new`]: SmtpClientStd::new
 //! [`connect`]: SmtpClientStd::connect
 //! [`greeting`]: SmtpClient::greeting
@@ -502,11 +502,11 @@ impl fmt::Debug for SmtpClientStd {
 /// blocking `Read + Write + Send + 'static` impl. The `Send` supertrait flows
 /// the auto-trait through the `Box<dyn SmtpStream>` type erasure so
 /// `SmtpClientStd` can travel between threads.  [`as_any_mut`] lets specialized
-/// callers (e.g. byte-level proxies that need [`StreamStd::set_read_timeout`])
+/// callers (e.g. byte-level proxies that need [`Stream::set_read_timeout`])
 /// downcast the boxed stream back to its concrete type.
 ///
 /// [`as_any_mut`]: SmtpStream::as_any_mut
-/// [`StreamStd::set_read_timeout`]: pimalaya_stream::std::stream::StreamStd::set_read_timeout
+/// [`Stream::set_read_timeout`]: pimalaya_stream::stream::Stream::set_read_timeout
 pub trait SmtpStream: Read + Write + Send + Any {
     /// Downcasts the boxed stream back to its concrete type.
     fn as_any_mut(&mut self) -> &mut dyn Any;

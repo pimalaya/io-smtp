@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-15
+
 ### Added
 
 - Added the `session` module and its `SmtpSessionOpen` coroutine, the composite covering everything between an address and an authenticated SMTP session: transport selection, the greeting, the EHLO exchange, the optional STARTTLS upgrade with a second EHLO over TLS, and the SASL exchange.
@@ -62,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made pimalaya-stream an optional dependency again, enabled by the TLS provider features.
 
   Nothing outside the std client reaches for it now that the SASL vocabulary comes from io-sasl, so a no_std build of the coroutine core no longer pulls in a crate that wraps sockets and TLS sessions.
+
+- Bumped pimalaya-stream to 0.3, whose `Read` and `Write` retry a stream reporting it is not ready. **Behaviour change.**
+
+  A blocking socket is not supposed to report `EAGAIN`, yet callers saw one surface mid-exchange and end the exchange with a bare `Resource temporarily unavailable (os error 35)`, macOS especially and the more readily the longer the exchange ran. The transport now retries such a failure for a minute before giving up with a `TimedOut` naming the budget, and arms a socket read deadline at connect time so a server going silent on a healthy connection stops blocking the caller forever. Its `StreamStd` is renamed `stream::Stream` and its connects take a per-transport options struct, which is what `SmtpClientStd::connect` now calls.
+
+- Raised the minimum supported Rust version from 1.87 to 1.88, following pimalaya-stream.
 
 ### Fixed
 
@@ -203,7 +211,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Enables `trace!("<op>: {}", self.state)` for uniform protocol tracing.
 
-[unreleased]: https://github.com/pimalaya/io-smtp/compare/v0.2.3..HEAD
+[unreleased]: https://github.com/pimalaya/io-smtp/compare/v0.3.0..HEAD
+[0.3.0]: https://github.com/pimalaya/io-smtp/compare/v0.2.3..v0.3.0
 [0.2.3]: https://github.com/pimalaya/io-smtp/compare/v0.2.2..v0.2.3
 [0.2.2]: https://github.com/pimalaya/io-smtp/compare/v0.2.1..v0.2.2
 [0.2.1]: https://github.com/pimalaya/io-smtp/compare/v0.2.0..v0.2.1

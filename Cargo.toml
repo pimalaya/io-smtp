@@ -1,9 +1,9 @@
 [package]
 name = "io-smtp"
 description = "SMTP client library for Rust"
-version = "0.2.3"
+version = "0.3.0"
 authors = ["soywod <pimalaya.org@posteo.net>"]
-rust-version = "1.87"
+rust-version = "1.88"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 categories = ["email", "no-std"]
@@ -67,12 +67,8 @@ bounded-static-derive = { version = "0.8", default-features = false }
 chumsky = { version = "0.13", default-features = false }
 io-sasl = { version = "0.1", default-features = false }
 log = { version = "0.4", default-features = false }
-pimalaya-stream = { version = "0.2", default-features = false, optional = true }
+pimalaya-stream = { version = "0.3", default-features = false, optional = true }
 rand = { version = "0.10", optional = true }
 secrecy = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2.2", default-features = false, optional = true }
-
-[patch.crates-io]
-io-sasl.git = "https://github.com/pimalaya/io-sasl"
-pimalaya-stream.git = "https://github.com/pimalaya/stream"
