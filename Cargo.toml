@@ -13,6 +13,7 @@ documentation = "https://docs.rs/io-smtp/latest/io_smtp"
 repository = "https://github.com/pimalaya/io-smtp"
 
 [package.metadata.docs.rs]
+all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
