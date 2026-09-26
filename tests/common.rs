@@ -16,7 +16,7 @@ use std::io::{Read, Write};
 
 use io_smtp::{
     coroutine::*,
-    message::SmtpMessageSend,
+    message::{SmtpMessageSend, SmtpMessageSendOptions},
     rfc5321::{
         SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpLocalPart, SmtpMailbox, SmtpReversePath,
         ehlo::SmtpEhlo, greeting::SmtpGreetingGet, helo::SmtpHelo, mail::SmtpMail, noop::SmtpNoop,
@@ -304,7 +304,12 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
     ]
     .join("\r\n");
 
-    let mut coroutine = SmtpMessageSend::new(reverse_path, [forward_path], eml.into_bytes());
+    let mut coroutine = SmtpMessageSend::new(
+        reverse_path,
+        [forward_path],
+        eml.into_bytes(),
+        SmtpMessageSendOptions::default(),
+    );
     let mut chunk: Vec<u8>;
     let mut arg: Option<&[u8]> = None;
 

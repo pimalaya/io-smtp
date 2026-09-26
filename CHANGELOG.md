@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `SmtpMessageSendOptions`, whose `keep_bcc` field transmits the `Bcc` field as given.
+
+### Changed
+
+- **BREAKING**: `SmtpMessageSend::new` and the `send` method of `SmtpClient` and `SmtpClientAsync` take a `SmtpMessageSendOptions` as last argument.
+
+### Fixed
+
+- Fixed the `Bcc` field being transmitted to every recipient, disclosing the blind-copied addresses (RFC 5322 3.6.3).
+
+  `SmtpMessageSend` now removes it from the header section, folded lines included, before `DATA`, unless `keep_bcc` is set. The forward paths are unchanged, so blind recipients still receive the message.
+
 ## [0.3.0] - 2026-08-15
 
 ### Added

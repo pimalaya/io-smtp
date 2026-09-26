@@ -406,8 +406,9 @@ smtp_client_commands! {
         reverse_path: SmtpReversePath<'static>,
         forward_paths: Vec<SmtpForwardPath<'static>>,
         message: Vec<u8>,
+        options: SmtpMessageSendOptions,
     ) -> () {
-        SmtpMessageSend::new(reverse_path, forward_paths, message)
+        SmtpMessageSend::new(reverse_path, forward_paths, message, options)
     }
 }
 
