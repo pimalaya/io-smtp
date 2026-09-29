@@ -14,6 +14,7 @@ use io_sasl::mechanism::Sasl;
 #[cfg(feature = "scram")]
 use io_sasl::rfc5802::SaslScramCreds;
 use pimalaya_stream::{
+    proxy::Proxy,
     stream::{Stream, TcpConnectOptions, TlsConnectOptions, UnixConnectOptions},
     tls::Tls,
 };
@@ -28,26 +29,47 @@ use crate::{
     session::*,
 };
 
+/// Optional settings for [`SmtpClientStd::connect`].
+///
+/// The default uses the TLS backend default, resolves the proxy from
+/// the environment, skips authentication and follows the session
+/// defaults.
+#[derive(Clone, Debug, Default)]
+pub struct SmtpClientStdConnectOptions {
+    /// How the TLS transports are secured, implicit or via STARTTLS
+    /// (see [`SmtpSessionOpenOptions::starttls`]).
+    ///
+    /// It carries the rustls/native-tls options and the ALPN list (see
+    /// [`SmtpClientStd::default_alpn`] for the SMTP-conformant
+    /// `["smtp"]`; set `tls.rustls.alpn` to an empty vec to skip ALPN).
+    pub tls: Tls,
+    /// How the TCP and TLS transports reach the server.
+    ///
+    /// [`Proxy::System`] resolves it from the environment,
+    /// [`Proxy::None`] connects directly. A local socket ignores it.
+    pub proxy: Proxy,
+    /// The SASL mechanism to authenticate with, `None` skipping
+    /// authentication, since SMTP has no PREAUTH greeting to skip it
+    /// for you.
+    ///
+    /// SCRAM credentials carrying an empty nonce are given one drawn at
+    /// connect time, an empty nonce being no nonce at all as far as RFC
+    /// 5802 is concerned; a caller wanting its own passes it in the
+    /// credentials.
+    pub sasl: Option<Sasl>,
+    /// The protocol options handed to [`SmtpSessionOpen`].
+    pub session: SmtpSessionOpenOptions,
+}
+
 impl SmtpClientStd {
     /// End-to-end connect: TCP/TLS, greeting, EHLO, optional STARTTLS
     /// with a second EHLO, optional SASL.
     ///
     /// `smtp://` is plain TCP (25), `smtps://` is implicit TLS (465),
     /// `unix://` is a local socket reaching a proxy such as sirup.
-    /// `opts.starttls = true` is only valid on a cleartext transport.
-    /// `domain` is the client identifier sent in EHLO, typically the
-    /// sending host name or an address literal. `tls` carries the
-    /// rustls/native-tls options and the ALPN list (see
-    /// [`Self::default_alpn`] for the SMTP-conformant `["smtp"]`; set
-    /// `tls.rustls.alpn` to an empty vec to skip ALPN).
-    ///
-    /// `sasl` accepts anything converting into a [`Sasl`], so a caller
-    /// passes the per-mechanism credentials directly; [`None`] skips
-    /// authentication, since SMTP has no PREAUTH greeting to skip it
-    /// for you. SCRAM credentials carrying an empty nonce are given one
-    /// drawn here, an empty nonce being no nonce at all as far as RFC
-    /// 5802 is concerned; a caller wanting its own passes it in the
-    /// credentials.
+    /// `opts.session.starttls = true` is only valid on a cleartext
+    /// transport. `domain` is the client identifier sent in EHLO,
+    /// typically the sending host name or an address literal.
     ///
     /// Every protocol decision belongs to [`SmtpSessionOpen`]; this
     /// method only answers its transport requests with [`Stream`].
@@ -58,14 +80,19 @@ impl SmtpClientStd {
     /// reported by the last EHLO.
     pub fn connect(
         url: &Url,
-        tls: &Tls,
         domain: SmtpEhloDomain<'_>,
-        sasl: Option<impl Into<Sasl>>,
-        opts: SmtpSessionOpenOptions,
+        opts: SmtpClientStdConnectOptions,
     ) -> Result<(Self, Vec<Cow<'static, str>>), SmtpClientError> {
+        let SmtpClientStdConnectOptions {
+            tls,
+            proxy,
+            sasl,
+            session,
+        } = opts;
+
         let transport = SmtpSessionTransport::from_url(url)?;
-        let sasl = sasl.map(Into::into).map(with_client_nonce);
-        let mut session = SmtpSessionOpen::new(transport, domain, sasl, opts);
+        let sasl = sasl.map(with_client_nonce);
+        let mut session = SmtpSessionOpen::new(transport, domain, sasl, session);
         let mut stream: Option<Stream> = None;
         let mut buf = [0u8; READ_BUFFER_SIZE];
         let mut arg: Option<&[u8]> = None;
@@ -86,7 +113,11 @@ impl SmtpClientStd {
                     host,
                     port,
                 }) => {
-                    let opts = TcpConnectOptions::default();
+                    let opts = TcpConnectOptions {
+                        proxy: proxy.clone(),
+                        ..Default::default()
+                    };
+
                     stream = Some(Stream::connect_tcp(host, port, opts)?);
                 }
                 SmtpCoroutineState::Yielded(SmtpSessionOpenYield::WantsTlsConnect {
@@ -95,6 +126,7 @@ impl SmtpClientStd {
                 }) => {
                     let opts = TlsConnectOptions {
                         tls: tls.clone(),
+                        proxy: proxy.clone(),
                         ..Default::default()
                     };
 
@@ -106,7 +138,7 @@ impl SmtpClientStd {
                 }
                 SmtpCoroutineState::Yielded(SmtpSessionOpenYield::WantsTlsUpgrade) => {
                     let plain = stream.take().ok_or_else(missing)?;
-                    stream = Some(plain.upgrade_tls(tls)?);
+                    stream = Some(plain.upgrade_tls(&tls)?);
                 }
                 SmtpCoroutineState::Yielded(SmtpSessionOpenYield::WantsRead) => {
                     let n = stream.as_mut().ok_or_else(missing)?.read(&mut buf)?;

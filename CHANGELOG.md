@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `SmtpClientStdConnectOptions`, whose `proxy` field tunnels the connection through a SOCKS5 or HTTP proxy.
+
+### Changed
+
+- **BREAKING**: `SmtpClientStd::connect` takes `(url, domain, opts)`, the TLS configuration, the SASL mechanism and the session options moving into `SmtpClientStdConnectOptions`.
+
 ## [0.4.0] - 2026-09-26
 
 ### Added
