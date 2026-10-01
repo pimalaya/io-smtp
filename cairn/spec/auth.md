@@ -25,3 +25,7 @@ Given credentials, the `AUTH` exchange SHALL follow the STARTTLS upgrade and the
 `SmtpAuthCapability::parse` SHALL read the raw `AUTH` capability line, rejecting a line whose first token is not `AUTH`, and SHALL expose the advertised mechanism names through `has` (case-insensitive) and `mechanisms`. Both SHALL borrow from the capability line rather than allocating names, the response outliving the read.
 
 The names SHALL be exposed as they were advertised, `&str`, and not as `SaslMechanism` values. A caller matching them against the mechanisms it can configure does that mapping itself.
+
+## Requirement: The OAuth mechanisms are verified live
+
+OAUTHBEARER and XOAUTH2 SHALL each be exercised by an ignored live test against Gmail's submission service, authenticating as a Workspace test user with a token the test mints from a service account key, so the suite runs unattended. The tests SHALL go through `SmtpClientStd::connect`, one over implicit TLS and one over STARTTLS, so the session layer and the upgrade are verified against a real server too. The test message SHALL go to that user only.

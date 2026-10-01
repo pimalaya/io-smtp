@@ -43,6 +43,7 @@ jobs:
           RUST_LOG: trace
           GMAIL_EMAIL: ${{ secrets.GMAIL_EMAIL }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SMTP_GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.SMTP_GOOGLE_SERVICE_ACCOUNT_KEY }}
 
   stalwart-tests:
     runs-on: ubuntu-latest

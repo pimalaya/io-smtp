@@ -8,7 +8,7 @@
 
 mod common;
 
-use crate::common::{Auth, run_smtp};
+use crate::common::{Auth, run_client, run_smtp};
 
 /// End-to-end test against a local Stalwart SMTP server.
 ///
@@ -26,4 +26,12 @@ use crate::common::{Auth, run_smtp};
 #[ignore = "requires a running Stalwart instance on localhost:25 and --ignored"]
 fn stalwart() {
     run_smtp("localhost", Auth::None, "test@pimalaya.org");
+}
+
+/// End-to-end test of the client layer against a local Stalwart SMTP
+/// server, unauthenticated.
+#[test]
+#[ignore = "requires a running Stalwart instance on localhost:25 and --ignored"]
+fn stalwart_client() {
+    run_client("smtp://localhost:25", None, "test@pimalaya.org", false);
 }

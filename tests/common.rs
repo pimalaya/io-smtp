@@ -14,24 +14,32 @@
 
 use std::io::{Read, Write};
 
+use bounded_static::IntoBoundedStatic;
+use io_sasl::mechanism::Sasl;
 use io_smtp::{
+    client::{SmtpClient, SmtpClientStd, SmtpClientStdConnectOptions},
     coroutine::*,
     message::{SmtpMessageSend, SmtpMessageSendOptions},
+    rfc1870::size::SmtpSizeCapability,
+    rfc3461::parameter::{SmtpDsnNotify, SmtpDsnRet},
+    rfc4954::capability::SmtpAuthCapability,
     rfc5321::{
-        SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpLocalPart, SmtpMailbox, SmtpReversePath,
-        ehlo::SmtpEhlo, greeting::SmtpGreetingGet, helo::SmtpHelo, mail::SmtpMail, noop::SmtpNoop,
-        quit::SmtpQuit, rcpt::SmtpRcpt, rset::SmtpRset,
+        SmtpAtom, SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpLocalPart, SmtpMailbox,
+        SmtpParameter, SmtpReversePath, ehlo::SmtpEhlo, greeting::SmtpGreetingGet, helo::SmtpHelo,
+        mail::SmtpMail, noop::SmtpNoop, quit::SmtpQuit, rcpt::SmtpRcpt, rset::SmtpRset,
     },
     sasl::{
         auth_login::{SmtpAuthLogin, SmtpAuthLoginOptions},
         auth_plain::{SmtpAuthPlain, SmtpAuthPlainOptions},
     },
+    session::SmtpSessionOpenOptions,
 };
 use pimalaya_stream::{
     stream::{Stream, TcpConnectOptions, TlsConnectOptions},
     tls::Tls,
 };
 use secrecy::SecretString;
+use url::Url;
 
 /// Auth mechanism to use for a test run.
 pub enum Auth {
@@ -47,7 +55,8 @@ pub enum Auth {
 /// ```text
 /// GREETING -> HELO -> EHLO -> AUTH -> NOOP
 ///   -> MAIL FROM -> RCPT TO -> RSET   (aborted transaction)
-///   -> MAIL FROM -> RCPT TO -> DATA   (actual send)
+///   -> MAIL FROM -> RCPT TO -> DATA   (actual send, with the SIZE and
+///                                      DSN parameters when advertised)
 ///   -> QUIT
 /// ```
 pub fn run_smtp(host: &str, auth: Auth, email: &str) {
@@ -64,7 +73,8 @@ pub fn run_smtp(host: &str, auth: Auth, email: &str) {
 /// ```text
 /// GREETING -> HELO -> EHLO -> AUTH -> NOOP
 ///   -> MAIL FROM -> RCPT TO -> RSET   (aborted transaction)
-///   -> MAIL FROM -> RCPT TO -> DATA   (actual send)
+///   -> MAIL FROM -> RCPT TO -> DATA   (actual send, with the SIZE and
+///                                      DSN parameters when advertised)
 ///   -> QUIT
 /// ```
 pub fn run_smtps(host: &str, port: u16, auth: Auth, email: &str) {
@@ -346,4 +356,112 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
             }
         }
     }
+}
+
+/// A shared end-to-end flow over [`SmtpClientStd`], the client layer
+/// consumers use.
+///
+/// [`SmtpClientStd::connect`] opens the session (implicit TLS or
+/// STARTTLS, greeting, EHLO, SASL when given), then:
+///
+/// ```text
+/// NOOP -> RAW (NOOP)
+///   -> MAIL FROM -> RCPT TO -> RSET   (aborted transaction)
+///   -> MAIL FROM -> RCPT TO -> DATA   (actual send, with the SIZE and
+///                                      DSN parameters when advertised)
+///   -> QUIT
+/// ```
+pub fn run_client(url: &str, sasl: Option<Sasl>, email: &str, starttls: bool) {
+    let _ = env_logger::try_init();
+    let url = Url::parse(url).expect("parse SMTP URL");
+    let domain = SmtpDomain::parse(b"pimalaya.org").unwrap();
+
+    let opts = SmtpClientStdConnectOptions {
+        sasl,
+        session: SmtpSessionOpenOptions { starttls },
+        ..Default::default()
+    };
+    let (mut client, capabilities) =
+        SmtpClientStd::connect(&url, domain.into(), opts).expect("connect");
+    assert!(!capabilities.is_empty(), "no capability after connect");
+
+    client.noop().expect("NOOP");
+    let reply = client.raw("NOOP".into()).expect("RAW");
+    assert!(reply.starts_with("250"), "RAW NOOP answered {reply}");
+
+    let (local, domain_part) = email.split_once('@').unwrap();
+    let mailbox = SmtpMailbox {
+        local_part: SmtpLocalPart(local.to_owned().into()),
+        domain: SmtpDomain::parse(domain_part.as_bytes()).unwrap().into(),
+    };
+    let mailbox = mailbox.into_static();
+    let reverse_path = SmtpReversePath::SmtpMailbox(mailbox.clone());
+    let forward_path = SmtpForwardPath(mailbox);
+
+    // NOTE: MAIL FROM -> RCPT TO -> RSET (aborted transaction) step.
+
+    client
+        .mail(reverse_path.clone(), Vec::new())
+        .expect("MAIL FROM (aborted)");
+    client
+        .rcpt(forward_path.clone(), Vec::new())
+        .expect("RCPT TO (aborted)");
+    client.rset().expect("RSET");
+
+    // NOTE: MAIL FROM -> RCPT TO -> DATA (actual send) step.
+
+    let eml = [
+        &format!("From: io-smtp test <{email}>"),
+        &format!("To: io-smtp test <{email}>"),
+        "Subject: io-smtp integration test",
+        "Date: Thu, 01 Jan 2026 00:00:00 +0000",
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        "This is an automated test email from io-smtp integration tests.",
+    ]
+    .join("\r\n");
+
+    // NOTE: the ESMTP parameters go out only where the server
+    // advertises their extension: SIZE (RFC 1870) and DSN (RFC 3461).
+    let advertised = |keyword: &str| {
+        capabilities.iter().find(|line| {
+            line.split_ascii_whitespace()
+                .next()
+                .is_some_and(|key| key.eq_ignore_ascii_case(keyword))
+        })
+    };
+
+    let mut mail_parameters = Vec::new();
+    let mut rcpt_parameters = Vec::new();
+
+    if let Some(line) = advertised("SIZE") {
+        let max = SmtpSizeCapability::parse(line).expect("parse SIZE capability");
+        assert!(max.0 == 0 || max.0 >= eml.len() as u64, "message over SIZE");
+
+        mail_parameters.push(SmtpParameter {
+            keyword: SmtpAtom::parse(b"SIZE").unwrap(),
+            value: Some(eml.len().to_string().into()),
+        });
+    }
+
+    if advertised("DSN").is_some() {
+        mail_parameters.push(SmtpDsnRet::Hdrs.into_parameter());
+        mail_parameters.push(SmtpParameter::envid("io-smtp-test"));
+        rcpt_parameters.push(SmtpDsnNotify::NEVER.into_parameter());
+        rcpt_parameters.push(SmtpParameter::orcpt_rfc822(email));
+    }
+
+    if let Some(line) = advertised("AUTH") {
+        let auth = SmtpAuthCapability::parse(line).expect("parse AUTH capability");
+        assert!(auth.mechanisms().next().is_some(), "empty AUTH line");
+    }
+
+    client
+        .mail(reverse_path, mail_parameters)
+        .expect("MAIL FROM");
+    client.rcpt(forward_path, rcpt_parameters).expect("RCPT TO");
+    client.data(eml.into_bytes()).expect("DATA");
+
+    client.quit().expect("QUIT");
 }
