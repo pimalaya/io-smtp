@@ -31,6 +31,9 @@
 //! that inbox: deleting it would need the Gmail API, which io-smtp does
 //! not depend on. Sweep `subject:"io-smtp integration test"` from time
 //! to time, by hand or with a Gmail filter.
+//!
+//! [`oauth_xoauth2_rejected`] needs no credentials: it sends a bogus
+//! token on purpose.
 
 // NOTE: the shared helpers open sockets through pimalaya-stream, which
 // only exists once a TLS provider feature is on.
@@ -53,6 +56,12 @@ use io_oauth::{
 };
 use io_sasl::{
     mechanism::Sasl, rfc7628::oauthbearer::SaslOauthbearerCreds, xoauth2::SaslXoauth2Creds,
+};
+use io_smtp::{
+    client::{SmtpClientError, SmtpClientStd, SmtpClientStdConnectOptions},
+    rfc5321::SmtpDomain,
+    sasl::auth_xoauth2::SmtpAuthXoauth2Error,
+    session::SmtpSessionOpenError,
 };
 use pimalaya_stream::tls::Tls;
 use secrecy::ExposeSecret;
@@ -100,6 +109,46 @@ fn oauth_xoauth2() {
         &subject,
         false,
     );
+}
+
+/// Rejection test against the Gmail SMTP submission service, over
+/// implicit TLS, with a bogus SASL `XOAUTH2` token.
+///
+/// Gmail answers a refused token with a `334` challenge carrying a
+/// JSON error, waits for the empty response, then ends the exchange
+/// with a `535`. Exchange Online refuses outright, so only Gmail takes
+/// the client down that branch. The address is made up, so no real
+/// account records a failed sign-in.
+#[test]
+#[ignore = "requires network access and --ignored"]
+fn oauth_xoauth2_rejected() {
+    let _ = env_logger::try_init();
+
+    let creds = SaslXoauth2Creds {
+        username: String::from("io-xoauth2-test-nobody@pimalaya.org"),
+        token: String::from("io-smtp-test-not-a-token").into(),
+    };
+    let opts = SmtpClientStdConnectOptions {
+        sasl: Some(Sasl::Xoauth2(creds)),
+        ..Default::default()
+    };
+
+    let url = Url::parse("smtps://smtp.gmail.com:465").unwrap();
+    let domain = SmtpDomain::parse(b"pimalaya.org").unwrap();
+
+    let err = match SmtpClientStd::connect(&url, domain.into(), opts) {
+        Ok(_) => panic!("Gmail accepted a bogus XOAUTH2 token"),
+        Err(err) => err,
+    };
+
+    let SmtpClientError::SessionOpen(SmtpSessionOpenError::AuthXoauth2(
+        SmtpAuthXoauth2Error::RejectedWithError { err, .. },
+    )) = err
+    else {
+        panic!("expected a rejection carrying the challenge JSON, got {err:?}");
+    };
+
+    assert!(err.contains(r#""status":"400""#), "{err}");
 }
 
 /// End-to-end test of the client layer against the Gmail SMTP
