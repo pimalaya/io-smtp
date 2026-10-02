@@ -355,13 +355,15 @@ impl fmt::Display for State {
 fn strip_enhanced_status(text: &str) -> &str {
     let bytes = text.as_bytes();
 
-    if bytes.len() >= 7 && bytes[0].is_ascii_digit() && bytes[1] == b'.' {
-        if let Some(second_dot) = bytes[2..].iter().position(|&b| b == b'.') {
-            let second_dot = second_dot + 2;
-            if let Some(space) = bytes[second_dot + 1..].iter().position(|&b| b == b' ') {
-                let space = second_dot + 1 + space;
-                return &text[space + 1..];
-            }
+    if bytes.len() >= 7
+        && bytes[0].is_ascii_digit()
+        && bytes[1] == b'.'
+        && let Some(second_dot) = bytes[2..].iter().position(|&b| b == b'.')
+    {
+        let second_dot = second_dot + 2;
+        if let Some(space) = bytes[second_dot + 1..].iter().position(|&b| b == b' ') {
+            let space = second_dot + 1 + space;
+            return &text[space + 1..];
         }
     }
 
