@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added `SmtpAuthMechanism`, the SASL mechanism name `AUTH` takes.
 
+- Added `SmtpMessageSendOptions::skip_refused_recipients`, sending to the recipients the server accepts when it refuses others.
+
+  **BREAKING**: a struct literal of the options needs `..Default::default()`.
+
+- Added `SmtpMessageSendRefusal`, a refused recipient with the reply code and text.
+
+- Added `SmtpMessageSendError::NoRecipient`, for a send whose every recipient was refused.
+
+- Added `SmtpResponse::message`, every line of a reply joined by a space.
+
 ### Changed
 
 - **BREAKING**: Made the field of `SmtpLocalPart` and of `SmtpDomain` private.
@@ -45,7 +55,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Changed `SmtpMessageSend` to remove the `Resent-Bcc` field too (RFC 5322 3.6.6).
 
+- **BREAKING**: Changed `SmtpMessageSendError::RcptTo` to name the recipient.
+
+  It is `RcptTo { forward_path, error }`.
+
+- **BREAKING**: Changed `SmtpMessageSend` and the `send` method of both client traits to return the refused recipients.
+
+  The list is empty unless `skip_refused_recipients` is set.
+
+- **BREAKING**: Changed `SmtpGreeting::domain` and `SmtpEhloResponse::domain` to a `SmtpText`, the name as the server gave it.
+
 ### Fixed
+
+- Fixed a refused greeting or `EHLO` being reported as a parse error.
+
+  `SmtpGreetingGetError` and `SmtpEhloError` gained `Rejected { code, message }`, so a `554` banner or a `550` to `EHLO` keeps its code and text. **BREAKING**: both enums are exhaustive.
+
+- Fixed the greeting and `EHLO` failing on a server name that is not a strict domain, such as an address literal (RFC 5321 4.2).
+
+- Fixed a rejection keeping only the first line of a multi-line reply.
+
+  Every `Rejected` message joins the lines with a space.
+
+- Fixed `SmtpMessageSend` leaving the transaction open after a refused recipient or a refused `DATA` command.
+
+  It sends `RSET` before failing, so the connection takes another `MAIL FROM`.
+
+- Fixed `SmtpSessionTransport::from_url` keeping the brackets of an IPv6 host.
 
 - Fixed a `Bcc` field following a bare CR line ending being transmitted to every recipient.
 

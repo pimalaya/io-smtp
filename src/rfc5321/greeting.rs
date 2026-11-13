@@ -49,7 +49,7 @@ use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc5321::SmtpGreeting,
+    rfc5321::{SmtpGreeting, SmtpReplyCode, SmtpResponse},
     send::SMTP_MAX_REPLY_LEN,
     utils::{escape_byte_string, parsers::format_rich_errors},
 };
@@ -63,7 +63,15 @@ pub enum SmtpGreetingGetError {
     /// The greeting grew past the given limit before it completed.
     #[error("SMTP greeting failed: greeting exceeds {0} bytes")]
     TooLarge(usize),
-    /// The banner could not be parsed as an SMTP greeting.
+    /// The server answered with another code than 220.
+    #[error("SMTP greeting failed: rejected {code} {message}")]
+    Rejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text, every line joined by a space.
+        message: String,
+    },
+    /// The banner could not be parsed as an SMTP reply.
     #[error("SMTP greeting failed: parse error: {0}")]
     ParseResponse(String),
 }
@@ -129,13 +137,20 @@ impl SmtpCoroutine for SmtpGreetingGet {
                     }
                 },
                 State::Parse => {
-                    return match SmtpGreeting::parse(&self.buf) {
-                        Ok(greeting) => {
-                            let greeting = greeting.into_static();
+                    return match SmtpResponse::parse(&self.buf) {
+                        Ok(response) if response.code == SmtpReplyCode::SERVICE_READY => {
+                            let greeting = SmtpGreeting::from_response(response).into_static();
                             let _ = mem::take(&mut self.buf);
                             debug!("greeting parsed");
                             trace!("{greeting:?}");
                             SmtpCoroutineState::Complete(Ok(greeting))
+                        }
+                        Ok(response) => {
+                            let code = response.code.code();
+                            let message = response.message();
+                            debug!("greeting rejected");
+                            let err = SmtpGreetingGetError::Rejected { code, message };
+                            SmtpCoroutineState::Complete(Err(err))
                         }
                         Err(errors) => {
                             let reason = format_rich_errors(errors);
@@ -223,12 +238,58 @@ mod tests {
     }
 
     #[test]
+    fn server_name_outside_the_grammar_returns_ok() {
+        let names = [
+            "[192.0.2.1]",
+            "mail_gw.corp.local",
+            "mail.example.org.",
+            "***",
+        ];
+
+        for name in names {
+            let mut greeting = SmtpGreetingGet::new();
+            expect_wants_read(&mut greeting);
+
+            let reply = [b"220 ", name.as_bytes(), b" ESMTP ready\r\n"].concat();
+            let g = expect_complete_ok(&mut greeting, &reply);
+            assert_eq!(g.domain.as_ref(), name);
+            assert_eq!(g.text.unwrap().as_ref(), "ESMTP ready");
+        }
+    }
+
+    #[test]
+    fn bare_code_returns_ok() {
+        let mut greeting = SmtpGreetingGet::new();
+        expect_wants_read(&mut greeting);
+
+        let g = expect_complete_ok(&mut greeting, b"220\r\n");
+        assert_eq!(g.domain.as_ref(), "");
+        assert_eq!(g.text, None);
+    }
+
+    #[test]
+    fn refused_connection_returns_rejected_error() {
+        let mut greeting = SmtpGreetingGet::new();
+        expect_wants_read(&mut greeting);
+
+        let reply = b"554-5.7.1 Service unavailable\r\n554 5.7.1 client host blocked\r\n";
+        let err = expect_complete_err(&mut greeting, reply);
+        let SmtpGreetingGetError::Rejected { code, message } = err else {
+            panic!("expected SmtpGreetingGetError::Rejected, got {err:?}");
+        };
+        assert_eq!(code, 554);
+        assert_eq!(
+            message,
+            "5.7.1 Service unavailable 5.7.1 client host blocked"
+        );
+    }
+
+    #[test]
     fn parse_error_returns_parse_error() {
         let mut greeting = SmtpGreetingGet::new();
         expect_wants_read(&mut greeting);
 
-        // NOTE: 250 is not a valid greeting code
-        let err = expect_complete_err(&mut greeting, b"250 wrong code\r\n");
+        let err = expect_complete_err(&mut greeting, b"999 not a reply code\r\n");
         assert!(matches!(err, SmtpGreetingGetError::ParseResponse(_)));
     }
 

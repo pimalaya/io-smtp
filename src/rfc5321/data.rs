@@ -40,10 +40,7 @@
 
 use core::fmt;
 
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{string::String, vec::Vec};
 
 use log::{debug, trace};
 use thiserror::Error;
@@ -179,15 +176,15 @@ impl SmtpCoroutine for SmtpData {
     type Yield = SmtpYield;
     type Return = Result<(), SmtpDataError>;
 
-    fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             match &mut self.state {
                 State::SendCommand(send) => {
-                    let out = smtp_try!(send, arg);
+                    let out = smtp_try!(send, arg.take());
 
                     if out.response.code != SmtpReplyCode::START_MAIL_INPUT {
                         let code = out.response.code.code();
-                        let message = out.response.text().to_string();
+                        let message = out.response.message();
                         return SmtpCoroutineState::Complete(Err(SmtpDataError::CommandRejected {
                             code,
                             message,
@@ -203,7 +200,7 @@ impl SmtpCoroutine for SmtpData {
                     trace!("prepared body: {len} bytes");
                 }
                 State::SendBody(send) => {
-                    let out = smtp_try!(send, arg);
+                    let out = smtp_try!(send, arg.take());
 
                     if out.response.code == SmtpReplyCode::OK {
                         debug!("body accepted");
@@ -211,7 +208,7 @@ impl SmtpCoroutine for SmtpData {
                     }
 
                     let code = out.response.code.code();
-                    let message = out.response.text().to_string();
+                    let message = out.response.message();
                     return SmtpCoroutineState::Complete(Err(SmtpDataError::BodyRejected {
                         code,
                         message,

@@ -43,10 +43,7 @@
 
 use core::{fmt, mem};
 
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{string::String, vec::Vec};
 
 use log::{debug, trace};
 use thiserror::Error;
@@ -168,7 +165,7 @@ impl SmtpCoroutine for SmtpStartTls {
                         }
                         Ok(response) => {
                             let code = response.code.code();
-                            let message = response.text().to_string();
+                            let message = response.message();
                             let err = SmtpStartTlsError::Rejected { code, message };
                             SmtpCoroutineState::Complete(Err(err))
                         }

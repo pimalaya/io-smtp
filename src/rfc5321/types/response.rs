@@ -3,7 +3,7 @@
 //! A complete reply, one code and one or more text lines, as parsed
 //! from the wire.
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
@@ -77,6 +77,13 @@ impl SmtpResponse<'_> {
     /// Returns the first (or only) line of text.
     pub fn text(&self) -> &SmtpText<'_> {
         &self.lines.as_ref()[0]
+    }
+
+    /// Returns every line of text, joined by a space.
+    pub fn message(&self) -> String {
+        let lines = self.lines.as_ref().iter().map(AsRef::as_ref);
+        let lines: Vec<&str> = lines.filter(|line| !line.is_empty()).collect();
+        lines.join(" ")
     }
 }
 

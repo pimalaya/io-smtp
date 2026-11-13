@@ -321,7 +321,10 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     loop {
         match coroutine.resume(arg.take()) {
-            SmtpCoroutineState::Complete(Ok(())) => break,
+            SmtpCoroutineState::Complete(Ok(refused)) => {
+                assert_eq!(refused, [], "refused recipients");
+                break;
+            }
             SmtpCoroutineState::Complete(Err(err)) => panic!("send message: {err}"),
             SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
                 stream.write_all(&bytes).expect("write")

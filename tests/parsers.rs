@@ -205,6 +205,35 @@ fn ehlo_response_bare_last_code() {
     assert_eq!(r.capabilities, ["PIPELINING"]);
 }
 
+/// The server name is taken as given: an address literal (RFC 5321
+/// §4.2), an underscore, a trailing dot.
+#[test]
+fn greeting_parse_any_server_name() {
+    for name in ["[192.0.2.1]", "mail_gw.corp.local", "mail.example.org."] {
+        let buf = format!("220-{name} ESMTP\r\n220 ready\r\n");
+        let g = SmtpGreeting::parse(buf.as_bytes()).unwrap();
+        assert_eq!(g.domain.as_ref(), name);
+        assert_eq!(g.text.unwrap().as_ref(), "ESMTP");
+    }
+}
+
+#[test]
+fn ehlo_response_any_server_name() {
+    for name in ["[192.0.2.1]", "mail_gw.corp.local", "mail.example.org."] {
+        let buf = format!("250-{name} Hello\r\n250-SIZE 1000\r\n250 8BITMIME\r\n");
+        let r = SmtpEhloResponse::parse(buf.as_bytes()).unwrap();
+        assert_eq!(r.domain.as_ref(), name);
+        assert_eq!(r.greet.unwrap().as_ref(), "Hello");
+        assert_eq!(r.capabilities, ["SIZE 1000", "8BITMIME"]);
+    }
+}
+
+#[test]
+fn greeting_and_ehlo_response_reject_another_code() {
+    assert!(SmtpGreeting::parse(b"554 no service here\r\n").is_err());
+    assert!(SmtpEhloResponse::parse(b"550 access denied\r\n").is_err());
+}
+
 // NOTE: Domain tests below.
 
 #[test]

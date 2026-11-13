@@ -131,7 +131,7 @@ impl SmtpCoroutine for SmtpRcpt {
                 }
 
                 let code = out.response.code.code();
-                let message = out.response.text().to_string();
+                let message = out.response.message();
                 SmtpCoroutineState::Complete(Err(SmtpRcptError::Rejected { code, message }))
             }
         }

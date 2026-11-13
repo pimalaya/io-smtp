@@ -5,20 +5,32 @@
 
 use core::fmt;
 
-use alloc::vec::Vec;
+use alloc::{borrow::Cow, vec::Vec};
 
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
 
-use crate::rfc5321::types::{domain::SmtpDomain, response::SmtpResponse, text::SmtpText};
+use crate::rfc5321::types::{response::SmtpResponse, text::SmtpText};
 
 /// Server greeting sent upon connection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]
 pub struct SmtpGreeting<'a> {
-    /// The server's domain name
-    pub domain: SmtpDomain<'a>,
+    /// The name the server gives itself, taken as given: the first
+    /// word of the first line, empty when the line is
+    pub domain: SmtpText<'a>,
     /// Optional greeting text (from the first greeting line)
     pub text: Option<SmtpText<'a>>,
+}
+
+impl<'a> SmtpGreeting<'a> {
+    /// Reads the greeting out of a reply, whatever its code.
+    pub(crate) fn from_response(response: SmtpResponse<'a>) -> Self {
+        let first = response.lines.into_iter().next();
+        let first = first.unwrap_or(SmtpText(Cow::Borrowed("")));
+        let (domain, text) = first.split_identity();
+
+        Self { domain, text }
+    }
 }
 
 impl SmtpGreeting<'_> {
@@ -36,7 +48,7 @@ impl SmtpGreeting<'_> {
     }
 
     /// Creates a new greeting.
-    pub fn new<'a>(domain: SmtpDomain<'a>, text: Option<SmtpText<'a>>) -> SmtpGreeting<'a> {
+    pub fn new<'a>(domain: SmtpText<'a>, text: Option<SmtpText<'a>>) -> SmtpGreeting<'a> {
         SmtpGreeting { domain, text }
     }
 }
@@ -56,63 +68,42 @@ impl fmt::Display for SmtpGreeting<'_> {
 pub(crate) mod parsers {
     //! Chumsky parser for the SMTP greeting.
 
-    use alloc::vec::Vec;
-
     use chumsky::prelude::*;
 
     use crate::{
-        rfc5321::types::{domain::parsers::domain, greeting::SmtpGreeting, text::parsers::text},
-        utils::parsers::{Extra, crlf, sp},
+        rfc5321::types::{
+            greeting::SmtpGreeting, reply_code::SmtpReplyCode, response::parsers::response,
+        },
+        utils::parsers::Extra,
     };
 
     /// SMTP greeting parser.
     ///
-    /// Handles both single-line and multi-line greetings per RFC 5321:
+    /// A reply of code 220, single-line or multi-line:
     ///
     /// ```abnf
-    /// Greeting       = ( "220" ( SP / "-" ) Domain [ SP textstring ] CRLF ) /
-    ///                  ( "220-" Domain [ SP textstring ] CRLF
-    ///                    *( "220-" [ textstring ] CRLF )
-    ///                    "220" [ SP [ textstring ] ] CRLF )
+    /// Greeting       = ( "220 " (Domain / address-literal)
+    ///                [ SP textstring ] CRLF ) /
+    ///                ( "220-" (Domain / address-literal)
+    ///                [ SP textstring ] CRLF
+    ///                *( "220-" [ textstring ] CRLF )
+    ///                "220" [ SP textstring ] CRLF )
     /// ```
     ///
-    /// Only the domain and text from the first line are retained; continuation
-    /// lines carry informational text that clients do not need to act on.
+    /// The server name is not checked against the grammar: it is the first
+    /// word of the first line. Only the first line is retained;
+    /// continuation lines carry text clients do not need to act on.
+    ///
+    /// Refs: <https://datatracker.ietf.org/doc/html/rfc5321#section-4.2>
     pub(crate) fn greeting<'a>() -> impl Parser<'a, &'a [u8], SmtpGreeting<'a>, Extra<'a>> + Clone {
-        // NOTE: single-line: "220 " domain [SP text] CRLF
-        let single = just(b"220" as &[u8])
-            .ignore_then(sp())
-            .ignore_then(domain())
-            .then(sp().ignore_then(text()).or_not())
-            .then_ignore(crlf())
-            .map(|(domain, text)| SmtpGreeting { domain, text });
-
-        // NOTE: multi-line first line: "220-" domain [SP text] CRLF
-        let multi_first = just(b"220" as &[u8])
-            .ignore_then(just(b'-'))
-            .ignore_then(domain())
-            .then(sp().ignore_then(text()).or_not())
-            .then_ignore(crlf());
-
-        // NOTE: continuation lines: "220-" [text] CRLF
-        let multi_cont = just(b"220" as &[u8])
-            .then_ignore(just(b'-'))
-            .ignore_then(text().or_not())
-            .then_ignore(crlf());
-
-        // NOTE: final line: "220" [SP [text]] CRLF
-        let multi_last = just(b"220" as &[u8])
-            .ignore_then(sp().ignore_then(text().or_not()).or_not())
-            .then_ignore(crlf());
-
-        let multi = multi_first
-            .then(multi_cont.repeated().collect::<Vec<_>>())
-            .then(multi_last)
-            .map(|((first, _conts), _last)| {
-                let (domain, text) = first;
-                SmtpGreeting { domain, text }
-            });
-
-        choice((multi, single)).labelled("greeting")
+        response()
+            .try_map(|response, span| {
+                if response.code == SmtpReplyCode::SERVICE_READY {
+                    Ok(SmtpGreeting::from_response(response))
+                } else {
+                    Err(Rich::custom(span, "expected reply code 220"))
+                }
+            })
+            .labelled("greeting")
     }
 }

@@ -18,3 +18,12 @@ It SHALL take the URL and the EHLO domain as its only required arguments and eve
 - GIVEN `SmtpClientStdConnectOptions::default()`
 - WHEN connecting to `smtps://host`
 - THEN the connection goes through `Proxy::System` and no `AUTH` is sent
+
+## Requirement: The URL host is what a socket takes
+
+`SmtpSessionTransport::from_url` SHALL yield the host as a connect call and a certificate check take it: a domain as written, an IPv4 address in dotted form, an IPv6 address without the brackets the URL syntax puts around it.
+
+### Scenario: An IPv6 server
+- GIVEN the URL `smtp://[2001:db8::25]:587`
+- WHEN the transport is read from it
+- THEN it is `Tcp { host: "2001:db8::25", port: 587 }`

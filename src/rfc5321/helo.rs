@@ -41,10 +41,7 @@
 
 use core::fmt;
 
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{string::String, vec::Vec};
 
 use bounded_static::IntoBoundedStatic;
 use log::debug;
@@ -122,7 +119,7 @@ impl SmtpCoroutine for SmtpHelo {
                 }
 
                 let code = out.response.code.code();
-                let message = out.response.text().to_string();
+                let message = out.response.message();
                 SmtpCoroutineState::Complete(Err(SmtpHeloError::Rejected { code, message }))
             }
         }

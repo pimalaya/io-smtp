@@ -82,6 +82,8 @@
 
 use core::fmt;
 
+#[cfg(feature = "url")]
+use alloc::string::ToString;
 use alloc::{borrow::Cow, boxed::Box, string::String, vec, vec::Vec};
 
 use bounded_static::IntoBoundedStatic;
@@ -96,7 +98,7 @@ use io_sasl::{
 use log::debug;
 use thiserror::Error;
 #[cfg(feature = "url")]
-use url::Url;
+use url::{Host, Url};
 
 #[cfg(feature = "scram")]
 use crate::rfc7677::auth_scram_sha_256::*;
@@ -209,12 +211,17 @@ impl SmtpSessionTransport {
             return Ok(Self::Unix(String::from(url.path())));
         }
 
-        let Some(host) = url.host_str() else {
-            let url = String::from(url.as_str());
-            return Err(SmtpSessionOpenError::UrlMissingHost(url));
+        // NOTE: host_str would keep the brackets of an IPv6 address
+        let host = match url.host() {
+            Some(Host::Domain(domain)) => String::from(domain),
+            Some(Host::Ipv4(addr)) => addr.to_string(),
+            Some(Host::Ipv6(addr)) => addr.to_string(),
+            None => {
+                let url = String::from(url.as_str());
+                return Err(SmtpSessionOpenError::UrlMissingHost(url));
+            }
         };
 
-        let host = String::from(host);
         let port = url.port().unwrap_or_else(|| default_port(scheme));
 
         if scheme.eq_ignore_ascii_case("smtp") {
@@ -414,7 +421,7 @@ impl SmtpCoroutine for SmtpSessionOpen {
     type Yield = SmtpSessionOpenYield;
     type Return = Result<SmtpSessionOpenData, SmtpSessionOpenError>;
 
-    fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             match &mut self.state {
                 State::Connect => {
@@ -456,13 +463,13 @@ impl SmtpCoroutine for SmtpSessionOpen {
                     // nothing to the session, unlike its IMAP
                     // counterpart which carries the capabilities and the
                     // PREAUTH signal.
-                    let _ = smtp_try!(greeting, arg);
+                    let _ = smtp_try!(greeting, arg.take());
 
                     self.state = State::Ehlo(SmtpEhlo::new(self.domain.clone()));
                     debug!("{}", self.state);
                 }
                 State::Ehlo(ehlo) => {
-                    self.capabilities = smtp_try!(ehlo, arg);
+                    self.capabilities = smtp_try!(ehlo, arg.take());
 
                     if self.opts.starttls {
                         self.state = State::StartTls(SmtpStartTls::new());
@@ -480,7 +487,7 @@ impl SmtpCoroutine for SmtpSessionOpen {
                     }
                 }
                 State::StartTls(starttls) => {
-                    let trailing = smtp_try!(starttls, arg);
+                    let trailing = smtp_try!(starttls, arg.take());
 
                     if !trailing.is_empty() {
                         let err = SmtpSessionOpenError::StartTlsInjection;
@@ -502,7 +509,7 @@ impl SmtpCoroutine for SmtpSessionOpen {
                     debug!("{}", self.state);
                 }
                 State::EhloTls(ehlo) => {
-                    self.capabilities = smtp_try!(ehlo, arg);
+                    self.capabilities = smtp_try!(ehlo, arg.take());
 
                     match self.wants_auth() {
                         Err(err) => return SmtpCoroutineState::Complete(Err(err)),
@@ -515,13 +522,13 @@ impl SmtpCoroutine for SmtpSessionOpen {
                 }
                 State::Auth(auth) => {
                     match auth.as_mut() {
-                        Auth::Anonymous(auth) => smtp_try!(auth, arg),
-                        Auth::Login(auth) => smtp_try!(auth, arg),
-                        Auth::Plain(auth) => smtp_try!(auth, arg),
-                        Auth::Oauthbearer(auth) => smtp_try!(auth, arg),
-                        Auth::Xoauth2(auth) => smtp_try!(auth, arg),
+                        Auth::Anonymous(auth) => smtp_try!(auth, arg.take()),
+                        Auth::Login(auth) => smtp_try!(auth, arg.take()),
+                        Auth::Plain(auth) => smtp_try!(auth, arg.take()),
+                        Auth::Oauthbearer(auth) => smtp_try!(auth, arg.take()),
+                        Auth::Xoauth2(auth) => smtp_try!(auth, arg.take()),
                         #[cfg(feature = "scram")]
-                        Auth::ScramSha256(auth) => smtp_try!(auth, arg),
+                        Auth::ScramSha256(auth) => smtp_try!(auth, arg.take()),
                     }
 
                     return self.complete();
@@ -799,6 +806,24 @@ mod tests {
             err,
             SmtpSessionOpenError::UrlUnsupportedScheme(_, _)
         ));
+    }
+
+    #[cfg(feature = "url")]
+    #[test]
+    fn an_ipv6_url_host_loses_its_brackets() {
+        let url = Url::parse("smtp://[2001:db8::25]:587").unwrap();
+        let expected = SmtpSessionTransport::Tcp {
+            host: "2001:db8::25".to_string(),
+            port: 587,
+        };
+        assert_eq!(SmtpSessionTransport::from_url(&url).unwrap(), expected);
+
+        let url = Url::parse("smtps://192.0.2.25").unwrap();
+        let expected = SmtpSessionTransport::Tls {
+            host: "192.0.2.25".to_string(),
+            port: 465,
+        };
+        assert_eq!(SmtpSessionTransport::from_url(&url).unwrap(), expected);
     }
 
     fn starttls_session() -> SmtpSessionOpen {

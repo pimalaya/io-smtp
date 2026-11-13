@@ -54,7 +54,7 @@ use thiserror::Error;
 
 use crate::{
     coroutine::*,
-    rfc5321::{SmtpEhloDomain, SmtpEhloResponse},
+    rfc5321::{SmtpEhloDomain, SmtpEhloResponse, SmtpReplyCode, SmtpResponse},
     send::SMTP_MAX_REPLY_LEN,
     utils::{escape_byte_string, parsers::format_rich_errors},
 };
@@ -83,7 +83,15 @@ pub enum SmtpEhloError {
     /// The reply grew past the given limit before it completed.
     #[error("SMTP EHLO failed: reply exceeds {0} bytes")]
     TooLarge(usize),
-    /// The reply could not be parsed as an EHLO response.
+    /// The server answered with another code than 250.
+    #[error("SMTP EHLO failed: rejected {code} {message}")]
+    Rejected {
+        /// The reply code.
+        code: u16,
+        /// The reply text, every line joined by a space.
+        message: String,
+    },
+    /// The reply could not be parsed as an SMTP reply.
     #[error("SMTP EHLO failed: parse error: {0}")]
     ParseResponse(String),
 }
@@ -158,13 +166,21 @@ impl SmtpCoroutine for SmtpEhlo {
                     }
                 },
                 State::Parse => {
-                    return match SmtpEhloResponse::parse(&self.buf) {
-                        Ok(response) => {
+                    return match SmtpResponse::parse(&self.buf) {
+                        Ok(response) if response.code == SmtpReplyCode::OK => {
+                            let response = SmtpEhloResponse::from_response(response);
                             let capabilities = response.into_static().capabilities;
                             let _ = mem::take(&mut self.buf);
                             debug!("ehlo response parsed");
                             trace!("{capabilities:?}");
                             SmtpCoroutineState::Complete(Ok(capabilities))
+                        }
+                        Ok(response) => {
+                            let code = response.code.code();
+                            let message = response.message();
+                            debug!("ehlo rejected");
+                            let err = SmtpEhloError::Rejected { code, message };
+                            SmtpCoroutineState::Complete(Err(err))
                         }
                         Err(errors) => {
                             let reason = format_rich_errors(errors);
@@ -262,12 +278,40 @@ mod tests {
     }
 
     #[test]
+    fn server_name_outside_the_grammar_returns_capabilities() {
+        for name in ["[192.0.2.1]", "mail_gw.corp.local", "mail.example.org."] {
+            let mut ehlo = SmtpEhlo::new(ehlo_domain());
+            let _ = expect_wants_write(&mut ehlo, None);
+            expect_wants_read(&mut ehlo);
+
+            let reply = [b"250-", name.as_bytes(), b" Hello\r\n250 PIPELINING\r\n"].concat();
+            let caps = expect_complete_ok(&mut ehlo, &reply);
+            assert_eq!(caps, ["PIPELINING"]);
+        }
+    }
+
+    #[test]
+    fn refused_ehlo_returns_rejected_error() {
+        let mut ehlo = SmtpEhlo::new(ehlo_domain());
+        let _ = expect_wants_write(&mut ehlo, None);
+        expect_wants_read(&mut ehlo);
+
+        let reply = b"550-Access denied\r\n550 Invalid HELO name\r\n";
+        let err = expect_complete_err(&mut ehlo, reply);
+        let SmtpEhloError::Rejected { code, message } = err else {
+            panic!("expected SmtpEhloError::Rejected, got {err:?}");
+        };
+        assert_eq!(code, 550);
+        assert_eq!(message, "Access denied Invalid HELO name");
+    }
+
+    #[test]
     fn parse_error_returns_parse_error() {
         let mut ehlo = SmtpEhlo::new(ehlo_domain());
         let _ = expect_wants_write(&mut ehlo, None);
         expect_wants_read(&mut ehlo);
 
-        let err = expect_complete_err(&mut ehlo, b"500 syntax error\r\n");
+        let err = expect_complete_err(&mut ehlo, b"999 not a reply code\r\n");
         assert!(matches!(err, SmtpEhloError::ParseResponse(_)));
     }
 

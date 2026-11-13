@@ -217,7 +217,7 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
     type Yield = SmtpYield;
     type Return = Result<(), SmtpAuthXoauth2Error>;
 
-    fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             match &mut self.state {
                 State::Start => {
@@ -245,7 +245,7 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
                     debug!("{}", self.state);
                 }
                 State::Send { send, pending } => {
-                    let out = smtp_try!(send, arg);
+                    let out = smtp_try!(send, arg.take());
 
                     if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
                         // NOTE: with the credentials still held back this is
@@ -302,12 +302,12 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
                     }
 
                     let code = out.response.code.code();
-                    let message = out.response.text().to_string();
+                    let message = out.response.message();
                     let err = self.rejected(code, message);
                     return SmtpCoroutineState::Complete(Err(err));
                 }
                 State::Continue(send) => {
-                    let out = smtp_try!(send, arg);
+                    let out = smtp_try!(send, arg.take());
 
                     if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
                         let challenge = match parse_challenge(&out.response.text().0) {
@@ -347,12 +347,12 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
                     }
 
                     let code = out.response.code.code();
-                    let message = out.response.text().to_string();
+                    let message = out.response.message();
                     let err = self.rejected(code, message);
                     return SmtpCoroutineState::Complete(Err(err));
                 }
                 State::Ehlo(ehlo) => {
-                    let _ = smtp_try!(ehlo, arg);
+                    let _ = smtp_try!(ehlo, arg.take());
                     debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }

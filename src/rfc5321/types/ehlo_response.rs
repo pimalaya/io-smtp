@@ -8,7 +8,7 @@ use alloc::{borrow::Cow, vec::Vec};
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
 
-use crate::rfc5321::types::{domain::SmtpDomain, response::SmtpResponse, text::SmtpText};
+use crate::rfc5321::types::{response::SmtpResponse, text::SmtpText};
 
 /// EHLO response containing server capabilities.
 ///
@@ -18,12 +18,34 @@ use crate::rfc5321::types::{domain::SmtpDomain, response::SmtpResponse, text::Sm
 /// the parameters of their own capability.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ToStatic)]
 pub struct SmtpEhloResponse<'a> {
-    /// The server's domain name.
-    pub domain: SmtpDomain<'a>,
+    /// The name the server gives itself, taken as given: the first
+    /// word of the first line, empty when the line is
+    pub domain: SmtpText<'a>,
     /// Optional greeting text on the first line.
     pub greet: Option<SmtpText<'a>>,
     /// Server capabilities as raw keyword strings.
     pub capabilities: Vec<Cow<'a, str>>,
+}
+
+impl<'a> SmtpEhloResponse<'a> {
+    /// Reads the EHLO response out of a reply, whatever its code.
+    pub(crate) fn from_response(response: SmtpResponse<'a>) -> Self {
+        let mut lines = response.lines.into_iter();
+
+        let first = lines.next().unwrap_or(SmtpText(Cow::Borrowed("")));
+        let (domain, greet) = first.split_identity();
+
+        let capabilities = lines
+            .filter(|line| !line.as_ref().is_empty())
+            .map(Cow::from)
+            .collect();
+
+        Self {
+            domain,
+            greet,
+            capabilities,
+        }
+    }
 }
 
 impl SmtpEhloResponse<'_> {
@@ -71,35 +93,18 @@ impl SmtpEhloResponse<'_> {
 pub(crate) mod parsers {
     //! Chumsky parser for the SMTP EHLO response.
 
-    use core::str::from_utf8;
-
-    use alloc::{borrow::Cow, vec::Vec};
-
     use chumsky::prelude::*;
 
     use crate::{
         rfc5321::types::{
-            domain::parsers::domain as domain_parser, ehlo_response::SmtpEhloResponse,
-            text::parsers::text as text_parser,
+            ehlo_response::SmtpEhloResponse, reply_code::SmtpReplyCode, response::parsers::response,
         },
-        utils::parsers::{Extra, crlf, sp},
+        utils::parsers::Extra,
     };
 
-    /// Parses a single EHLO capability line as a raw string.
-    pub(crate) fn capability<'a>() -> impl Parser<'a, &'a [u8], Cow<'a, str>, Extra<'a>> + Clone {
-        any()
-            .filter(|b: &u8| matches!(*b, 0x20..=0x7e))
-            .repeated()
-            .at_least(1)
-            .to_slice()
-            .try_map(|bytes: &[u8], span| {
-                from_utf8(bytes)
-                    .map_err(|_| Rich::custom(span, "invalid UTF-8 in capability line"))
-                    .map(Cow::from)
-            })
-    }
-
     /// SMTP EHLO response parser.
+    ///
+    /// A reply of code 250, single-line or multi-line:
     ///
     /// ```abnf
     /// ehlo-ok-rsp    = ( "250" SP Domain [ SP ehlo-greet ] CRLF )
@@ -109,45 +114,17 @@ pub(crate) mod parsers {
     /// ehlo-line      = ehlo-keyword *( SP ehlo-param )
     /// ```
     ///
-    /// The last line may be the code alone, which clients must accept (RFC
-    /// 5321 §4.2.1).
+    /// The server name is not checked against the grammar: it is the first
+    /// word of the first line. Every other line that is not empty is a
+    /// capability.
     pub(crate) fn ehlo_response<'a>() -> impl Parser<'a, &'a [u8], SmtpEhloResponse<'a>, Extra<'a>>
     {
-        just(b"250" as &[u8])
-            .ignore_then(choice((just(b'-').to(true), just(b' ').to(false))))
-            .then(domain_parser())
-            .then(sp().ignore_then(text_parser()).or_not())
-            .then_ignore(crlf())
-            .then(
-                just(b"250" as &[u8])
-                    .then_ignore(just(b'-'))
-                    .ignore_then(capability())
-                    .then_ignore(crlf())
-                    .repeated()
-                    .collect::<Vec<_>>(),
-            )
-            .then(
-                just(b"250" as &[u8])
-                    .ignore_then(sp().ignore_then(capability()).or_not())
-                    .then_ignore(crlf())
-                    .or_not(),
-            )
-            .map(|((((is_multi, domain), greet), cont_caps), final_cap)| {
-                let mut capabilities = Vec::new();
-
-                if is_multi {
-                    capabilities.extend(cont_caps);
-
-                    if let Some(cap) = final_cap.flatten() {
-                        capabilities.push(cap);
-                    }
-                }
-
-                SmtpEhloResponse {
-                    domain,
-                    greet,
-                    capabilities,
-                }
-            })
+        response().try_map(|response, span| {
+            if response.code == SmtpReplyCode::OK {
+                Ok(SmtpEhloResponse::from_response(response))
+            } else {
+                Err(Rich::custom(span, "expected reply code 250"))
+            }
+        })
     }
 }

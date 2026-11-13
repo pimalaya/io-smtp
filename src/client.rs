@@ -261,7 +261,8 @@ smtp_client_commands! {
     /// `HELO <domain>` (RFC 5321 §4.1.1.1).
     ///
     /// Use [`ehlo`](Self::ehlo) on any modern server; fall back to HELO
-    /// only when the server rejects EHLO with 500/502.
+    /// only when the server rejects EHLO with 500/502, which
+    /// [`SmtpEhloError::Rejected`] reports.
     fn helo(domain: SmtpDomain<'static>) -> () {
         SmtpHelo::new(domain)
     }
@@ -411,12 +412,17 @@ smtp_client_commands! {
 
     /// A complete `MAIL FROM` / `RCPT TO` (one per recipient) / `DATA`
     /// exchange in one call.
+    ///
+    /// Returns the recipients the server refused, always none unless
+    /// [`SmtpMessageSendOptions::skip_refused_recipients`] is set. After
+    /// an error naming a refused command, `RSET` was sent and the
+    /// client can send again.
     fn send(
         reverse_path: SmtpReversePath<'static>,
         forward_paths: Vec<SmtpForwardPath<'static>>,
         message: Vec<u8>,
         options: SmtpMessageSendOptions,
-    ) -> () {
+    ) -> Vec<SmtpMessageSendRefusal> {
         SmtpMessageSend::new(reverse_path, forward_paths, message, options)
     }
 }

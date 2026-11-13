@@ -69,11 +69,7 @@
 
 use core::fmt;
 
-use alloc::{
-    borrow::Cow,
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{borrow::Cow, string::String, vec::Vec};
 
 use base64_codec::codec::Base64Codec;
 use bounded_static::IntoBoundedStatic;
@@ -216,7 +212,7 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
     type Yield = SmtpYield;
     type Return = Result<(), SmtpAuthScramSha256Error>;
 
-    fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             match &mut self.state {
                 State::Start => {
@@ -234,7 +230,7 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
                     debug!("{}", self.state);
                 }
                 State::Send(send) => {
-                    let out = smtp_try!(send, arg);
+                    let out = smtp_try!(send, arg.take());
 
                     if out.response.code != SmtpReplyCode::AUTH_CONTINUE {
                         // NOTE: a server accepting here never sent its
@@ -247,7 +243,7 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
                         }
 
                         let code = out.response.code.code();
-                        let message = out.response.text().to_string();
+                        let message = out.response.message();
                         let err = SmtpAuthScramSha256Error::Rejected { code, message };
                         return SmtpCoroutineState::Complete(Err(err));
                     }
@@ -267,7 +263,7 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
                     debug!("{}", self.state);
                 }
                 State::Continue(send) => {
-                    let out = smtp_try!(send, arg);
+                    let out = smtp_try!(send, arg.take());
 
                     if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
                         let challenge = match parse_challenge(&out.response.text().0) {
@@ -323,12 +319,12 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
                     }
 
                     let code = out.response.code.code();
-                    let message = out.response.text().to_string();
+                    let message = out.response.message();
                     let err = SmtpAuthScramSha256Error::Rejected { code, message };
                     return SmtpCoroutineState::Complete(Err(err));
                 }
                 State::Ehlo(ehlo) => {
-                    let _ = smtp_try!(ehlo, arg);
+                    let _ = smtp_try!(ehlo, arg.take());
                     debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }

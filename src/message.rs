@@ -42,15 +42,15 @@
 //!             let n = stream.read(&mut buf).unwrap();
 //!             arg = Some(&buf[..n]);
 //!         }
-//!         SmtpCoroutineState::Complete(Ok(())) => break,
+//!         SmtpCoroutineState::Complete(Ok(_refused)) => break,
 //!         SmtpCoroutineState::Complete(Err(err)) => panic!("{err}"),
 //!     }
 //! }
 //! ```
 
-use core::fmt;
+use core::{fmt, mem};
 
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec::Vec};
 
 use bounded_static::IntoBoundedStatic;
 use log::debug;
@@ -63,6 +63,7 @@ use crate::{
         data::{SmtpData, SmtpDataError},
         mail::{SmtpMail, SmtpMailError},
         rcpt::{SmtpRcpt, SmtpRcptError},
+        rset::SmtpRset,
     },
     scan::position,
     smtp_try,
@@ -72,18 +73,44 @@ const CR: u8 = b'\r';
 const LF: u8 = b'\n';
 const CRLF: &[u8] = b"\r\n";
 
+/// The reply code of a server closing the connection.
+const CLOSING: u16 = 421;
+
 /// Failure causes during the SMTP send composite coroutine.
+///
+/// The message reached nobody. When the server refused a recipient or
+/// the DATA command, RSET was sent first, so the connection is ready
+/// for another transaction; after any other failure, drop it.
 #[derive(Debug, Error)]
 pub enum SmtpMessageSendError {
     /// The MAIL FROM step failed.
     #[error(transparent)]
     MailFrom(#[from] SmtpMailError),
     /// A RCPT TO step failed.
-    #[error(transparent)]
-    RcptTo(#[from] SmtpRcptError),
+    #[error("Recipient {forward_path}: {error}")]
+    RcptTo {
+        /// The forward path of the recipient.
+        forward_path: SmtpForwardPath<'static>,
+        /// What the step failed with.
+        error: SmtpRcptError,
+    },
+    /// The server refused every recipient, leaving none to send to.
+    #[error("SMTP server refused every recipient")]
+    NoRecipient(Vec<SmtpMessageSendRefusal>),
     /// The DATA step failed.
     #[error(transparent)]
     Data(#[from] SmtpDataError),
+}
+
+/// A recipient the server refused, with its reply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SmtpMessageSendRefusal {
+    /// The forward path of the recipient.
+    pub forward_path: SmtpForwardPath<'static>,
+    /// The reply code.
+    pub code: u16,
+    /// The reply text.
+    pub message: String,
 }
 
 /// Options for [`SmtpMessageSend`].
@@ -98,6 +125,9 @@ pub struct SmtpMessageSendOptions {
     /// ESMTP parameters of every RCPT TO command (RFC 5321 4.1.1.3), such
     /// as the DSN `NOTIFY` (RFC 3461 4.1).
     pub rcpt_parameters: Vec<SmtpParameter<'static>>,
+    /// Send to the recipients the server accepts when it refuses others,
+    /// instead of sending to none.
+    pub skip_refused_recipients: bool,
 }
 
 /// I/O-free SMTP composite send coroutine.
@@ -106,10 +136,18 @@ pub struct SmtpMessageSendOptions {
 /// them, the `Bcc` and `Resent-Bcc` fields are removed from the
 /// transmitted header section, so the blind recipients reached through
 /// the forward paths stay hidden.
+///
+/// One refused recipient fails the whole send, naming it, unless
+/// [`SmtpMessageSendOptions::skip_refused_recipients`] is set: the
+/// refused recipients are then returned once the others got the
+/// message.
 pub struct SmtpMessageSend {
     state: State,
     forward_paths: VecDeque<SmtpForwardPath<'static>>,
     rcpt_parameters: Vec<SmtpParameter<'static>>,
+    skip_refused_recipients: bool,
+    accepted: bool,
+    refused: Vec<SmtpMessageSendRefusal>,
     message: Option<Vec<u8>>,
 }
 
@@ -134,6 +172,9 @@ impl SmtpMessageSend {
             )),
             forward_paths,
             rcpt_parameters: options.rcpt_parameters,
+            skip_refused_recipients: options.skip_refused_recipients,
+            accepted: false,
+            refused: Vec::new(),
             message: Some(match options.keep_bcc {
                 true => message,
                 false => strip_bcc(message),
@@ -144,25 +185,98 @@ impl SmtpMessageSend {
 
 impl SmtpCoroutine for SmtpMessageSend {
     type Yield = SmtpYield;
-    type Return = Result<(), SmtpMessageSendError>;
+    type Return = Result<Vec<SmtpMessageSendRefusal>, SmtpMessageSendError>;
 
-    fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             match &mut self.state {
                 State::MailFrom(mail) => {
-                    let () = smtp_try!(mail, arg);
+                    let () = smtp_try!(mail, arg.take());
                     self.state = self.next_rcpt_or_data();
                     debug!("mail from accepted, next: {}", self.state);
                 }
-                State::RcptTo(rcpt) => {
-                    let () = smtp_try!(rcpt, arg);
-                    self.state = self.next_rcpt_or_data();
-                    debug!("rcpt to accepted, next: {}", self.state);
+                State::RcptTo { rcpt, forward_path } => {
+                    let error = match rcpt.resume(arg.take()) {
+                        SmtpCoroutineState::Yielded(y) => {
+                            return SmtpCoroutineState::Yielded(y);
+                        }
+                        SmtpCoroutineState::Complete(Ok(())) => {
+                            self.accepted = true;
+                            self.state = self.next_rcpt_or_data();
+                            debug!("rcpt to accepted, next: {}", self.state);
+                            continue;
+                        }
+                        SmtpCoroutineState::Complete(Err(error)) => error,
+                    };
+
+                    let forward_path = forward_path.clone();
+
+                    let reset = match error {
+                        SmtpRcptError::Rejected { code, .. } => code != CLOSING,
+                        SmtpRcptError::Send(_) => false,
+                    };
+
+                    self.state = match error {
+                        SmtpRcptError::Rejected { code, message }
+                            if reset && self.skip_refused_recipients =>
+                        {
+                            self.refused.push(SmtpMessageSendRefusal {
+                                forward_path,
+                                code,
+                                message,
+                            });
+
+                            self.next_rcpt_or_data()
+                        }
+                        error => {
+                            let error = SmtpMessageSendError::RcptTo {
+                                forward_path,
+                                error,
+                            };
+
+                            if !reset {
+                                return SmtpCoroutineState::Complete(Err(error));
+                            }
+
+                            State::rset(error)
+                        }
+                    };
+
+                    debug!("rcpt to refused, next: {}", self.state);
                 }
                 State::Data(data) => {
-                    let () = smtp_try!(data, arg);
-                    debug!("message sent");
-                    return SmtpCoroutineState::Complete(Ok(()));
+                    let error = match data.resume(arg.take()) {
+                        SmtpCoroutineState::Yielded(y) => {
+                            return SmtpCoroutineState::Yielded(y);
+                        }
+                        SmtpCoroutineState::Complete(Ok(())) => {
+                            debug!("message sent");
+                            let refused = mem::take(&mut self.refused);
+                            return SmtpCoroutineState::Complete(Ok(refused));
+                        }
+                        SmtpCoroutineState::Complete(Err(error)) => error,
+                    };
+
+                    let reset = match error {
+                        SmtpDataError::CommandRejected { code, .. } => code != CLOSING,
+                        _ => false,
+                    };
+
+                    if !reset {
+                        return SmtpCoroutineState::Complete(Err(error.into()));
+                    }
+
+                    self.state = State::rset(error.into());
+                    debug!("data refused, next: {}", self.state);
+                }
+                State::Rset { rset, error } => {
+                    // NOTE: whatever RSET ends with, the send fails with error
+                    if let SmtpCoroutineState::Yielded(y) = rset.resume(arg.take()) {
+                        return SmtpCoroutineState::Yielded(y);
+                    }
+
+                    let error = error.take().expect("error taken twice");
+                    return SmtpCoroutineState::Complete(Err(error));
                 }
             }
         }
@@ -171,28 +285,53 @@ impl SmtpCoroutine for SmtpMessageSend {
 
 impl SmtpMessageSend {
     fn next_rcpt_or_data(&mut self) -> State {
-        match self.forward_paths.pop_front() {
-            Some(path) => State::RcptTo(SmtpRcpt::new(path, self.rcpt_parameters.clone())),
-            None => {
-                let body = self.message.take().expect("message taken twice");
-                State::Data(SmtpData::new(body))
-            }
+        if let Some(forward_path) = self.forward_paths.pop_front() {
+            let parameters = self.rcpt_parameters.clone();
+            let rcpt = SmtpRcpt::new(forward_path.clone(), parameters);
+            return State::RcptTo { rcpt, forward_path };
         }
+
+        if !self.accepted && !self.refused.is_empty() {
+            let refused = mem::take(&mut self.refused);
+            return State::rset(SmtpMessageSendError::NoRecipient(refused));
+        }
+
+        let body = self.message.take().expect("message taken twice");
+        State::Data(SmtpData::new(body))
     }
 }
 
 enum State {
     MailFrom(SmtpMail),
-    RcptTo(SmtpRcpt),
+    RcptTo {
+        rcpt: SmtpRcpt,
+        forward_path: SmtpForwardPath<'static>,
+    },
     Data(SmtpData),
+    Rset {
+        rset: SmtpRset,
+        error: Option<SmtpMessageSendError>,
+    },
+}
+
+impl State {
+    /// The state closing the transaction before the send fails with
+    /// `error`.
+    fn rset(error: SmtpMessageSendError) -> Self {
+        Self::Rset {
+            rset: SmtpRset::new(),
+            error: Some(error),
+        }
+    }
 }
 
 impl fmt::Display for State {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MailFrom(_) => f.write_str("mail from"),
-            Self::RcptTo(_) => f.write_str("rcpt to"),
+            Self::RcptTo { .. } => f.write_str("rcpt to"),
             Self::Data(_) => f.write_str("data"),
+            Self::Rset { .. } => f.write_str("rset"),
         }
     }
 }
@@ -429,19 +568,170 @@ mod tests {
         assert_eq!(written[1], b"RCPT TO:<c@x> NOTIFY=SUCCESS,FAILURE\r\n");
     }
 
-    /// Runs the send against canned replies, returning every write.
+    #[test]
+    fn names_the_refused_recipient_and_resets() {
+        let replies = [OK, OK, b"550-5.1.1 User\r\n550 unknown\r\n", OK];
+        let (written, result) = sent(&["c@x", "d@x", "e@x"], Default::default(), &replies);
+
+        let Err(SmtpMessageSendError::RcptTo {
+            forward_path,
+            error,
+        }) = result
+        else {
+            panic!("expected SmtpMessageSendError::RcptTo, got {result:?}");
+        };
+
+        let SmtpRcptError::Rejected { code, message } = error else {
+            panic!("expected SmtpRcptError::Rejected, got {error:?}");
+        };
+
+        assert_eq!(forward_path, path("d@x"));
+        assert_eq!(code, 550);
+        assert_eq!(message, "5.1.1 User unknown");
+
+        let commands: [&[u8]; 4] = [
+            b"MAIL FROM:<a@x>\r\n",
+            b"RCPT TO:<c@x>\r\n",
+            b"RCPT TO:<d@x>\r\n",
+            b"RSET\r\n",
+        ];
+        assert_eq!(written, commands);
+    }
+
+    #[test]
+    fn keeps_the_first_error_when_rset_fails() {
+        for rset_reply in [b"500 what\r\n".as_slice(), b""] {
+            let replies = [OK, b"550 no such user\r\n", rset_reply];
+            let (_, result) = sent(&["c@x"], Default::default(), &replies);
+            assert!(matches!(result, Err(SmtpMessageSendError::RcptTo { .. })));
+        }
+    }
+
+    #[test]
+    fn sends_no_rset_when_the_session_state_is_unknown() {
+        for rcpt_reply in [b"".as_slice(), b"421 closing\r\n", b"999 x\r\n"] {
+            let replies = [OK, rcpt_reply];
+            let (written, result) = sent(&["c@x"], Default::default(), &replies);
+            assert!(matches!(result, Err(SmtpMessageSendError::RcptTo { .. })));
+            assert_eq!(written.last().unwrap(), b"RCPT TO:<c@x>\r\n");
+        }
+    }
+
+    #[test]
+    fn sends_no_rset_after_a_refused_mail_from() {
+        let replies = [b"550 sender refused\r\n".as_slice()];
+        let (written, result) = sent(&["c@x"], Default::default(), &replies);
+
+        assert!(matches!(result, Err(SmtpMessageSendError::MailFrom(_))));
+        assert_eq!(written.len(), 1);
+    }
+
+    #[test]
+    fn resets_after_a_refused_data_command() {
+        let replies = [OK, OK, b"554 no valid recipients\r\n", OK];
+        let (written, result) = sent(&["c@x"], Default::default(), &replies);
+
+        let Err(SmtpMessageSendError::Data(error)) = result else {
+            panic!("expected SmtpMessageSendError::Data, got {result:?}");
+        };
+
+        assert!(matches!(
+            error,
+            SmtpDataError::CommandRejected { code: 554, .. }
+        ));
+        assert_eq!(written.last().unwrap(), b"RSET\r\n");
+    }
+
+    #[test]
+    fn sends_no_rset_once_the_body_was_answered() {
+        let replies = [OK, OK, b"354 go\r\n", b"552 too large\r\n"];
+        let (written, result) = sent(&["c@x"], Default::default(), &replies);
+
+        assert!(matches!(result, Err(SmtpMessageSendError::Data(_))));
+        assert_eq!(written.len(), 4);
+    }
+
+    #[test]
+    fn skips_the_refused_recipients_when_told_to() {
+        let options = SmtpMessageSendOptions {
+            skip_refused_recipients: true,
+            ..Default::default()
+        };
+
+        let replies = [OK, b"550 no such user\r\n", OK, b"354 go\r\n", OK];
+        let (written, result) = sent(&["c@x", "d@x"], options, &replies);
+
+        let refused = SmtpMessageSendRefusal {
+            forward_path: path("c@x"),
+            code: 550,
+            message: "no such user".into(),
+        };
+        assert_eq!(result.unwrap(), [refused]);
+        assert_eq!(written[3], b"DATA\r\n");
+        assert_eq!(written.len(), 5);
+    }
+
+    #[test]
+    fn fails_when_every_recipient_is_refused() {
+        let options = SmtpMessageSendOptions {
+            skip_refused_recipients: true,
+            ..Default::default()
+        };
+
+        let replies = [OK, b"550 no such user\r\n", b"551 not local\r\n", OK];
+        let (written, result) = sent(&["c@x", "d@x"], options, &replies);
+
+        let Err(SmtpMessageSendError::NoRecipient(refused)) = result else {
+            panic!("expected SmtpMessageSendError::NoRecipient, got {result:?}");
+        };
+
+        let codes: Vec<u16> = refused.iter().map(|refusal| refusal.code).collect();
+        assert_eq!(codes, [550, 551]);
+        assert_eq!(written.last().unwrap(), b"RSET\r\n");
+        assert_eq!(written.len(), 4);
+    }
+
+    const OK: &[u8] = b"250 ok\r\n";
+
+    fn path(address: &'static str) -> SmtpForwardPath<'static> {
+        SmtpForwardPath(SmtpMailbox::try_from(address).unwrap())
+    }
+
+    /// Runs the send of one message against canned replies, returning
+    /// every write.
     fn transmitted(raw: &[u8], options: SmtpMessageSendOptions) -> Vec<Vec<u8>> {
-        let mailbox = |address: &'static str| SmtpMailbox::try_from(address).unwrap();
+        let replies = [OK, OK, b"354 go\r\n", OK];
+        let (written, result) = run(&["c@x"], raw, options, &replies);
+        result.unwrap();
+        written
+    }
+
+    /// Runs a send to the given recipients against canned replies,
+    /// returning every write and how it completed.
+    fn sent(
+        recipients: &[&'static str],
+        options: SmtpMessageSendOptions,
+        replies: &[&[u8]],
+    ) -> (Vec<Vec<u8>>, <SmtpMessageSend as SmtpCoroutine>::Return) {
+        run(recipients, b"body\r\n", options, replies)
+    }
+
+    fn run(
+        recipients: &[&'static str],
+        raw: &[u8],
+        options: SmtpMessageSendOptions,
+        replies: &[&[u8]],
+    ) -> (Vec<Vec<u8>>, <SmtpMessageSend as SmtpCoroutine>::Return) {
+        let SmtpForwardPath(sender) = path("a@x");
 
         let mut send = SmtpMessageSend::new(
-            SmtpReversePath::SmtpMailbox(mailbox("a@x")),
-            [SmtpForwardPath(mailbox("c@x"))],
+            SmtpReversePath::SmtpMailbox(sender),
+            recipients.iter().copied().map(path),
             raw.to_vec(),
             options,
         );
 
-        let replies: [&[u8]; 4] = [b"250 ok\r\n", b"250 ok\r\n", b"354 go\r\n", b"250 ok\r\n"];
-        let mut replies = replies.into_iter();
+        let mut replies = replies.iter().copied();
         let mut arg = None;
         let mut written = Vec::new();
 
@@ -449,10 +739,8 @@ mod tests {
             match send.resume(arg.take()) {
                 SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => written.push(bytes),
                 SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => arg = replies.next(),
-                SmtpCoroutineState::Complete(result) => break result.unwrap(),
+                SmtpCoroutineState::Complete(result) => break (written, result),
             }
         }
-
-        written
     }
 }

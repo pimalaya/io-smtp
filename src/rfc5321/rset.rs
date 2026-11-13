@@ -38,10 +38,7 @@
 
 use core::fmt;
 
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{string::String, vec::Vec};
 
 use log::debug;
 use thiserror::Error;
@@ -108,7 +105,7 @@ impl SmtpCoroutine for SmtpRset {
                 }
 
                 let code = out.response.code.code();
-                let message = out.response.text().to_string();
+                let message = out.response.message();
                 SmtpCoroutineState::Complete(Err(SmtpRsetError::Rejected { code, message }))
             }
         }

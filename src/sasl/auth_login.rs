@@ -213,7 +213,7 @@ impl SmtpCoroutine for SmtpAuthLogin {
     type Yield = SmtpYield;
     type Return = Result<(), SmtpAuthLoginError>;
 
-    fn resume(&mut self, arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
+    fn resume(&mut self, mut arg: Option<&[u8]>) -> SmtpCoroutineState<Self::Yield, Self::Return> {
         loop {
             match &mut self.state {
                 State::Start => {
@@ -226,7 +226,7 @@ impl SmtpCoroutine for SmtpAuthLogin {
                     debug!("{}", self.state);
                 }
                 State::Command(send) => {
-                    let out = smtp_try!(send, arg);
+                    let out = smtp_try!(send, arg.take());
 
                     if out.response.code != SmtpReplyCode::AUTH_CONTINUE {
                         let err = Self::rejected_or_missing_challenge(
@@ -249,7 +249,7 @@ impl SmtpCoroutine for SmtpAuthLogin {
                     debug!("{}", self.state);
                 }
                 State::Username(send) => {
-                    let out = smtp_try!(send, arg);
+                    let out = smtp_try!(send, arg.take());
 
                     if out.response.code != SmtpReplyCode::AUTH_CONTINUE {
                         let err = Self::rejected_or_missing_challenge(
@@ -266,11 +266,11 @@ impl SmtpCoroutine for SmtpAuthLogin {
                     debug!("{}", self.state);
                 }
                 State::Password(send) => {
-                    let out = smtp_try!(send, arg);
+                    let out = smtp_try!(send, arg.take());
 
                     if out.response.code != SmtpReplyCode::AUTH_SUCCESSFUL {
                         let code = out.response.code.code();
-                        let message = out.response.text().to_string();
+                        let message = out.response.message();
                         let err = SmtpAuthLoginError::Rejected { code, message };
                         return SmtpCoroutineState::Complete(Err(err));
                     }
@@ -291,7 +291,7 @@ impl SmtpCoroutine for SmtpAuthLogin {
                     }
                 }
                 State::Ehlo(ehlo) => {
-                    let _ = smtp_try!(ehlo, arg);
+                    let _ = smtp_try!(ehlo, arg.take());
                     debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
