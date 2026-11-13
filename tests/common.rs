@@ -377,7 +377,10 @@ pub fn run_client(url: &str, sasl: Option<Sasl>, email: &str, starttls: bool) {
 
     let opts = SmtpClientStdConnectOptions {
         sasl,
-        session: SmtpSessionOpenOptions { starttls },
+        session: SmtpSessionOpenOptions {
+            starttls,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let (mut client, capabilities) =

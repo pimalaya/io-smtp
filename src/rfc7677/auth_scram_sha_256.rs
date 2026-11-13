@@ -75,7 +75,7 @@ use base64_codec::codec::Base64Codec;
 use bounded_static::IntoBoundedStatic;
 use io_sasl::{
     coroutine::*,
-    rfc5802::{SaslScramCreds, SaslScramError},
+    rfc5802::{SaslScramCreds, SaslScramError, SaslScramOptions},
     rfc7677::scram_sha_256::SaslScramSha256,
 };
 use log::debug;
@@ -108,6 +108,9 @@ pub struct SmtpAuthScramSha256Options {
     /// Whether to refresh capabilities with an `EHLO` after a successful auth.
     /// Disabled by default because the mechanism does not add a security layer.
     pub ensure_capabilities: bool,
+    /// The bounds of the iteration count the server may announce,
+    /// outside which the exchange fails before any key is derived.
+    pub scram: SaslScramOptions,
 }
 
 impl Default for SmtpAuthScramSha256Options {
@@ -115,6 +118,7 @@ impl Default for SmtpAuthScramSha256Options {
         Self {
             initial_request: true,
             ensure_capabilities: false,
+            scram: SaslScramOptions::default(),
         }
     }
 }
@@ -179,7 +183,7 @@ impl SmtpAuthScramSha256 {
     ) -> Self {
         Self {
             state: State::Start,
-            mechanism: SaslScramSha256::new(creds),
+            mechanism: SaslScramSha256::new(creds, opts.scram.clone()),
             domain: Some(domain.into_static()),
             opts,
         }
@@ -593,6 +597,42 @@ mod tests {
             let err = expect_complete_err(&mut auth, reply);
             assert!(matches!(err, SmtpAuthScramSha256Error::Mechanism(_)));
         }
+    }
+
+    #[test]
+    fn iteration_count_above_the_ceiling_is_cancelled_without_deriving() {
+        let opts = SmtpAuthScramSha256Options {
+            scram: SaslScramOptions {
+                min_iterations: None,
+                max_iterations: Some(100_000),
+            },
+            ..Default::default()
+        };
+
+        let mut auth = auth(opts);
+
+        let bytes = expect_wants_write(&mut auth, None);
+        let client_first = decode_last_base64_token(&bytes);
+        let client_nonce = client_first.rsplit_once("r=").expect("r=").1;
+
+        expect_wants_read(&mut auth);
+
+        // NOTE: deriving for this count would take hours
+        let count = u32::MAX;
+        let server_first = format!("r={client_nonce}ServerExtra,s={SALT_B64},i={count}");
+        let challenge = format!("334 {}\r\n", encode(&server_first));
+        let cancel = expect_wants_write(&mut auth, Some(challenge.as_bytes()));
+        assert_eq!(cancel, b"*\r\n");
+        expect_wants_read(&mut auth);
+
+        let err = expect_complete_err(&mut auth, b"501 5.7.0 cancelled\r\n");
+        let SmtpAuthScramSha256Error::Mechanism(SaslScramError::IterationCountTooHigh {
+            count: u32::MAX,
+            max: 100_000,
+        }) = err
+        else {
+            panic!("expected IterationCountTooHigh, got {err:?}");
+        };
     }
 
     #[test]

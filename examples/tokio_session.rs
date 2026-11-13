@@ -66,7 +66,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             passwd: passwd.into(),
         });
 
-    let opts = SmtpSessionOpenOptions { starttls };
+    let opts = SmtpSessionOpenOptions {
+        starttls,
+        ..Default::default()
+    };
 
     let (mut client, capabilities) =
         SmtpClientTokio::connect(&url, &connector, domain, sasl, opts).await?;

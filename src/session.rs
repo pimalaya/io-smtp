@@ -87,6 +87,8 @@ use alloc::string::ToString;
 use alloc::{borrow::Cow, boxed::Box, string::String, vec, vec::Vec};
 
 use bounded_static::IntoBoundedStatic;
+#[cfg(feature = "scram")]
+use io_sasl::rfc5802::SaslScramOptions;
 use io_sasl::{
     login::SaslLoginCreds,
     mechanism::{Sasl, SaslMechanism},
@@ -246,6 +248,12 @@ pub struct SmtpSessionOpenOptions {
     /// first EHLO. Only valid on a cleartext transport, since
     /// [`SmtpSessionTransport::Tls`] is already encrypted.
     pub starttls: bool,
+    /// The lowest iteration count a SCRAM exchange accepts from the
+    /// server, `None` being the io-sasl default.
+    pub scram_min_iterations: Option<u32>,
+    /// The highest iteration count a SCRAM exchange accepts from the
+    /// server, `None` being the io-sasl default.
+    pub scram_max_iterations: Option<u32>,
 }
 
 /// An opened SMTP session.
@@ -388,7 +396,15 @@ impl SmtpSessionOpen {
             }
             #[cfg(feature = "scram")]
             Sasl::ScramSha256(creds) => {
-                let opts = SmtpAuthScramSha256Options::default();
+                let scram = SaslScramOptions {
+                    min_iterations: self.opts.scram_min_iterations,
+                    max_iterations: self.opts.scram_max_iterations,
+                };
+
+                let opts = SmtpAuthScramSha256Options {
+                    scram,
+                    ..Default::default()
+                };
 
                 Auth::ScramSha256(SmtpAuthScramSha256::new(creds, domain, opts))
             }
@@ -682,7 +698,10 @@ mod tests {
             port: 465,
         };
 
-        let opts = SmtpSessionOpenOptions { starttls: true };
+        let opts = SmtpSessionOpenOptions {
+            starttls: true,
+            ..Default::default()
+        };
 
         let mut session = SmtpSessionOpen::new(transport, domain(), None::<Sasl>, opts);
 
@@ -826,13 +845,77 @@ mod tests {
         assert_eq!(SmtpSessionTransport::from_url(&url).unwrap(), expected);
     }
 
+    #[cfg(feature = "scram")]
+    #[test]
+    fn scram_iteration_bounds_follow_the_options() {
+        use base64_codec::codec::Base64Codec;
+        use io_sasl::{
+            rfc5801::SaslGs2ChannelBinding,
+            rfc5802::{SaslScramCreds, SaslScramError},
+        };
+
+        let transport = SmtpSessionTransport::Tcp {
+            host: "localhost".to_string(),
+            port: 25,
+        };
+
+        let creds = SaslScramCreds {
+            username: "user".to_string(),
+            password: "pencil".to_string().into(),
+            nonce: b"fyko+d2lbbFgONRv9qkxdawL".to_vec(),
+            channel_binding: SaslGs2ChannelBinding::Unsupported,
+        };
+
+        let opts = SmtpSessionOpenOptions {
+            scram_max_iterations: Some(4096),
+            ..Default::default()
+        };
+
+        let sasl = Some(Sasl::ScramSha256(creds));
+        let mut session = SmtpSessionOpen::new(transport, domain(), sasl, opts);
+
+        session.resume(None);
+        session.resume(None);
+        session.resume(Some(b"220 server.example.org ready\r\n"));
+        session.resume(None);
+        session.resume(Some(b"250 AUTH SCRAM-SHA-256\r\n"));
+        session.resume(None);
+
+        let server_first = "r=fyko+d2lbbFgONRv9qkxdawLServerExtra,s=QSXCR+Q6sek8bf92,i=4097";
+        let mut payload = Vec::new();
+        Base64Codec::default().encode_vec(server_first.as_bytes(), &mut payload);
+        let challenge = [b"334 ", payload.as_slice(), b"\r\n"].concat();
+
+        let cancel = match session.resume(Some(&challenge)) {
+            SmtpCoroutineState::Yielded(SmtpSessionOpenYield::WantsWrite(bytes)) => bytes,
+            state => panic!("expected WantsWrite, got {state:?}"),
+        };
+
+        assert_eq!(cancel, b"*\r\n");
+
+        session.resume(None);
+
+        match session.resume(Some(b"501 5.7.0 cancelled\r\n")) {
+            SmtpCoroutineState::Complete(Err(SmtpSessionOpenError::AuthScramSha256(
+                SmtpAuthScramSha256Error::Mechanism(SaslScramError::IterationCountTooHigh {
+                    count: 4097,
+                    max: 4096,
+                }),
+            ))) => {}
+            state => panic!("expected IterationCountTooHigh, got {state:?}"),
+        }
+    }
+
     fn starttls_session() -> SmtpSessionOpen {
         let transport = SmtpSessionTransport::Tcp {
             host: "localhost".to_string(),
             port: 587,
         };
 
-        let opts = SmtpSessionOpenOptions { starttls: true };
+        let opts = SmtpSessionOpenOptions {
+            starttls: true,
+            ..Default::default()
+        };
 
         SmtpSessionOpen::new(transport, domain(), None::<Sasl>, opts)
     }

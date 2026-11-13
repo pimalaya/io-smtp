@@ -34,7 +34,7 @@ use alloc::{borrow::Cow, boxed::Box, string::String, vec::Vec};
 use std::io::{self, Read, Write};
 
 #[cfg(feature = "scram")]
-use io_sasl::rfc5802::SaslScramCreds;
+use io_sasl::rfc5802::{SaslScramCreds, SaslScramOptions};
 use secrecy::SecretString;
 use thiserror::Error;
 
@@ -354,10 +354,22 @@ smtp_client_commands! {
     /// The credentials carry the client nonce, which RFC 5802 wants
     /// drawn from at least 18 bytes of cryptographic randomness, and the
     /// channel binding deciding whether the exchange announces
-    /// `SCRAM-SHA-256` or `SCRAM-SHA-256-PLUS`.
+    /// `SCRAM-SHA-256` or `SCRAM-SHA-256-PLUS`. The options bound the
+    /// iteration count the server may announce.
     #[cfg(feature = "scram")]
-    fn auth_scram_sha256(creds: SaslScramCreds, domain: SmtpEhloDomain<'static>) -> () {
-        SmtpAuthScramSha256::new(creds, domain, SmtpAuthScramSha256Options::default())
+    fn auth_scram_sha256(
+        creds: SaslScramCreds,
+        domain: SmtpEhloDomain<'static>,
+        opts: SaslScramOptions,
+    ) -> () {
+        SmtpAuthScramSha256::new(
+            creds,
+            domain,
+            SmtpAuthScramSha256Options {
+                scram: opts,
+                ..Default::default()
+            },
+        )
     }
 
     /// `MAIL FROM:<reverse-path>` (RFC 5321 §4.1.1.2).

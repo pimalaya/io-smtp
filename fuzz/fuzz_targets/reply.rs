@@ -8,7 +8,10 @@
 //! and neither is ever reported as refused.
 
 use arbitrary::Arbitrary;
-use io_sasl::{rfc5801::SaslGs2ChannelBinding, rfc5802::SaslScramCreds};
+use io_sasl::{
+    rfc5801::SaslGs2ChannelBinding,
+    rfc5802::{SaslScramCreds, SaslScramOptions},
+};
 use io_smtp::{
     coroutine::*,
     rfc3207::starttls::SmtpStartTls,
@@ -86,9 +89,15 @@ fuzz_target!(|input: Input| {
         nonce: b"fyko+d2lbbFgONRv9qkxdawL".to_vec(),
         channel_binding: SaslGs2ChannelBinding::Unsupported,
     };
+    // NOTE: a higher ceiling would spend the run deriving keys
+    let scram = SaslScramOptions {
+        min_iterations: None,
+        max_iterations: Some(4096),
+    };
     let opts = SmtpAuthScramSha256Options {
         initial_request: input.initial_request,
         ensure_capabilities: input.ensure_capabilities,
+        scram,
     };
     let _ = check(
         SmtpAuthScramSha256::new(creds, domain(), opts),

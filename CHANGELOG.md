@@ -35,6 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added `SmtpResponse::message`, every line of a reply joined by a space.
 
+- Added `SmtpAuthScramSha256Options::scram`, the bounds of the iteration count a server may announce.
+
+  **BREAKING**: a struct literal of the options needs the field.
+
+- Added `SmtpSessionOpenOptions::scram_min_iterations` and `scram_max_iterations`, the same bounds for a session and for `connect`.
+
+  **BREAKING**: a struct literal of the options needs `..Default::default()`.
+
 ### Changed
 
 - **BREAKING**: Made the field of `SmtpLocalPart` and of `SmtpDomain` private.
@@ -68,6 +76,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed the `scram` feature to pull no randomness: `rand` comes with the TLS features, without its default features.
 
   The coroutines with `scram` build without std; only `connect` draws a nonce.
+
+- **BREAKING**: Changed the io-sasl dependency to 0.2.
+
+  PLAIN and SCRAM-SHA-256 now prepare their credentials in every build (RFC 4013): a password SASLprep alters is sent prepared, and one it prohibits fails the exchange. A SCRAM client nonce shorter than 18 bytes is refused.
+
+- **BREAKING**: Changed the `auth_scram_sha256` method of both client traits to take a `SaslScramOptions`.
 
 ### Fixed
 
@@ -108,6 +122,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed caller strings reaching the `MAIL FROM`, `RCPT TO`, `EHLO`, `HELO`, `NOOP` and `AUTH` lines unchecked.
 
   A CR LF in a local part, a domain, a parameter, an address literal, a `NOOP` string or a mechanism name added commands to the session.
+
+- Fixed SCRAM-SHA-256 deriving its key for whatever iteration count the server announced.
+
+  A count below 4096 or above five million fails the exchange before the derivation, unless the options move the bounds.
 
 ## [0.7.1] - 2026-11-03
 

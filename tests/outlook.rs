@@ -94,7 +94,10 @@ fn oauth_xoauth2_rejected() {
     };
     let opts = SmtpClientStdConnectOptions {
         sasl: Some(Sasl::Xoauth2(creds)),
-        session: SmtpSessionOpenOptions { starttls: true },
+        session: SmtpSessionOpenOptions {
+            starttls: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -124,7 +127,10 @@ fn oauth_message_send() {
     };
     let opts = SmtpClientStdConnectOptions {
         sasl: Some(Sasl::Xoauth2(creds)),
-        session: SmtpSessionOpenOptions { starttls: true },
+        session: SmtpSessionOpenOptions {
+            starttls: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
 

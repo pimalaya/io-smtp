@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { version = "1", features = ["derive"] }
-io-sasl = { version = "0.1", default-features = false, features = ["scram"] }
+io-sasl = { version = "0.2", default-features = false, features = ["scram"] }
 io-smtp = { path = "..", default-features = false, features = ["scram"] }
 libfuzzer-sys = "0.4"
 secrecy = "0.10"

@@ -442,6 +442,17 @@ mod tests {
     }
 
     #[test]
+    fn ir_sends_the_prepared_password() {
+        // NOTE: SASLprep maps the soft hyphen U+00AD to nothing
+        let password = SecretString::from("pa\u{ad}ss".to_string());
+        let opts = SmtpAuthPlainOptions::default();
+        let mut auth = SmtpAuthPlain::new(None::<&str>, "alice", &password, domain(), opts);
+
+        let bytes = expect_wants_write(&mut auth, None);
+        assert_eq!(bytes, b"AUTH PLAIN AGFsaWNlAHBhc3M=\r\n");
+    }
+
+    #[test]
     fn ir_success_with_ehlo_returns_ok() {
         let opts = SmtpAuthPlainOptions {
             initial_request: true,

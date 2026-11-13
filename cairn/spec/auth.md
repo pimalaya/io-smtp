@@ -65,3 +65,25 @@ No `*` SHALL be sent where the server is not waiting: after a rejection, after a
 - GIVEN a SCRAM-SHA-256 exchange and a server answering `334 Zm9v`
 - WHEN the mechanism refuses the message
 - THEN the client writes `*`, reads the reply, and fails with the mechanism's error
+
+## Requirement: The SCRAM iteration count is bounded
+
+The iteration count a server announces in its server-first-message SHALL be checked against a floor and a ceiling before any key is derived, the derivation running inside one resume for as long as the count says. The bounds SHALL default to those of io-sasl, 4096 and five million, and SHALL be reachable at every layer running the exchange: `SmtpAuthScramSha256Options::scram`, `SmtpSessionOpenOptions::scram_min_iterations` and `scram_max_iterations`, which `SmtpClientStd::connect` hands over with the rest of the session options, and the options argument of `auth_scram_sha256` on both client traits.
+
+The two session fields SHALL exist in every build, so that a struct literal of the session options does not depend on the `scram` feature; without the feature nothing reads them.
+
+A count outside the bounds arrives in a 334 challenge, so the exchange SHALL be cancelled and SHALL fail with the mechanism's `IterationCountTooLow` or `IterationCountTooHigh`.
+
+### Scenario: A count above the ceiling
+- GIVEN a SCRAM-SHA-256 exchange whose options set the ceiling to 100000
+- WHEN the server-first-message announces `i=4294967295`
+- THEN the client writes `*`, reads the reply, and fails with `IterationCountTooHigh`, no key derived
+
+## Requirement: Credentials are prepared
+
+PLAIN and SCRAM-SHA-256 SHALL prepare their credentials with SASLprep (RFC 4013) in every build, which io-sasl does at the first resume: what is sent, or derived from, is the prepared form, and a credential holding a prohibited code point SHALL fail the exchange before anything is written.
+
+### Scenario: A password SASLprep alters
+- GIVEN a PLAIN exchange whose password holds a soft hyphen (U+00AD)
+- WHEN the `AUTH PLAIN` command is written
+- THEN its initial response carries the password without that character
