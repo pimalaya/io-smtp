@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added `SmtpGeneralAddressLiteral`.
 
+- Added `SmtpString`, the atom or quoted string `NOOP` takes.
+
+- Added `SmtpAuthMechanism`, the SASL mechanism name `AUTH` takes.
+
 ### Changed
 
 - **BREAKING**: Made the field of `SmtpLocalPart` and of `SmtpDomain` private.
@@ -35,7 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   They take the value before encoding and refuse what is not printable US-ASCII.
 
+- **BREAKING**: Changed `SmtpNoopCommand::string` to a `SmtpString`.
+
+- **BREAKING**: Changed `SmtpAuthCommand::mechanism` to a `SmtpAuthMechanism`.
+
+- Changed `SmtpMessageSend` to remove the `Resent-Bcc` field too (RFC 5322 3.6.6).
+
 ### Fixed
+
+- Fixed a `Bcc` field following a bare CR line ending being transmitted to every recipient.
+
+  The removal reads lines as `DATA` ends them: at CRLF, a bare CR or a bare LF.
 
 - Fixed a local part needing quotes, such as `john doe`, being sent unquoted.
 
@@ -45,9 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Fixed caller strings reaching the `MAIL FROM`, `RCPT TO`, `EHLO` and `HELO` lines unchecked.
+- Fixed caller strings reaching the `MAIL FROM`, `RCPT TO`, `EHLO`, `HELO`, `NOOP` and `AUTH` lines unchecked.
 
-  A CR LF in a local part, a domain, a parameter or an address literal added commands to the session.
+  A CR LF in a local part, a domain, a parameter, an address literal, a `NOOP` string or a mechanism name added commands to the session.
 
 ## [0.7.1] - 2026-11-03
 

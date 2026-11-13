@@ -120,7 +120,7 @@ impl SmtpData {
     ///
     /// Refs: <https://datatracker.ietf.org/doc/html/rfc5321#section-2.3.8>,
     /// <https://datatracker.ietf.org/doc/html/rfc5321#section-4.5.2>
-    fn prepare_body(message: Vec<u8>) -> Vec<u8> {
+    pub(crate) fn prepare_body(message: Vec<u8>) -> Vec<u8> {
         let mut out = Vec::new();
         // NOTE: message[..copied] is in out already, once out is used.
         let mut copied = 0;

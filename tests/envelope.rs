@@ -1,10 +1,14 @@
 //! Tests for the command arguments the caller gives: whatever the
 //! string, a command stays one line. No network connection is made.
 
-use io_smtp::rfc5321::{
-    SmtpAddressLiteral, SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpGeneralAddressLiteral,
-    SmtpLocalPart, SmtpMailbox, SmtpParameter, SmtpReversePath, SmtpSyntaxError,
-    ehlo::SmtpEhloCommand, helo::SmtpHeloCommand, mail::SmtpMailCommand, rcpt::SmtpRcptCommand,
+use io_smtp::{
+    rfc4954::auth::{SmtpAuthCommand, SmtpAuthMechanism},
+    rfc5321::{
+        SmtpAddressLiteral, SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpGeneralAddressLiteral,
+        SmtpLocalPart, SmtpMailbox, SmtpParameter, SmtpReversePath, SmtpString, SmtpSyntaxError,
+        ehlo::SmtpEhloCommand, helo::SmtpHeloCommand, mail::SmtpMailCommand, noop::SmtpNoopCommand,
+        rcpt::SmtpRcptCommand,
+    },
 };
 
 fn mail(reverse_path: SmtpReversePath<'_>, parameters: Vec<SmtpParameter<'_>>) -> Vec<u8> {
@@ -93,6 +97,26 @@ fn rcpt_to_local_part_space() {
     assert_eq!(rcpt(mailbox, Vec::new()), b"RCPT TO:<\"john doe\"@x>\r\n");
 }
 
+#[test]
+fn noop_string_crlf() {
+    let err = SmtpString::try_from("x\r\nMAIL FROM:<>").unwrap_err();
+    assert_eq!(err, SmtpSyntaxError::String);
+
+    let string = SmtpString::try_from("\"still here\"").unwrap();
+    let wire: Vec<u8> = SmtpNoopCommand {
+        string: Some(string),
+    }
+    .into();
+
+    assert_eq!(wire, b"NOOP \"still here\"\r\n");
+}
+
+#[test]
+fn auth_mechanism_crlf() {
+    let err = SmtpAuthMechanism::try_from("PLAIN\r\nMAIL FROM:<>").unwrap_err();
+    assert_eq!(err, SmtpSyntaxError::AuthMechanism);
+}
+
 /// Every ASCII character, put inside every argument: the constructor
 /// refuses it or the command it serialises to is one line.
 #[test]
@@ -152,6 +176,33 @@ fn accepted_arguments_serialise_to_one_line() {
 
             let spaces = wire.iter().filter(|b| **b == b' ').count();
             assert_eq!(spaces, 2, "parameter with {c:?}");
+        }
+
+        let strings = [
+            SmtpString::try_from(s.as_str()),
+            SmtpString::try_from(quoted.as_str()),
+        ];
+
+        for string in strings.into_iter().flatten() {
+            let string = Some(string);
+            let wire: Vec<u8> = SmtpNoopCommand { string }.into();
+            assert!(one_line(wire), "string with {c:?}");
+        }
+
+        let name = format!("A{c}B");
+
+        if let Ok(mechanism) = SmtpAuthMechanism::try_from(name.as_str()) {
+            let initial_response = None;
+            let command = SmtpAuthCommand {
+                mechanism,
+                initial_response,
+            };
+
+            let wire: Vec<u8> = command.into();
+            assert!(one_line(wire.clone()), "mechanism with {c:?}");
+
+            let spaces = wire.iter().filter(|b| **b == b' ').count();
+            assert_eq!(spaces, 1, "mechanism with {c:?}");
         }
     }
 }

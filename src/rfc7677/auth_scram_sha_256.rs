@@ -89,7 +89,7 @@ use thiserror::Error;
 use crate::{
     coroutine::*,
     rfc4954::{
-        auth::SmtpAuthCommand,
+        auth::{SmtpAuthCommand, SmtpAuthMechanism},
         auth_data::{SmtpAuthChallengeError, SmtpAuthData, parse_challenge},
     },
     rfc5321::{
@@ -226,7 +226,7 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
                     };
 
                     let cmd = SmtpAuthCommand {
-                        mechanism: Cow::Borrowed(SCRAM_SHA_256),
+                        mechanism: SmtpAuthMechanism(Cow::Borrowed(SCRAM_SHA_256)),
                         initial_response: Some(SecretBox::new(payload.into_boxed_slice())),
                     };
 

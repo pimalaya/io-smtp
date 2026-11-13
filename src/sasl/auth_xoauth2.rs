@@ -75,7 +75,7 @@ use thiserror::Error;
 use crate::{
     coroutine::*,
     rfc4954::{
-        auth::SmtpAuthCommand,
+        auth::{SmtpAuthCommand, SmtpAuthMechanism},
         auth_data::{SmtpAuthChallengeError, SmtpAuthData, parse_challenge},
     },
     rfc5321::{
@@ -234,7 +234,7 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
                     };
 
                     let cmd = SmtpAuthCommand {
-                        mechanism: Cow::Borrowed(XOAUTH2),
+                        mechanism: SmtpAuthMechanism(Cow::Borrowed(XOAUTH2)),
                         initial_response,
                     };
 

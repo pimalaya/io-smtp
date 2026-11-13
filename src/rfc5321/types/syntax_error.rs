@@ -26,4 +26,10 @@ pub enum SmtpSyntaxError {
     /// The string is not an esmtp-value.
     #[error("Invalid ESMTP parameter value")]
     ParameterValue,
+    /// The string is neither an Atom nor a Quoted-string.
+    #[error("Invalid SMTP string")]
+    String,
+    /// The string is not a sasl-mech (RFC 4422 §3.1).
+    #[error("Invalid SASL mechanism name")]
+    AuthMechanism,
 }

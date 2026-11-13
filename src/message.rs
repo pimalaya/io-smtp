@@ -68,6 +68,10 @@ use crate::{
     smtp_try,
 };
 
+const CR: u8 = b'\r';
+const LF: u8 = b'\n';
+const CRLF: &[u8] = b"\r\n";
+
 /// Failure causes during the SMTP send composite coroutine.
 #[derive(Debug, Error)]
 pub enum SmtpMessageSendError {
@@ -85,7 +89,8 @@ pub enum SmtpMessageSendError {
 /// Options for [`SmtpMessageSend`].
 #[derive(Clone, Debug, Default)]
 pub struct SmtpMessageSendOptions {
-    /// Transmit the `Bcc` field instead of removing it (RFC 5322 3.6.3).
+    /// Transmit the `Bcc` and `Resent-Bcc` fields instead of removing
+    /// them (RFC 5322 3.6.3, 3.6.6).
     pub keep_bcc: bool,
     /// ESMTP parameters of the MAIL FROM command (RFC 5321 4.1.1.2), such
     /// as the DSN `RET` and `ENVID` (RFC 3461 4.3, 4.4).
@@ -97,9 +102,10 @@ pub struct SmtpMessageSendOptions {
 
 /// I/O-free SMTP composite send coroutine.
 ///
-/// It submits a message rather than relaying one: unless told to keep it,
-/// the `Bcc` field is removed from the transmitted header section, so the
-/// blind recipients reached through the forward paths stay hidden.
+/// It submits a message rather than relaying one: unless told to keep
+/// them, the `Bcc` and `Resent-Bcc` fields are removed from the
+/// transmitted header section, so the blind recipients reached through
+/// the forward paths stay hidden.
 pub struct SmtpMessageSend {
     state: State,
     forward_paths: VecDeque<SmtpForwardPath<'static>>,
@@ -191,10 +197,11 @@ impl fmt::Display for State {
     }
 }
 
-/// Removes every `Bcc` field, folded lines included, from the header
-/// section of `message`, leaving the body untouched.
+/// Removes every `Bcc` and `Resent-Bcc` field, folded lines included,
+/// from the header section of `message`, leaving the body untouched.
 ///
-/// `message` is returned as is when it carries no `Bcc` field.
+/// A line ends where `DATA` ends it: at CRLF, a bare CR or a bare LF.
+/// `message` is returned as is when it carries no such field.
 fn strip_bcc(message: Vec<u8>) -> Vec<u8> {
     let mut out = Vec::new();
     // NOTE: message[..copied] is in out already, once a field was stripped.
@@ -204,16 +211,19 @@ fn strip_bcc(message: Vec<u8>) -> Vec<u8> {
     let mut start = 0;
 
     while start < message.len() {
-        let end = match position(&message[start..], |byte| byte == b'\n') {
-            Some(lf) => start + lf + 1,
-            None => message.len(),
+        let rest = &message[start..];
+
+        let (len, end) = match position(rest, |b| (b == CR) | (b == LF)) {
+            Some(i) if rest.get(i..i + 2) == Some(CRLF) => (i, start + i + 2),
+            Some(i) => (i, start + i + 1),
+            None => (rest.len(), message.len()),
         };
 
-        let line = &message[start..end];
-
-        if line == b"\r\n" || line == b"\n" {
+        if len == 0 {
             break;
         }
+
+        let line = &rest[..len];
 
         if !matches!(line.first(), Some(b' ' | b'\t')) {
             in_bcc = is_bcc(line);
@@ -226,6 +236,12 @@ fn strip_bcc(message: Vec<u8>) -> Vec<u8> {
             }
 
             out.extend_from_slice(&message[copied..start]);
+
+            // NOTE: a kept bare CR must not pair with an LF after the field
+            if out.last() == Some(&CR) {
+                out.push(LF);
+            }
+
             copied = end;
         }
 
@@ -240,12 +256,15 @@ fn strip_bcc(message: Vec<u8>) -> Vec<u8> {
     out
 }
 
-/// Whether a header line opens a `Bcc` field, allowing the obsolete
-/// whitespace before the colon (RFC 5322 4.5.3).
+/// Whether a header line opens a `Bcc` or `Resent-Bcc` field, allowing
+/// the obsolete whitespace before the colon (RFC 5322 4.5.3).
 fn is_bcc(line: &[u8]) -> bool {
     line.iter()
         .position(|&byte| byte == b':')
-        .is_some_and(|colon| line[..colon].trim_ascii_end().eq_ignore_ascii_case(b"bcc"))
+        .is_some_and(|colon| {
+            let name = line[..colon].trim_ascii_end();
+            name.eq_ignore_ascii_case(b"bcc") || name.eq_ignore_ascii_case(b"resent-bcc")
+        })
 }
 
 #[cfg(test)]
@@ -290,6 +309,92 @@ mod tests {
     fn leaves_a_message_without_bcc_byte_identical() {
         let raw = b"From: a@x\nTo: b@x\nX-Bccish: keep\n\nbody\n";
         assert_eq!(strip_bcc(raw.to_vec()), raw.to_vec());
+    }
+
+    #[test]
+    fn removes_the_bcc_field_after_a_bare_cr() {
+        let raw = b"To: b@x\rBcc: c@x\r\n\r\nbody\r\n";
+        let written = transmitted(raw, SmtpMessageSendOptions::default());
+        assert_eq!(written[3], b"To: b@x\r\n\r\nbody\r\n.\r\n");
+    }
+
+    #[test]
+    fn keeps_the_empty_line_between_a_bare_cr_and_a_bare_lf() {
+        let raw = b"To: b@x\rBcc: c@x\n\nbody\n";
+        let written = transmitted(raw, SmtpMessageSendOptions::default());
+        assert_eq!(written[3], b"To: b@x\r\n\r\nbody\r\n.\r\n");
+    }
+
+    #[test]
+    fn removes_the_resent_bcc_field() {
+        let raw = b"Resent-To: b@x\r\nResent-Bcc: c@x,\r\n d@x\r\nTo: e@x\r\n\r\nbody\r\n";
+        assert_eq!(
+            strip_bcc(raw.to_vec()),
+            b"Resent-To: b@x\r\nTo: e@x\r\n\r\nbody\r\n"
+        );
+    }
+
+    /// Every short message made of field names, blanks and line endings:
+    /// what `DATA` transmits is what it would transmit with the blind
+    /// fields kept, less every line of theirs and nothing else.
+    #[test]
+    fn matches_a_line_by_line_removal() {
+        let alphabet: [&[u8]; 7] = [b"Bcc:", b"Resent-Bcc:", b"To:", b"x", b" ", b"\r", b"\n"];
+        let mut message = Vec::new();
+
+        for len in 0..=6u32 {
+            for mut n in 0..alphabet.len().pow(len) {
+                message.clear();
+
+                for _ in 0..len {
+                    message.extend_from_slice(alphabet[n % alphabet.len()]);
+                    n /= alphabet.len();
+                }
+
+                let kept = SmtpData::prepare_body(message.clone());
+                let sent = SmtpData::prepare_body(strip_bcc(message.clone()));
+                let expected = line_by_line(&kept);
+
+                assert_eq!(sent, expected, "{}", message.escape_ascii());
+            }
+        }
+    }
+
+    /// A `DATA` payload without the lines of its blind fields.
+    fn line_by_line(payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut in_header = true;
+        let mut in_blind = false;
+
+        let message = payload.strip_suffix(b".\r\n").unwrap();
+
+        for line in message.split_inclusive(|b| *b == b'\n') {
+            let content = line.strip_suffix(b"\r\n").unwrap();
+
+            if content.is_empty() {
+                in_header = false;
+            }
+
+            if in_header && !matches!(content.first(), Some(b' ' | b'\t')) {
+                let colon = content.iter().position(|b| *b == b':');
+                let name = colon.map(|i| content[..i].trim_ascii_end().to_ascii_lowercase());
+                in_blind = name.is_some_and(|name| name == b"bcc" || name == b"resent-bcc");
+            }
+
+            if in_header && in_blind {
+                continue;
+            }
+
+            out.extend_from_slice(line);
+        }
+
+        // NOTE: an empty message is transmitted as one empty line
+        if out.is_empty() {
+            out.extend_from_slice(b"\r\n");
+        }
+
+        out.extend_from_slice(b".\r\n");
+        out
     }
 
     #[test]

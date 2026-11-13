@@ -39,7 +39,6 @@
 use core::fmt;
 
 use alloc::{
-    borrow::Cow,
     string::{String, ToString},
     vec::Vec,
 };
@@ -47,12 +46,17 @@ use alloc::{
 use log::debug;
 use thiserror::Error;
 
-use crate::{coroutine::*, rfc5321::SmtpReplyCode, send::*, smtp_try};
+use crate::{
+    coroutine::*,
+    rfc5321::{SmtpReplyCode, SmtpString},
+    send::*,
+    smtp_try,
+};
 
 /// The NOOP command (RFC 5321 §4.1.1.9).
 pub struct SmtpNoopCommand<'a> {
     /// Optional string argument; servers must ignore it.
-    pub string: Option<Cow<'a, str>>,
+    pub string: Option<SmtpString<'a>>,
 }
 
 impl<'a> From<SmtpNoopCommand<'a>> for Vec<u8> {
@@ -61,7 +65,7 @@ impl<'a> From<SmtpNoopCommand<'a>> for Vec<u8> {
 
         if let Some(s) = cmd.string {
             buf.push(' ');
-            buf.push_str(&s);
+            buf.push_str(s.as_ref());
         }
 
         buf.push_str("\r\n");

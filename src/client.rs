@@ -403,7 +403,8 @@ smtp_client_commands! {
     ///
     /// Reserved for simple request/reply commands: DATA and STARTTLS
     /// switch the stream into a different mode and have their own
-    /// methods.
+    /// methods. The line is sent unchecked: a CR or LF in it starts
+    /// another command.
     fn raw(command: Cow<'static, str>) -> String {
         SmtpRaw::new(command)
     }

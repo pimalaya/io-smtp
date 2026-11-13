@@ -5,6 +5,10 @@
 //! `RSET`, ...); do not use for `DATA` or `STARTTLS`, which switch the
 //! stream into a different mode.
 //!
+//! The line is sent as given, unlike the arguments of the typed
+//! commands: a CR or LF in it starts another command, so never build
+//! it from a string the caller does not control.
+//!
 //! # Example
 //!
 //! ```rust,no_run
@@ -55,7 +59,8 @@ use crate::{coroutine::*, send::*, smtp_try};
 
 /// An arbitrary raw SMTP command line, without the trailing CRLF.
 pub struct SmtpRawCommand<'a> {
-    /// The command line to send; CRLF is appended on serialisation.
+    /// The command line to send, as given; CRLF is appended on
+    /// serialisation.
     pub line: Cow<'a, str>,
 }
 
@@ -82,7 +87,7 @@ pub struct SmtpRaw {
 
 impl SmtpRaw {
     /// `command` is a single SMTP command line without the trailing
-    /// CRLF (e.g. `NOOP`, `VRFY foo@bar`, `HELP`).
+    /// CRLF (e.g. `NOOP`, `VRFY foo@bar`, `HELP`), sent unchecked.
     pub fn new(command: impl Into<Cow<'static, str>>) -> Self {
         Self {
             state: State::Send(SmtpCommandSend::new(SmtpRawCommand {

@@ -18,6 +18,7 @@ mod parameter;
 mod reply_code;
 mod response;
 mod reverse_path;
+mod string;
 mod syntax_error;
 mod text;
 mod vec1;
@@ -48,6 +49,8 @@ pub use reply_code::SmtpReplyCode;
 pub use response::SmtpResponse;
 #[doc(inline)]
 pub use reverse_path::SmtpReversePath;
+#[doc(inline)]
+pub use string::SmtpString;
 #[doc(inline)]
 pub use syntax_error::SmtpSyntaxError;
 #[doc(inline)]

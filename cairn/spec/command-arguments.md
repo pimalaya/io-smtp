@@ -6,11 +6,13 @@ status: current
 
 # Command arguments
 
-What the caller puts in a command: the mailboxes of `MAIL FROM` and `RCPT TO`, their ESMTP parameters, and the identity of `EHLO` and `HELO` (RFC 5321 4.1.2). What the server sends back belongs to the replies capability. `SmtpRaw` sends its line as given and is outside these rules.
+What the caller puts in a command: the mailboxes of `MAIL FROM` and `RCPT TO`, their ESMTP parameters, the identity of `EHLO` and `HELO`, the string of `NOOP` (RFC 5321 4.1.2) and the mechanism of `AUTH` (RFC 4954 4). What the server sends back belongs to the replies capability.
 
 ## Requirement: Arguments are valid by construction
 
-Every caller string reaching a `MAIL FROM`, `RCPT TO`, `EHLO` or `HELO` line SHALL pass a constructor enforcing its production and failing with `SmtpSyntaxError` otherwise: `SmtpLocalPart` (Dot-string or Quoted-string), `SmtpDomain` (Domain), `SmtpAddressLiteral` and `SmtpGeneralAddressLiteral` (RFC 5321 4.1.3), `SmtpParameter` (esmtp-keyword and esmtp-value). These types SHALL expose no writable field, so the four commands always serialise to one line, and their coroutines take them without a check of their own.
+Every caller string reaching a `MAIL FROM`, `RCPT TO`, `EHLO`, `HELO`, `NOOP` or `AUTH` line SHALL pass a constructor enforcing its production and failing with `SmtpSyntaxError` otherwise: `SmtpLocalPart` (Dot-string or Quoted-string), `SmtpDomain` (Domain), `SmtpAddressLiteral` and `SmtpGeneralAddressLiteral` (RFC 5321 4.1.3), `SmtpParameter` (esmtp-keyword and esmtp-value), `SmtpString` (Atom or Quoted-string) and `SmtpAuthMechanism` (sasl-mech, RFC 4422 3.1). These types SHALL expose no writable field, so the six commands always serialise to one line, and their coroutines take them without a check of their own. The `AUTH` initial response is base64 and needs no check.
+
+`SmtpRaw` is the one exception: it SHALL send its line as given, a CR or LF included, which its documentation states.
 
 ### Scenario: A local part carrying a second command
 - GIVEN the address `a@x>\r\nRCPT TO:<eve@evil.example>@example.com`
