@@ -25,7 +25,7 @@ use io_sasl::{mechanism::Sasl, rfc4616::plain::SaslPlainCreds};
 use io_smtp::{
     client::{SmtpClientAsync, SmtpClientError},
     coroutine::*,
-    rfc5321::{SmtpDomain, SmtpEhloDomain},
+    rfc5321::SmtpEhloDomain,
     session::*,
 };
 use rustls::{ClientConfig, pki_types::ServerName};
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let starttls = env::var("STARTTLS").is_ok();
 
     let domain = env::var("DOMAIN").unwrap_or_else(|_| "localhost".to_string());
-    let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Owned(domain)));
+    let domain = SmtpEhloDomain::try_from(domain.as_str())?;
 
     rustls::crypto::ring::default_provider()
         .install_default()

@@ -9,11 +9,11 @@
 //! Run with:
 //! `URL=smtps://smtp.example.org DOMAIN=client.example.org cargo run --example std_client_full`
 
-use std::{borrow::Cow, env, error::Error};
+use std::{env, error::Error};
 
 use io_smtp::{
     client::{SmtpClientStd, SmtpClientStdConnectOptions},
-    rfc5321::{SmtpDomain, SmtpEhloDomain},
+    rfc5321::SmtpEhloDomain,
 };
 use url::Url;
 
@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let url = Url::parse(&env::var("URL")?)?;
     let domain = env::var("DOMAIN").unwrap_or_else(|_| "localhost".to_string());
-    let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Owned(domain)));
+    let domain = SmtpEhloDomain::try_from(domain.as_str())?;
     let opts = SmtpClientStdConnectOptions::default();
 
     let (_client, capabilities) = SmtpClientStd::connect(&url, domain, opts)?;

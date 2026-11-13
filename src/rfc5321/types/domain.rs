@@ -10,9 +10,11 @@ use alloc::{borrow::Cow, vec::Vec};
 use bounded_static_derive::ToStatic;
 use chumsky::prelude::*;
 
+use crate::rfc5321::SmtpSyntaxError;
+
 /// A domain name (hostname).
 #[derive(Clone, Debug, PartialEq, Eq, Ord, PartialOrd, Hash, ToStatic)]
-pub struct SmtpDomain<'a>(pub Cow<'a, str>);
+pub struct SmtpDomain<'a>(Cow<'a, str>);
 
 impl SmtpDomain<'_> {
     /// Parses a domain from raw bytes, consuming the whole input.
@@ -21,6 +23,30 @@ impl SmtpDomain<'_> {
             .then_ignore(end())
             .parse(bytes)
             .into_result()
+    }
+}
+
+/// Validates a domain the client sends, where non-ASCII characters
+/// count as Let-dig (RFC 6531 §3.3).
+impl<'a> TryFrom<&'a str> for SmtpDomain<'a> {
+    type Error = SmtpSyntaxError;
+
+    fn try_from(s: &'a str) -> Result<Self, Self::Error> {
+        let let_dig = |b: &u8| b.is_ascii_alphanumeric() || !b.is_ascii();
+
+        let sub_domain = |label: &str| {
+            let bytes = label.as_bytes();
+
+            bytes.first().is_some_and(let_dig)
+                && bytes.last().is_some_and(let_dig)
+                && bytes.iter().all(|b| let_dig(b) || *b == b'-')
+        };
+
+        if s.split('.').all(sub_domain) {
+            Ok(Self(Cow::Borrowed(s)))
+        } else {
+            Err(SmtpSyntaxError::Domain)
+        }
     }
 }
 
@@ -51,7 +77,7 @@ pub(crate) mod parsers {
 
     use chumsky::prelude::*;
 
-    use crate::{rfc5321::SmtpDomain, utils::parsers::Extra};
+    use crate::{rfc5321::types::domain::SmtpDomain, utils::parsers::Extra};
 
     /// SMTP domain parser.
     ///
@@ -96,5 +122,48 @@ pub(crate) mod parsers {
                     .map(SmtpDomain)
             })
             .labelled("domain")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::rfc5321::{SmtpDomain, SmtpSyntaxError};
+
+    #[test]
+    fn domain_is_accepted() {
+        for s in [
+            "x",
+            "example.com",
+            "smtp-relay.example.com",
+            "1.2",
+            "bücher.example",
+        ] {
+            assert_eq!(SmtpDomain::try_from(s).unwrap().as_ref(), s);
+        }
+    }
+
+    #[test]
+    fn other_strings_are_refused() {
+        let cases = [
+            "",
+            ".",
+            "example.com.",
+            ".example.com",
+            "a..b",
+            "-a.example",
+            "a-.example",
+            "a_b.example",
+            "a b",
+            "a>b",
+            "[192.0.2.1]",
+            "a\r\nb",
+            "a\nb",
+            "a\0b",
+        ];
+
+        for s in cases {
+            let err = SmtpDomain::try_from(s).unwrap_err();
+            assert_eq!(err, SmtpSyntaxError::Domain, "{s:?}");
+        }
     }
 }

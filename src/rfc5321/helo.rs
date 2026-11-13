@@ -10,8 +10,6 @@
 //!     net::TcpStream,
 //! };
 //!
-//! use std::borrow::Cow;
-//!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
 //!     rfc5321::{SmtpDomain, helo::SmtpHelo},
@@ -22,7 +20,7 @@
 //!
 //! let mut buf = [0u8; 4096];
 //!
-//! let domain = SmtpDomain(Cow::Borrowed("example.com"));
+//! let domain = SmtpDomain::try_from("example.com").unwrap();
 //! let mut coroutine = SmtpHelo::new(domain);
 //! let mut arg = None;
 //!
@@ -145,7 +143,7 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use alloc::{borrow::Cow, vec::Vec};
+    use alloc::vec::Vec;
 
     use crate::{
         rfc5321::{SmtpDomain, helo::*},
@@ -153,7 +151,7 @@ mod tests {
     };
 
     fn domain() -> SmtpDomain<'static> {
-        SmtpDomain(Cow::Borrowed("example.com"))
+        SmtpDomain::try_from("example.com").unwrap()
     }
 
     #[test]

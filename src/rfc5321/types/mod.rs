@@ -18,11 +18,12 @@ mod parameter;
 mod reply_code;
 mod response;
 mod reverse_path;
+mod syntax_error;
 mod text;
 mod vec1;
 
 #[doc(inline)]
-pub use address_literal::SmtpAddressLiteral;
+pub use address_literal::{SmtpAddressLiteral, SmtpGeneralAddressLiteral};
 #[doc(inline)]
 pub use atom::SmtpAtom;
 #[doc(inline)]
@@ -47,6 +48,8 @@ pub use reply_code::SmtpReplyCode;
 pub use response::SmtpResponse;
 #[doc(inline)]
 pub use reverse_path::SmtpReversePath;
+#[doc(inline)]
+pub use syntax_error::SmtpSyntaxError;
 #[doc(inline)]
 pub use text::SmtpText;
 #[doc(inline)]

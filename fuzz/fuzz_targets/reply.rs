@@ -5,8 +5,6 @@
 //! coroutines answer or fail, never panic, never spin on EOF, and never
 //! refuse a reply as too large before it outgrew the limit.
 
-use std::borrow::Cow;
-
 use arbitrary::Arbitrary;
 use io_sasl::{rfc5801::SaslGs2ChannelBinding, rfc5802::SaslScramCreds};
 use io_smtp::{
@@ -14,7 +12,7 @@ use io_smtp::{
     rfc3207::starttls::SmtpStartTls,
     rfc4954::auth_data::{SmtpAuthData, parse_challenge},
     rfc5321::{
-        SmtpDomain, SmtpEhloDomain, SmtpEhloResponse, SmtpGreeting, SmtpResponse, ehlo::SmtpEhlo,
+        SmtpEhloDomain, SmtpEhloResponse, SmtpGreeting, SmtpResponse, ehlo::SmtpEhlo,
         greeting::SmtpGreetingGet,
     },
     rfc7677::auth_scram_sha_256::{SmtpAuthScramSha256, SmtpAuthScramSha256Options},
@@ -43,7 +41,7 @@ fuzz_target!(|input: Input| {
         let _ = parse_challenge(&String::from_utf8_lossy(first));
     }
 
-    let domain = || SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")));
+    let domain = || SmtpEhloDomain::try_from("example.com").unwrap();
 
     let _ = check(SmtpGreetingGet::new(), &input.reads);
     let _ = check(SmtpEhlo::new(domain()), &input.reads);

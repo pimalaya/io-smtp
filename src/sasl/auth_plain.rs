@@ -15,7 +15,6 @@
 //!
 //! ```rust,no_run
 //! use std::{
-//!     borrow::Cow,
 //!     io::{Read, Write},
 //!     net::TcpStream,
 //! };
@@ -24,7 +23,7 @@
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::{SmtpDomain, SmtpEhloDomain},
+//!     rfc5321::SmtpEhloDomain,
 //!     sasl::auth_plain::{SmtpAuthPlain, SmtpAuthPlainOptions},
 //! };
 //!
@@ -35,7 +34,7 @@
 //!
 //! let authzid: Option<&str> = None;
 //! let password = SecretString::from("secret".to_string());
-//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")));
+//! let domain = SmtpEhloDomain::try_from("example.com").unwrap();
 //! let opts = SmtpAuthPlainOptions::default();
 //! let mut coroutine = SmtpAuthPlain::new(authzid, "alice", &password, domain, opts);
 //! let mut arg = None;
@@ -376,18 +375,14 @@ impl fmt::Display for State {
 mod tests {
     use core::str::from_utf8;
 
-    use alloc::{borrow::Cow, string::ToString, vec::Vec};
+    use alloc::{string::ToString, vec::Vec};
 
     use secrecy::SecretString;
 
-    use crate::{
-        rfc5321::{SmtpDomain, SmtpEhloDomain},
-        sasl::auth_plain::*,
-        send::SmtpCommandSendError,
-    };
+    use crate::{rfc5321::SmtpEhloDomain, sasl::auth_plain::*, send::SmtpCommandSendError};
 
     fn domain() -> SmtpEhloDomain<'static> {
-        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")))
+        SmtpEhloDomain::try_from("example.com").unwrap()
     }
 
     fn password() -> SecretString {

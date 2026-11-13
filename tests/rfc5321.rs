@@ -7,9 +7,7 @@ use std::borrow::Cow;
 
 use io_smtp::{
     coroutine::*,
-    rfc5321::{
-        SmtpDomain, SmtpEhloDomain, SmtpGreeting, ehlo::*, greeting::*, noop::*, quit::*, rset::*,
-    },
+    rfc5321::{SmtpEhloDomain, SmtpGreeting, ehlo::*, greeting::*, noop::*, quit::*, rset::*},
 };
 
 fn run_greeting(
@@ -48,7 +46,7 @@ fn greeting_220() {
 
     match run_greeting(response) {
         SmtpCoroutineState::Complete(Ok(greeting)) => {
-            assert_eq!(greeting.domain.0.as_ref(), "smtp.example.com");
+            assert_eq!(greeting.domain.as_ref(), "smtp.example.com");
         }
         any => panic!("unexpected result: {any:?}"),
     }
@@ -82,7 +80,7 @@ fn greeting_incomplete_rejected() {
 #[test]
 fn ehlo_single_line() {
     let response = b"250 smtp.example.com\r\n";
-    let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain("localhost".into()));
+    let domain = SmtpEhloDomain::try_from("localhost").unwrap();
 
     match run_ehlo(response, domain) {
         SmtpCoroutineState::Complete(Ok(capabilities)) => assert!(capabilities.is_empty()),
@@ -96,7 +94,7 @@ fn ehlo_with_capabilities() {
                      250-SIZE 10240000\r\n\
                      250-STARTTLS\r\n\
                      250 ENHANCEDSTATUSCODES\r\n";
-    let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain("localhost".into()));
+    let domain = SmtpEhloDomain::try_from("localhost").unwrap();
 
     match run_ehlo(response, domain) {
         SmtpCoroutineState::Complete(Ok(capabilities)) => assert_eq!(capabilities.len(), 3),

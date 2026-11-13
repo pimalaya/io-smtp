@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `SmtpSyntaxError`, returned by the constructors of the command arguments.
+
+- Added `TryFrom<&str>` for `SmtpLocalPart`, `SmtpDomain`, `SmtpAddressLiteral`, `SmtpEhloDomain` and `SmtpMailbox`.
+
+  A mailbox parses from its wire form, such as `alice@example.org` or `"john doe"@[192.0.2.1]`. Non-ASCII characters are accepted (RFC 6531 3.3).
+
+- Added `SmtpLocalPart::quote`, building a local part from unquoted content.
+
+- Added `SmtpParameter::new`, with the `keyword` and `value` readers.
+
+- Added `SmtpGeneralAddressLiteral`.
+
+### Changed
+
+- **BREAKING**: Made the field of `SmtpLocalPart` and of `SmtpDomain` private.
+
+- **BREAKING**: Made the fields of `SmtpParameter` private.
+
+  The keyword is an esmtp-keyword, no `SmtpAtom` any more.
+
+- **BREAKING**: Changed `SmtpAddressLiteral::General` to hold a `SmtpGeneralAddressLiteral`.
+
+- **BREAKING**: Changed `SmtpParameter::envid` and `SmtpParameter::orcpt_rfc822` to return a `Result`.
+
+  They take the value before encoding and refuse what is not printable US-ASCII.
+
+### Fixed
+
+- Fixed a local part needing quotes, such as `john doe`, being sent unquoted.
+
+  `TryFrom<&str>` refuses it and `SmtpLocalPart::quote` quotes it.
+
+- Fixed `ENVID` and `ORCPT` values being sent without their xtext encoding (RFC 3461 4).
+
+### Security
+
+- Fixed caller strings reaching the `MAIL FROM`, `RCPT TO`, `EHLO` and `HELO` lines unchecked.
+
+  A CR LF in a local part, a domain, a parameter or an address literal added commands to the session.
+
 ## [0.7.1] - 2026-11-03
 
 ### Security

@@ -13,14 +13,13 @@
 //!
 //! ```rust,no_run
 //! use std::{
-//!     borrow::Cow,
 //!     io::{Read, Write},
 //!     net::TcpStream,
 //! };
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::{SmtpDomain, SmtpEhloDomain},
+//!     rfc5321::SmtpEhloDomain,
 //!     sasl::auth_anonymous::{SmtpAuthAnonymous, SmtpAuthAnonymousOptions},
 //! };
 //!
@@ -29,7 +28,7 @@
 //!
 //! let mut buf = [0u8; 4096];
 //!
-//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("client.example.org")));
+//! let domain = SmtpEhloDomain::try_from("client.example.org").unwrap();
 //! let opts = SmtpAuthAnonymousOptions::default();
 //! let mut coroutine = SmtpAuthAnonymous::new(Some("trace@example.org"), domain, opts);
 //! let mut arg = None;
@@ -354,16 +353,12 @@ impl fmt::Display for State {
 mod tests {
     use core::str::from_utf8;
 
-    use alloc::{borrow::Cow, vec::Vec};
+    use alloc::vec::Vec;
 
-    use crate::{
-        rfc5321::{SmtpDomain, SmtpEhloDomain},
-        sasl::auth_anonymous::*,
-        send::SmtpCommandSendError,
-    };
+    use crate::{rfc5321::SmtpEhloDomain, sasl::auth_anonymous::*, send::SmtpCommandSendError};
 
     fn domain() -> SmtpEhloDomain<'static> {
-        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")))
+        SmtpEhloDomain::try_from("example.com").unwrap()
     }
 
     #[test]

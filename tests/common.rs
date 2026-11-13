@@ -24,9 +24,9 @@ use io_smtp::{
     rfc3461::parameter::{SmtpDsnNotify, SmtpDsnRet},
     rfc4954::capability::SmtpAuthCapability,
     rfc5321::{
-        SmtpAtom, SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpLocalPart, SmtpMailbox,
-        SmtpParameter, SmtpReversePath, ehlo::SmtpEhlo, greeting::SmtpGreetingGet, helo::SmtpHelo,
-        mail::SmtpMail, noop::SmtpNoop, quit::SmtpQuit, rcpt::SmtpRcpt, rset::SmtpRset,
+        SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpMailbox, SmtpParameter, SmtpReversePath,
+        ehlo::SmtpEhlo, greeting::SmtpGreetingGet, helo::SmtpHelo, mail::SmtpMail, noop::SmtpNoop,
+        quit::SmtpQuit, rcpt::SmtpRcpt, rset::SmtpRset,
     },
     sasl::{
         auth_login::{SmtpAuthLogin, SmtpAuthLoginOptions},
@@ -235,11 +235,7 @@ fn run(mut stream: impl Read + Write, auth: Auth, email: &str) {
 
     // NOTE: Build paths (shared across the aborted and real transactions) step.
 
-    let (local, domain_part) = email.split_once('@').unwrap();
-    let mailbox = SmtpMailbox {
-        local_part: SmtpLocalPart(local.to_owned().into()),
-        domain: SmtpDomain::parse(domain_part.as_bytes()).unwrap().into(),
-    };
+    let mailbox = SmtpMailbox::try_from(email).unwrap();
 
     let reverse_path = SmtpReversePath::SmtpMailbox(mailbox.clone());
     let forward_path = SmtpForwardPath(mailbox);
@@ -389,12 +385,7 @@ pub fn run_client(url: &str, sasl: Option<Sasl>, email: &str, starttls: bool) {
     let reply = client.raw("NOOP".into()).expect("RAW");
     assert!(reply.starts_with("250"), "RAW NOOP answered {reply}");
 
-    let (local, domain_part) = email.split_once('@').unwrap();
-    let mailbox = SmtpMailbox {
-        local_part: SmtpLocalPart(local.to_owned().into()),
-        domain: SmtpDomain::parse(domain_part.as_bytes()).unwrap().into(),
-    };
-    let mailbox = mailbox.into_static();
+    let mailbox = SmtpMailbox::try_from(email).unwrap().into_static();
     let reverse_path = SmtpReversePath::SmtpMailbox(mailbox.clone());
     let forward_path = SmtpForwardPath(mailbox);
 
@@ -439,17 +430,16 @@ pub fn run_client(url: &str, sasl: Option<Sasl>, email: &str, starttls: bool) {
         let max = SmtpSizeCapability::parse(line).expect("parse SIZE capability");
         assert!(max.0 == 0 || max.0 >= eml.len() as u64, "message over SIZE");
 
-        mail_parameters.push(SmtpParameter {
-            keyword: SmtpAtom::parse(b"SIZE").unwrap(),
-            value: Some(eml.len().to_string().into()),
-        });
+        let size = eml.len().to_string();
+        let size = SmtpParameter::new("SIZE", Some(&size)).unwrap();
+        mail_parameters.push(size.into_static());
     }
 
     if advertised("DSN").is_some() {
         mail_parameters.push(SmtpDsnRet::Hdrs.into_parameter());
-        mail_parameters.push(SmtpParameter::envid("io-smtp-test"));
+        mail_parameters.push(SmtpParameter::envid("io-smtp-test").unwrap());
         rcpt_parameters.push(SmtpDsnNotify::NEVER.into_parameter());
-        rcpt_parameters.push(SmtpParameter::orcpt_rfc822(email));
+        rcpt_parameters.push(SmtpParameter::orcpt_rfc822(email).unwrap());
     }
 
     if let Some(line) = advertised("AUTH") {

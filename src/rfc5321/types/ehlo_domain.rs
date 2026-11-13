@@ -10,7 +10,10 @@ use core::{
 
 use bounded_static_derive::ToStatic;
 
-use crate::rfc5321::types::{address_literal::SmtpAddressLiteral, domain::SmtpDomain};
+use crate::rfc5321::{
+    SmtpSyntaxError,
+    types::{address_literal::SmtpAddressLiteral, domain::SmtpDomain},
+};
 
 /// The domain identifier used in EHLO/HELO commands.
 ///
@@ -21,6 +24,19 @@ pub enum SmtpEhloDomain<'a> {
     SmtpDomain(SmtpDomain<'a>),
     /// An address literal (IPv4, IPv6, or general)
     SmtpAddressLiteral(SmtpAddressLiteral<'a>),
+}
+
+/// Parses an address literal when bracketed, a domain otherwise.
+impl<'a> TryFrom<&'a str> for SmtpEhloDomain<'a> {
+    type Error = SmtpSyntaxError;
+
+    fn try_from(s: &'a str) -> Result<Self, Self::Error> {
+        if s.starts_with('[') {
+            s.try_into().map(Self::SmtpAddressLiteral)
+        } else {
+            s.try_into().map(Self::SmtpDomain)
+        }
+    }
 }
 
 impl fmt::Display for SmtpEhloDomain<'_> {

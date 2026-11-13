@@ -9,7 +9,8 @@
 //! };
 //!
 //! // NOTE: MAIL FROM with RET=HDRS and ENVID
-//! let params = vec![SmtpDsnRet::Hdrs.into_parameter(), SmtpParameter::envid("abc123")];
+//! let envid = SmtpParameter::envid("abc123")?;
+//! let params = vec![SmtpDsnRet::Hdrs.into_parameter(), envid];
 //! let coroutine = SmtpMail::new(reverse_path, params);
 //!
 //! // NOTE: RCPT TO with NOTIFY=SUCCESS,FAILURE
@@ -21,7 +22,7 @@ use core::ops::BitOr;
 
 use alloc::{borrow::Cow, string::String, vec::Vec};
 
-use crate::rfc5321::{SmtpAtom, SmtpParameter};
+use crate::rfc5321::{SmtpParameter, SmtpSyntaxError};
 
 /// The value of the `RET` ESMTP parameter on `MAIL FROM`.
 ///
@@ -46,7 +47,7 @@ impl SmtpDsnRet {
             Self::Hdrs => "HDRS",
         };
         SmtpParameter {
-            keyword: SmtpAtom(Cow::Borrowed("RET")),
+            keyword: Cow::Borrowed("RET"),
             value: Some(Cow::Borrowed(value)),
         }
     }
@@ -61,17 +62,20 @@ impl SmtpParameter<'static> {
     /// sender that uniquely identifies this mail transaction. It is
     /// included in any DSN generated for the message.
     ///
-    /// The value must contain only printable US-ASCII characters
-    /// excluding `=` and whitespace (xtext encoding, RFC 3461 §4).
+    /// The identifier is given as is and sent xtext-encoded. It must
+    /// hold printable US-ASCII characters only, and at least one.
     ///
     /// # Reference
     ///
     /// RFC 3461 §4.4
-    pub fn envid(id: impl Into<String>) -> SmtpParameter<'static> {
-        SmtpParameter {
-            keyword: SmtpAtom(Cow::Borrowed("ENVID")),
-            value: Some(Cow::Owned(id.into())),
-        }
+    pub fn envid(id: impl AsRef<str>) -> Result<SmtpParameter<'static>, SmtpSyntaxError> {
+        let mut value = String::new();
+        xtext(id.as_ref(), &mut value)?;
+
+        Ok(SmtpParameter {
+            keyword: Cow::Borrowed("ENVID"),
+            value: Some(Cow::Owned(value)),
+        })
     }
 }
 
@@ -121,7 +125,7 @@ impl SmtpDsnNotify {
             Cow::Owned(parts.join(","))
         };
         SmtpParameter {
-            keyword: SmtpAtom(Cow::Borrowed("NOTIFY")),
+            keyword: Cow::Borrowed("NOTIFY"),
             value: Some(value),
         }
     }
@@ -142,18 +146,90 @@ impl SmtpParameter<'static> {
     /// Specifies the original recipient address, before any aliasing
     /// or forwarding, so that DSNs can reference it.
     ///
+    /// The address is given as is and sent xtext-encoded. It must
+    /// hold printable US-ASCII characters only, and at least one.
+    ///
     /// # Reference
     ///
     /// RFC 3461 §4.2
-    pub fn orcpt_rfc822(address: impl Into<String>) -> SmtpParameter<'static> {
-        let value = {
-            let mut s = String::from("rfc822;");
-            s.push_str(&address.into());
-            s
-        };
-        SmtpParameter {
-            keyword: SmtpAtom(Cow::Borrowed("ORCPT")),
+    pub fn orcpt_rfc822(
+        address: impl AsRef<str>,
+    ) -> Result<SmtpParameter<'static>, SmtpSyntaxError> {
+        let mut value = String::from("rfc822;");
+        xtext(address.as_ref(), &mut value)?;
+
+        Ok(SmtpParameter {
+            keyword: Cow::Borrowed("ORCPT"),
             value: Some(Cow::Owned(value)),
+        })
+    }
+}
+
+/// Appends the xtext encoding of a printable US-ASCII string.
+///
+/// ```abnf
+/// xtext = *( xchar / hexchar )
+/// xchar = any ASCII CHAR between "!" (33) and "~" (126) inclusive,
+///         except for "+" and "=".
+/// hexchar = "+" 2(%x30-39 / %x41-46)
+/// ```
+///
+/// Refs: <https://datatracker.ietf.org/doc/html/rfc3461#section-4>
+fn xtext(s: &str, out: &mut String) -> Result<(), SmtpSyntaxError> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    if s.is_empty() {
+        return Err(SmtpSyntaxError::ParameterValue);
+    }
+
+    for b in s.bytes() {
+        match b {
+            b' ' | b'+' | b'=' => {
+                out.push('+');
+                out.push(HEX[usize::from(b >> 4)] as char);
+                out.push(HEX[usize::from(b & 0xf)] as char);
+            }
+            b'!'..=b'~' => out.push(b as char),
+            _ => return Err(SmtpSyntaxError::ParameterValue),
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::ToString;
+
+    use crate::rfc5321::{SmtpParameter, SmtpSyntaxError};
+
+    #[test]
+    fn envid_is_xtext_encoded() {
+        let cases = [
+            ("abc123", "ENVID=abc123"),
+            ("a b", "ENVID=a+20b"),
+            ("a+b=c", "ENVID=a+2Bb+3Dc"),
+        ];
+
+        for (id, wire) in cases {
+            assert_eq!(SmtpParameter::envid(id).unwrap().to_string(), wire);
+        }
+    }
+
+    #[test]
+    fn orcpt_is_xtext_encoded() {
+        let parameter = SmtpParameter::orcpt_rfc822("a+b@example.org").unwrap();
+        assert_eq!(parameter.to_string(), "ORCPT=rfc822;a+2Bb@example.org");
+    }
+
+    #[test]
+    fn unprintable_value_is_refused() {
+        for s in ["", "a\rb", "a\nb", "a\0b", "a\tb", "a\x7fb", "é"] {
+            let err = SmtpParameter::envid(s).unwrap_err();
+            assert_eq!(err, SmtpSyntaxError::ParameterValue, "{s:?}");
+
+            let err = SmtpParameter::orcpt_rfc822(s).unwrap_err();
+            assert_eq!(err, SmtpSyntaxError::ParameterValue, "{s:?}");
         }
     }
 }

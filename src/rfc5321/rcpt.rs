@@ -4,18 +4,13 @@
 //!
 //! ```rust,no_run
 //! use std::{
-//!     borrow::Cow,
 //!     io::{Read, Write},
 //!     net::TcpStream,
 //! };
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::{
-//!         rcpt::SmtpRcpt,
-//!         SmtpDomain, SmtpEhloDomain, SmtpForwardPath,
-//!         SmtpLocalPart, SmtpMailbox,
-//!     },
+//!     rfc5321::{SmtpForwardPath, SmtpMailbox, rcpt::SmtpRcpt},
 //! };
 //!
 //! // Ready stream needed (TCP-connected, TLS-negociated, MAIL FROM accepted)
@@ -23,10 +18,8 @@
 //!
 //! let mut buf = [0u8; 4096];
 //!
-//! let forward_path = SmtpForwardPath(SmtpMailbox {
-//!     local_part: SmtpLocalPart(Cow::Borrowed("alice")),
-//!     domain: SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com"))),
-//! });
+//! let mailbox = SmtpMailbox::try_from("alice@example.com").unwrap();
+//! let forward_path = SmtpForwardPath(mailbox);
 //! let mut coroutine = SmtpRcpt::new(forward_path, Vec::new());
 //! let mut arg = None;
 //!
@@ -159,20 +152,15 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use alloc::{borrow::Cow, vec::Vec};
+    use alloc::vec::Vec;
 
     use crate::{
-        rfc5321::{
-            SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpLocalPart, SmtpMailbox, rcpt::*,
-        },
+        rfc5321::{SmtpForwardPath, SmtpMailbox, rcpt::*},
         send::SmtpCommandSendError,
     };
 
     fn forward_path() -> SmtpForwardPath<'static> {
-        SmtpForwardPath(SmtpMailbox {
-            local_part: SmtpLocalPart(Cow::Borrowed("alice")),
-            domain: SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com"))),
-        })
+        SmtpForwardPath(SmtpMailbox::try_from("alice@example.com").unwrap())
     }
 
     #[test]

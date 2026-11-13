@@ -45,7 +45,7 @@ use io_sasl::{mechanism::Sasl, xoauth2::SaslXoauth2Creds};
 use io_smtp::{
     client::{SmtpClient, SmtpClientStd, SmtpClientStdConnectOptions},
     message::SmtpMessageSendOptions,
-    rfc5321::{SmtpDomain, SmtpForwardPath, SmtpLocalPart, SmtpMailbox, SmtpReversePath},
+    rfc5321::{SmtpDomain, SmtpForwardPath, SmtpMailbox, SmtpReversePath},
     session::SmtpSessionOpenOptions,
 };
 use pimalaya_stream::tls::Tls;
@@ -132,12 +132,9 @@ fn oauth_message_send() {
     let domain = SmtpDomain::parse(b"pimalaya.org").unwrap();
     let (mut client, _) = SmtpClientStd::connect(&url, domain.into(), opts).expect("connect");
 
-    let (local, domain) = user.split_once('@').expect("the mailbox is an address");
-    let mailbox = SmtpMailbox {
-        local_part: SmtpLocalPart(local.to_owned().into()),
-        domain: SmtpDomain::parse(domain.as_bytes()).unwrap().into(),
-    }
-    .into_static();
+    let mailbox = SmtpMailbox::try_from(user.as_str())
+        .expect("the mailbox is an address")
+        .into_static();
 
     let message = [
         &format!("From: io-smtp test <{user}>"),

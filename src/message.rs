@@ -5,7 +5,6 @@
 //!
 //! ```rust,no_run
 //! use std::{
-//!     borrow::Cow,
 //!     io::{Read, Write},
 //!     net::TcpStream,
 //! };
@@ -13,10 +12,7 @@
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
 //!     message::{SmtpMessageSend, SmtpMessageSendOptions},
-//!     rfc5321::{
-//!         SmtpDomain, SmtpEhloDomain, SmtpForwardPath,
-//!         SmtpLocalPart, SmtpMailbox, SmtpReversePath,
-//!     },
+//!     rfc5321::{SmtpForwardPath, SmtpMailbox, SmtpReversePath},
 //! };
 //!
 //! // Ready stream needed (TCP-connected, TLS-negociated, AUTH consumed)
@@ -24,14 +20,8 @@
 //!
 //! let mut buf = [0u8; 4096];
 //!
-//! let alice = SmtpMailbox {
-//!     local_part: SmtpLocalPart(Cow::Borrowed("alice")),
-//!     domain: SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.org"))),
-//! };
-//! let bob = SmtpMailbox {
-//!     local_part: SmtpLocalPart(Cow::Borrowed("bob")),
-//!     domain: SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.org"))),
-//! };
+//! let alice = SmtpMailbox::try_from("alice@example.org").unwrap();
+//! let bob = SmtpMailbox::try_from("bob@example.org").unwrap();
 //! let message =
 //!     b"From: alice@example.org\r\nTo: bob@example.org\r\nSubject: hi\r\n\r\nhello\r\n".to_vec();
 //!
@@ -265,7 +255,7 @@ mod tests {
     use crate::{
         message::*,
         rfc3461::parameter::{SmtpDsnNotify, SmtpDsnRet},
-        rfc5321::{SmtpDomain, SmtpEhloDomain, SmtpLocalPart, SmtpMailbox},
+        rfc5321::SmtpMailbox,
     };
 
     #[test]
@@ -323,7 +313,7 @@ mod tests {
         let options = SmtpMessageSendOptions {
             mail_parameters: vec![
                 SmtpDsnRet::Hdrs.into_parameter(),
-                SmtpParameter::envid("abc123"),
+                SmtpParameter::envid("abc123").unwrap(),
             ],
             rcpt_parameters: vec![notify.into_parameter()],
             ..Default::default()
@@ -336,14 +326,11 @@ mod tests {
 
     /// Runs the send against canned replies, returning every write.
     fn transmitted(raw: &[u8], options: SmtpMessageSendOptions) -> Vec<Vec<u8>> {
-        let mailbox = |local: &'static str| SmtpMailbox {
-            local_part: SmtpLocalPart(local.into()),
-            domain: SmtpEhloDomain::SmtpDomain(SmtpDomain("x".into())),
-        };
+        let mailbox = |address: &'static str| SmtpMailbox::try_from(address).unwrap();
 
         let mut send = SmtpMessageSend::new(
-            SmtpReversePath::SmtpMailbox(mailbox("a")),
-            [SmtpForwardPath(mailbox("c"))],
+            SmtpReversePath::SmtpMailbox(mailbox("a@x")),
+            [SmtpForwardPath(mailbox("c@x"))],
             raw.to_vec(),
             options,
         );

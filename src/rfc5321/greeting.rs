@@ -174,7 +174,7 @@ mod tests {
         expect_wants_read(&mut greeting);
 
         let g = expect_complete_ok(&mut greeting, b"220 server.example.com ready\r\n");
-        assert_eq!(g.domain.0.as_ref(), "server.example.com");
+        assert_eq!(g.domain.as_ref(), "server.example.com");
     }
 
     #[test]
@@ -184,7 +184,7 @@ mod tests {
 
         let reply = b"220-server.example.com hello\r\n220-extra info\r\n220 ready\r\n";
         let g = expect_complete_ok(&mut greeting, reply);
-        assert_eq!(g.domain.0.as_ref(), "server.example.com");
+        assert_eq!(g.domain.as_ref(), "server.example.com");
     }
 
     #[test]

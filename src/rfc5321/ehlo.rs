@@ -5,17 +5,13 @@
 //!
 //! ```rust,no_run
 //! use std::{
-//!     borrow::Cow,
 //!     io::{Read, Write},
 //!     net::TcpStream,
 //! };
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::{
-//!         ehlo::SmtpEhlo,
-//!         SmtpDomain, SmtpEhloDomain,
-//!     },
+//!     rfc5321::{SmtpEhloDomain, ehlo::SmtpEhlo},
 //! };
 //!
 //! // Ready stream needed (TCP-connected, TLS-negociated, greeting consumed)
@@ -23,7 +19,7 @@
 //!
 //! let mut buf = [0u8; 4096];
 //!
-//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")));
+//! let domain = SmtpEhloDomain::try_from("example.com").unwrap();
 //! let mut coroutine = SmtpEhlo::new(domain);
 //! let mut arg = None;
 //!
@@ -201,10 +197,10 @@ impl fmt::Display for State {
 mod tests {
     use alloc::{borrow::Cow, vec::Vec};
 
-    use crate::rfc5321::{SmtpDomain, SmtpEhloDomain, ehlo::*};
+    use crate::rfc5321::{SmtpEhloDomain, ehlo::*};
 
     fn ehlo_domain() -> SmtpEhloDomain<'static> {
-        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")))
+        SmtpEhloDomain::try_from("example.com").unwrap()
     }
 
     #[test]

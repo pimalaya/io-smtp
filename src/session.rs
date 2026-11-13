@@ -24,7 +24,6 @@
 //!
 //! ```rust,no_run
 //! use std::{
-//!     borrow::Cow,
 //!     io::{Read, Write},
 //!     net::TcpStream,
 //! };
@@ -32,7 +31,7 @@
 //! use io_sasl::rfc4616::plain::SaslPlainCreds;
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState},
-//!     rfc5321::{SmtpDomain, SmtpEhloDomain},
+//!     rfc5321::SmtpEhloDomain,
 //!     session::{SmtpSessionOpen, SmtpSessionOpenOptions, SmtpSessionOpenYield, SmtpSessionTransport},
 //! };
 //!
@@ -41,7 +40,7 @@
 //!     port: 25,
 //! };
 //!
-//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("localhost")));
+//! let domain = SmtpEhloDomain::try_from("localhost").unwrap();
 //!
 //! let sasl = SaslPlainCreds {
 //!     authzid: None,
@@ -603,10 +602,10 @@ impl fmt::Display for Auth {
 mod tests {
     use alloc::string::ToString;
 
-    use crate::{rfc5321::SmtpDomain, session::*};
+    use crate::session::*;
 
     fn domain() -> SmtpEhloDomain<'static> {
-        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("client.example.org")))
+        SmtpEhloDomain::try_from("client.example.org").unwrap()
     }
 
     #[test]

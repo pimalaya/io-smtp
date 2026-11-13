@@ -21,7 +21,6 @@
 //!
 //! ```rust,no_run
 //! use std::{
-//!     borrow::Cow,
 //!     io::{Read, Write},
 //!     net::TcpStream,
 //! };
@@ -31,7 +30,7 @@
 //! use io_sasl::{rfc5801::SaslGs2ChannelBinding, rfc5802::SaslScramCreds};
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::{SmtpDomain, SmtpEhloDomain},
+//!     rfc5321::SmtpEhloDomain,
 //!     rfc7677::auth_scram_sha_256::{SmtpAuthScramSha256, SmtpAuthScramSha256Options},
 //! };
 //!
@@ -48,7 +47,7 @@
 //!     channel_binding: SaslGs2ChannelBinding::Unsupported,
 //! };
 //!
-//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("client.example.org")));
+//! let domain = SmtpEhloDomain::try_from("client.example.org").unwrap();
 //! let opts = SmtpAuthScramSha256Options::default();
 //! let mut coroutine = SmtpAuthScramSha256::new(creds, domain, opts);
 //! let mut arg = None;
@@ -378,7 +377,7 @@ fn strip_enhanced_status(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use alloc::{borrow::Cow, format, string::ToString, vec::Vec};
+    use alloc::{format, string::ToString, vec::Vec};
 
     use base64_codec::codec::Base64Codec;
     use hmac::{Hmac, KeyInit, Mac};
@@ -387,9 +386,7 @@ mod tests {
     use sha2::Sha256;
 
     use crate::{
-        rfc5321::{SmtpDomain, SmtpEhloDomain},
-        rfc7677::auth_scram_sha_256::*,
-        send::SmtpCommandSendError,
+        rfc5321::SmtpEhloDomain, rfc7677::auth_scram_sha_256::*, send::SmtpCommandSendError,
     };
 
     type HmacSha256 = Hmac<Sha256>;
@@ -399,7 +396,7 @@ mod tests {
     const ITERATIONS: u32 = 4096;
 
     fn domain() -> SmtpEhloDomain<'static> {
-        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")))
+        SmtpEhloDomain::try_from("example.com").unwrap()
     }
 
     fn password() -> SecretString {

@@ -15,7 +15,6 @@
 //!
 //! ```rust,no_run
 //! use std::{
-//!     borrow::Cow,
 //!     io::{Read, Write},
 //!     net::TcpStream,
 //! };
@@ -24,7 +23,7 @@
 //!
 //! use io_smtp::{
 //!     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
-//!     rfc5321::{SmtpDomain, SmtpEhloDomain},
+//!     rfc5321::SmtpEhloDomain,
 //!     rfc7628::auth_oauthbearer::{SmtpAuthOauthbearer, SmtpAuthOauthbearerOptions},
 //! };
 //!
@@ -34,7 +33,7 @@
 //! let mut buf = [0u8; 4096];
 //!
 //! let token = SecretString::from("ya29.tokenvalue".to_string());
-//! let domain = SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("client.example.org")));
+//! let domain = SmtpEhloDomain::try_from("client.example.org").unwrap();
 //! let opts = SmtpAuthOauthbearerOptions::default();
 //! let mut coroutine =
 //!     SmtpAuthOauthbearer::new("alice@example.org", "smtp.example.org", 587, &token, domain, opts);
@@ -398,18 +397,16 @@ impl fmt::Display for State {
 
 #[cfg(test)]
 mod tests {
-    use alloc::{borrow::Cow, string::ToString, vec::Vec};
+    use alloc::{string::ToString, vec::Vec};
 
     use secrecy::SecretString;
 
     use crate::{
-        rfc5321::{SmtpDomain, SmtpEhloDomain},
-        rfc7628::auth_oauthbearer::*,
-        send::SmtpCommandSendError,
+        rfc5321::SmtpEhloDomain, rfc7628::auth_oauthbearer::*, send::SmtpCommandSendError,
     };
 
     fn domain() -> SmtpEhloDomain<'static> {
-        SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("example.com")))
+        SmtpEhloDomain::try_from("example.com").unwrap()
     }
 
     fn token() -> SecretString {
