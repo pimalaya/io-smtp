@@ -53,7 +53,7 @@ required-features = ["rustls-ring"]
 bounded-static = { version = "0.8", default-features = false, features = ["alloc"] }
 env_logger = "0.11"
 hmac = "0.13"
-io-oauth = { version = "0.4", default-features = false, features = ["jwt-bearer", "rustls-ring"] }
+io-oauth = { version = "0.7", default-features = false, features = ["jwt-bearer", "rustls-ring"] }
 io-sasl = { version = "0.2", default-features = false }
 pbkdf2 = { version = "0.13", features = ["hmac"] }
 rustls = { version = "0.23", features = ["ring"] }
@@ -73,7 +73,7 @@ bounded-static-derive = { version = "0.8", default-features = false }
 chumsky = { version = "0.13", default-features = false }
 io-sasl = { version = "0.2", default-features = false }
 log = { version = "0.4", default-features = false }
-pimalaya-stream = { version = "0.3.1", default-features = false, optional = true }
+pimalaya-stream = { version = "0.4", default-features = false, optional = true }
 rand = { version = "0.10", default-features = false, features = ["thread_rng"], optional = true }
 secrecy = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
