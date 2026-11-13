@@ -241,7 +241,11 @@ impl SmtpCoroutine for SmtpAuthLogin {
                     // speaking first whatever the server writes in it.
                     let payload = match self.resume_sasl(SaslArg::None) {
                         Ok(payload) => payload.unwrap_or_default(),
-                        Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                        Err(err) => {
+                            self.state = State::cancel(err);
+                            debug!("{}", self.state);
+                            continue;
+                        }
                     };
 
                     let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
@@ -261,7 +265,7 @@ impl SmtpCoroutine for SmtpAuthLogin {
 
                     self.state = match self.wants_continue(out.response.text()) {
                         Ok(state) => state,
-                        Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                        Err(err) => State::cancel(err),
                     };
                     debug!("{}", self.state);
                 }
@@ -269,9 +273,18 @@ impl SmtpCoroutine for SmtpAuthLogin {
                     let out = smtp_try!(send, arg.take());
 
                     if out.response.code != SmtpReplyCode::AUTH_SUCCESSFUL {
+                        let prompt = out.response.code == SmtpReplyCode::AUTH_CONTINUE;
                         let code = out.response.code.code();
                         let message = out.response.message();
                         let err = SmtpAuthLoginError::Rejected { code, message };
+
+                        // NOTE: a third prompt leaves the server waiting
+                        if prompt {
+                            self.state = State::cancel(err);
+                            debug!("{}", self.state);
+                            continue;
+                        }
+
                         return SmtpCoroutineState::Complete(Err(err));
                     }
 
@@ -295,6 +308,15 @@ impl SmtpCoroutine for SmtpAuthLogin {
                     debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
+                State::Cancel { send, error } => {
+                    // NOTE: whatever the server answers, error is the outcome
+                    if let SmtpCoroutineState::Yielded(y) = send.resume(arg.take()) {
+                        return SmtpCoroutineState::Yielded(y);
+                    }
+
+                    let error = error.take().expect("error taken twice");
+                    return SmtpCoroutineState::Complete(Err(error));
+                }
             }
         }
     }
@@ -306,6 +328,21 @@ enum State {
     Username(SmtpCommandSend<SmtpAuthData>),
     Password(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
+    Cancel {
+        send: SmtpCommandSend<SmtpAuthData>,
+        error: Option<SmtpAuthLoginError>,
+    },
+}
+
+impl State {
+    /// The state cancelling the exchange (RFC 4954 §4) before it fails
+    /// with `error`.
+    fn cancel(error: SmtpAuthLoginError) -> Self {
+        Self::Cancel {
+            send: SmtpCommandSend::new(SmtpAuthData::Cancel),
+            error: Some(error),
+        }
+    }
 }
 
 impl fmt::Display for State {
@@ -316,6 +353,7 @@ impl fmt::Display for State {
             Self::Username(_) => f.write_str("send username"),
             Self::Password(_) => f.write_str("send password"),
             Self::Ehlo(_) => f.write_str("refresh capabilities"),
+            Self::Cancel { .. } => f.write_str("cancel exchange"),
         }
     }
 }
@@ -426,18 +464,47 @@ mod tests {
     }
 
     #[test]
-    fn invalid_challenge_returns_challenge_error() {
+    fn invalid_challenge_is_cancelled_with_the_challenge_error() {
+        // NOTE: the last reply is the connection dying under the cancellation
+        for reply in [b"501 5.7.0 cancelled\r\n".as_slice(), b""] {
+            let opts = SmtpAuthLoginOptions::default();
+            let mut auth = SmtpAuthLogin::new("alice", &password(), domain(), opts);
+            let _ = expect_wants_write(&mut auth, None);
+            expect_wants_read(&mut auth);
+            let _ = expect_wants_write(&mut auth, Some(b"334 VXNlcm5hbWU6\r\n"));
+            expect_wants_read(&mut auth);
+
+            let cancel = expect_wants_write(&mut auth, Some(b"334 not!base64\r\n"));
+            assert_eq!(cancel, b"*\r\n");
+            expect_wants_read(&mut auth);
+
+            let err = expect_complete_err(&mut auth, reply);
+            let SmtpAuthLoginError::Challenge(SmtpAuthChallengeError::Base64) = err else {
+                panic!("expected SmtpAuthLoginError::Challenge, got {err:?}");
+            };
+        }
+    }
+
+    #[test]
+    fn third_prompt_is_cancelled_with_a_rejection() {
         let opts = SmtpAuthLoginOptions::default();
         let mut auth = SmtpAuthLogin::new("alice", &password(), domain(), opts);
         let _ = expect_wants_write(&mut auth, None);
         expect_wants_read(&mut auth);
         let _ = expect_wants_write(&mut auth, Some(b"334 VXNlcm5hbWU6\r\n"));
         expect_wants_read(&mut auth);
+        let _ = expect_wants_write(&mut auth, Some(b"334 UGFzc3dvcmQ6\r\n"));
+        expect_wants_read(&mut auth);
 
-        let err = expect_complete_err(&mut auth, b"334 not!base64\r\n");
-        let SmtpAuthLoginError::Challenge(SmtpAuthChallengeError::Base64) = err else {
-            panic!("expected SmtpAuthLoginError::Challenge, got {err:?}");
+        let cancel = expect_wants_write(&mut auth, Some(b"334 T1RQOg==\r\n"));
+        assert_eq!(cancel, b"*\r\n");
+        expect_wants_read(&mut auth);
+
+        let err = expect_complete_err(&mut auth, b"501 5.7.0 cancelled\r\n");
+        let SmtpAuthLoginError::Rejected { code, .. } = err else {
+            panic!("expected SmtpAuthLoginError::Rejected, got {err:?}");
         };
+        assert_eq!(code, 334);
     }
 
     #[test]

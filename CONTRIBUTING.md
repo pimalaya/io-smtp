@@ -17,7 +17,7 @@ This repository follows [Cairn](https://github.com/pimalaya/cairn): a living spe
 
 ## Feature matrix
 
-On top of the standard layered checks, io-smtp gates the SCRAM-SHA-256 mechanism behind the scram feature (it pulls the hmac, pbkdf2, rand and sha2 crates), so build both sides of that gate too:
+On top of the standard layered checks, io-smtp gates the SCRAM-SHA-256 mechanism behind the scram feature (it pulls the hmac, pbkdf2 and sha2 crates), so build both sides of that gate too. The feature pulls no randomness: the coroutine takes the client nonce with the credentials, and `rand` comes with the TLS features, whose `connect` draws a nonce the caller left empty.
 
 ```sh
 cargo build --no-default-features                    # coroutines only, no std leak

@@ -250,12 +250,20 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
 
                     let challenge = match parse_challenge(&out.response.text().0) {
                         Ok(challenge) => challenge,
-                        Err(err) => return SmtpCoroutineState::Complete(Err(err.into())),
+                        Err(err) => {
+                            self.state = State::cancel(err.into());
+                            debug!("{}", self.state);
+                            continue;
+                        }
                     };
 
                     let payload = match self.resume_sasl(SaslArg::Input(&challenge)) {
                         Ok(payload) => payload.unwrap_or_default(),
-                        Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                        Err(err) => {
+                            self.state = State::cancel(err);
+                            debug!("{}", self.state);
+                            continue;
+                        }
                     };
 
                     let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
@@ -268,12 +276,20 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
                     if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
                         let challenge = match parse_challenge(&out.response.text().0) {
                             Ok(challenge) => challenge,
-                            Err(err) => return SmtpCoroutineState::Complete(Err(err.into())),
+                            Err(err) => {
+                                self.state = State::cancel(err.into());
+                                debug!("{}", self.state);
+                                continue;
+                            }
                         };
 
                         let payload = match self.resume_sasl(SaslArg::Input(&challenge)) {
                             Ok(payload) => payload.unwrap_or_default(),
-                            Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                            Err(err) => {
+                                self.state = State::cancel(err);
+                                debug!("{}", self.state);
+                                continue;
+                            }
                         };
 
                         let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
@@ -328,6 +344,15 @@ impl SmtpCoroutine for SmtpAuthScramSha256 {
                     debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
+                State::Cancel { send, error } => {
+                    // NOTE: whatever the server answers, error is the outcome
+                    if let SmtpCoroutineState::Yielded(y) = send.resume(arg.take()) {
+                        return SmtpCoroutineState::Yielded(y);
+                    }
+
+                    let error = error.take().expect("error taken twice");
+                    return SmtpCoroutineState::Complete(Err(error));
+                }
             }
         }
     }
@@ -338,6 +363,21 @@ enum State {
     Send(SmtpCommandSend<SmtpAuthCommand<'static>>),
     Continue(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
+    Cancel {
+        send: SmtpCommandSend<SmtpAuthData>,
+        error: Option<SmtpAuthScramSha256Error>,
+    },
+}
+
+impl State {
+    /// The state cancelling the exchange (RFC 4954 §4) before it fails
+    /// with `error`.
+    fn cancel(error: SmtpAuthScramSha256Error) -> Self {
+        Self::Cancel {
+            send: SmtpCommandSend::new(SmtpAuthData::Cancel),
+            error: Some(error),
+        }
+    }
 }
 
 impl fmt::Display for State {
@@ -347,6 +387,7 @@ impl fmt::Display for State {
             Self::Send(_) => f.write_str("send client-first"),
             Self::Continue(_) => f.write_str("send client-final"),
             Self::Ehlo(_) => f.write_str("refresh capabilities"),
+            Self::Cancel { .. } => f.write_str("cancel exchange"),
         }
     }
 }
@@ -537,14 +578,48 @@ mod tests {
     }
 
     #[test]
-    fn invalid_server_first_returns_mechanism_error() {
+    fn invalid_server_first_is_cancelled_with_the_mechanism_error() {
+        // NOTE: the last reply is the connection dying under the cancellation
+        for reply in [b"501 5.7.0 cancelled\r\n".as_slice(), b""] {
+            let mut auth = auth(SmtpAuthScramSha256Options::default());
+
+            let _ = expect_wants_write(&mut auth, None);
+            expect_wants_read(&mut auth);
+
+            let cancel = expect_wants_write(&mut auth, Some(b"334 Zm9v\r\n"));
+            assert_eq!(cancel, b"*\r\n");
+            expect_wants_read(&mut auth);
+
+            let err = expect_complete_err(&mut auth, reply);
+            assert!(matches!(err, SmtpAuthScramSha256Error::Mechanism(_)));
+        }
+    }
+
+    #[test]
+    fn forged_server_final_in_a_challenge_is_cancelled() {
         let mut auth = auth(SmtpAuthScramSha256Options::default());
 
-        let _ = expect_wants_write(&mut auth, None);
+        let bytes = expect_wants_write(&mut auth, None);
+        let client_first = decode_last_base64_token(&bytes);
+
         expect_wants_read(&mut auth);
 
-        let err = expect_complete_err(&mut auth, b"334 Zm9v\r\n");
-        assert!(matches!(err, SmtpAuthScramSha256Error::Mechanism(_)));
+        let challenge = format!("334 {}\r\n", encode(server_first(&client_first)));
+        let _client_final = expect_wants_write(&mut auth, Some(challenge.as_bytes()));
+
+        expect_wants_read(&mut auth);
+
+        let forged = format!("v={}", encode("not the signature"));
+        let challenge = format!("334 {}\r\n", encode(&forged));
+        let cancel = expect_wants_write(&mut auth, Some(challenge.as_bytes()));
+        assert_eq!(cancel, b"*\r\n");
+        expect_wants_read(&mut auth);
+
+        let err = expect_complete_err(&mut auth, b"501 5.7.0 cancelled\r\n");
+        let SmtpAuthScramSha256Error::Mechanism(SaslScramError::ServerSignatureMismatch) = err
+        else {
+            panic!("expected SmtpAuthScramSha256Error::Mechanism, got {err:?}");
+        };
     }
 
     #[test]

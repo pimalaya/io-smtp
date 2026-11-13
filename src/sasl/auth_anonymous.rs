@@ -229,13 +229,19 @@ impl SmtpCoroutine for SmtpAuthAnonymous {
                                 let challenge = match parse_challenge(&out.response.text().0) {
                                     Ok(challenge) => challenge,
                                     Err(err) => {
-                                        return SmtpCoroutineState::Complete(Err(err.into()));
+                                        self.state = State::cancel(err.into());
+                                        debug!("{}", self.state);
+                                        continue;
                                     }
                                 };
 
                                 match self.resume_sasl(SaslArg::Input(&challenge)) {
                                     Ok(payload) => payload.unwrap_or_default(),
-                                    Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                                    Err(err) => {
+                                        self.state = State::cancel(err);
+                                        debug!("{}", self.state);
+                                        continue;
+                                    }
                                 }
                             }
                         };
@@ -283,12 +289,20 @@ impl SmtpCoroutine for SmtpAuthAnonymous {
                     if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
                         let challenge = match parse_challenge(&out.response.text().0) {
                             Ok(challenge) => challenge,
-                            Err(err) => return SmtpCoroutineState::Complete(Err(err.into())),
+                            Err(err) => {
+                                self.state = State::cancel(err.into());
+                                debug!("{}", self.state);
+                                continue;
+                            }
                         };
 
                         let payload = match self.resume_sasl(SaslArg::Input(&challenge)) {
                             Ok(payload) => payload.unwrap_or_default(),
-                            Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                            Err(err) => {
+                                self.state = State::cancel(err);
+                                debug!("{}", self.state);
+                                continue;
+                            }
                         };
 
                         let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
@@ -322,6 +336,15 @@ impl SmtpCoroutine for SmtpAuthAnonymous {
                     debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
+                State::Cancel { send, error } => {
+                    // NOTE: whatever the server answers, error is the outcome
+                    if let SmtpCoroutineState::Yielded(y) = send.resume(arg.take()) {
+                        return SmtpCoroutineState::Yielded(y);
+                    }
+
+                    let error = error.take().expect("error taken twice");
+                    return SmtpCoroutineState::Complete(Err(error));
+                }
             }
         }
     }
@@ -335,6 +358,21 @@ enum State {
     },
     Continue(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
+    Cancel {
+        send: SmtpCommandSend<SmtpAuthData>,
+        error: Option<SmtpAuthAnonymousError>,
+    },
+}
+
+impl State {
+    /// The state cancelling the exchange (RFC 4954 §4) before it fails
+    /// with `error`.
+    fn cancel(error: SmtpAuthAnonymousError) -> Self {
+        Self::Cancel {
+            send: SmtpCommandSend::new(SmtpAuthData::Cancel),
+            error: Some(error),
+        }
+    }
 }
 
 impl fmt::Display for State {
@@ -345,6 +383,7 @@ impl fmt::Display for State {
             Self::Send { .. } => f.write_str("send auth anonymous with ir"),
             Self::Continue(_) => f.write_str("send trace"),
             Self::Ehlo(_) => f.write_str("refresh capabilities"),
+            Self::Cancel { .. } => f.write_str("cancel exchange"),
         }
     }
 }
@@ -432,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn ir_extra_challenge_returns_mechanism_error() {
+    fn ir_extra_challenge_is_cancelled_with_the_mechanism_error() {
         let opts = SmtpAuthAnonymousOptions::default();
         let mut auth = SmtpAuthAnonymous::new(Some("trace@example.com"), domain(), opts);
         let _ = expect_wants_write(&mut auth, None);
@@ -440,7 +479,11 @@ mod tests {
 
         // NOTE: a challenge, which ANONYMOUS has nothing left to answer once
         // its trace went inline.
-        let err = expect_complete_err(&mut auth, b"334 \r\n");
+        let cancel = expect_wants_write(&mut auth, Some(b"334 \r\n"));
+        assert_eq!(cancel, b"*\r\n");
+        expect_wants_read(&mut auth);
+
+        let err = expect_complete_err(&mut auth, b"501 5.7.0 cancelled\r\n");
         let SmtpAuthAnonymousError::Mechanism(SaslAnonymousError::UnexpectedChallenge) = err else {
             panic!("expected SmtpAuthAnonymousError::Mechanism, got {err:?}");
         };

@@ -65,7 +65,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **BREAKING**: Changed `SmtpGreeting::domain` and `SmtpEhloResponse::domain` to a `SmtpText`, the name as the server gave it.
 
+- Changed the `scram` feature to pull no randomness: `rand` comes with the TLS features, without its default features.
+
+  The coroutines with `scram` build without std; only `connect` draws a nonce.
+
 ### Fixed
+
+- Fixed a failed `AUTH` exchange leaving the server waiting for a response.
+
+  When a mechanism refuses a challenge, or a challenge is not base64, the six mechanism coroutines send `*` and read the reply before failing (RFC 4954 4), so the connection takes another command.
+
+- Fixed the `tokio_session` example not requiring the `client` feature.
 
 - Fixed a refused greeting or `EHLO` being reported as a parse error.
 

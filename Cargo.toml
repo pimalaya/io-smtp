@@ -18,12 +18,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["scram", "rustls-ring"]
-scram = ["dep:rand", "io-sasl/scram"]
+scram = ["io-sasl/scram"]
 url = ["dep:url"]
 client = []
-rustls-ring = ["client", "url", "pimalaya-stream/rustls-ring", "dep:anyhow"]
-rustls-aws  = ["client", "url", "pimalaya-stream/rustls-aws", "dep:anyhow"]
-native-tls  = ["client", "url", "pimalaya-stream/native-tls", "dep:anyhow"]
+rustls-ring = ["client", "url", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:rand"]
+rustls-aws  = ["client", "url", "pimalaya-stream/rustls-aws", "dep:anyhow", "dep:rand"]
+native-tls  = ["client", "url", "pimalaya-stream/native-tls", "dep:anyhow", "dep:rand"]
 vendored = ["pimalaya-stream/vendored"]
 
 [[example]]
@@ -37,7 +37,7 @@ path = "examples/tokio_coroutine.rs"
 [[example]]
 name = "tokio_session"
 path = "examples/tokio_session.rs"
-required-features = ["url"]
+required-features = ["client", "url"]
 
 [[example]]
 name = "std_client_light"
@@ -74,7 +74,7 @@ chumsky = { version = "0.13", default-features = false }
 io-sasl = { version = "0.1.1", default-features = false }
 log = { version = "0.4", default-features = false }
 pimalaya-stream = { version = "0.3.1", default-features = false, optional = true }
-rand = { version = "0.10", optional = true }
+rand = { version = "0.10", default-features = false, features = ["thread_rng"], optional = true }
 secrecy = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2", default-features = false, optional = true }

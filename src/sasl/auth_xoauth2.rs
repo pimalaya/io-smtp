@@ -258,13 +258,19 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
                                 let challenge = match parse_challenge(&out.response.text().0) {
                                     Ok(challenge) => challenge,
                                     Err(err) => {
-                                        return SmtpCoroutineState::Complete(Err(err.into()));
+                                        self.state = State::cancel(err.into());
+                                        debug!("{}", self.state);
+                                        continue;
                                     }
                                 };
 
                                 match self.resume_sasl(SaslArg::Input(&challenge)) {
                                     Ok(payload) => payload.unwrap_or_default(),
-                                    Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                                    Err(err) => {
+                                        self.state = State::cancel(err);
+                                        debug!("{}", self.state);
+                                        continue;
+                                    }
                                 }
                             }
                         };
@@ -312,12 +318,20 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
                     if out.response.code == SmtpReplyCode::AUTH_CONTINUE {
                         let challenge = match parse_challenge(&out.response.text().0) {
                             Ok(challenge) => challenge,
-                            Err(err) => return SmtpCoroutineState::Complete(Err(err.into())),
+                            Err(err) => {
+                                self.state = State::cancel(err.into());
+                                debug!("{}", self.state);
+                                continue;
+                            }
                         };
 
                         let payload = match self.resume_sasl(SaslArg::Input(&challenge)) {
                             Ok(payload) => payload.unwrap_or_default(),
-                            Err(err) => return SmtpCoroutineState::Complete(Err(err)),
+                            Err(err) => {
+                                self.state = State::cancel(err);
+                                debug!("{}", self.state);
+                                continue;
+                            }
                         };
 
                         let data = SmtpAuthData::r#continue(payload.into_boxed_slice());
@@ -356,6 +370,15 @@ impl SmtpCoroutine for SmtpAuthXoauth2 {
                     debug!("capabilities refreshed");
                     return SmtpCoroutineState::Complete(Ok(()));
                 }
+                State::Cancel { send, error } => {
+                    // NOTE: whatever the server answers, error is the outcome
+                    if let SmtpCoroutineState::Yielded(y) = send.resume(arg.take()) {
+                        return SmtpCoroutineState::Yielded(y);
+                    }
+
+                    let error = error.take().expect("error taken twice");
+                    return SmtpCoroutineState::Complete(Err(error));
+                }
             }
         }
     }
@@ -369,6 +392,21 @@ enum State {
     },
     Continue(SmtpCommandSend<SmtpAuthData>),
     Ehlo(SmtpEhlo),
+    Cancel {
+        send: SmtpCommandSend<SmtpAuthData>,
+        error: Option<SmtpAuthXoauth2Error>,
+    },
+}
+
+impl State {
+    /// The state cancelling the exchange (RFC 4954 §4) before it fails
+    /// with `error`.
+    fn cancel(error: SmtpAuthXoauth2Error) -> Self {
+        Self::Cancel {
+            send: SmtpCommandSend::new(SmtpAuthData::Cancel),
+            error: Some(error),
+        }
+    }
 }
 
 impl fmt::Display for State {
@@ -379,6 +417,7 @@ impl fmt::Display for State {
             Self::Send { .. } => f.write_str("send auth xoauth2 with ir"),
             Self::Continue(_) => f.write_str("send credentials"),
             Self::Ehlo(_) => f.write_str("refresh capabilities"),
+            Self::Cancel { .. } => f.write_str("cancel exchange"),
         }
     }
 }
@@ -461,6 +500,23 @@ mod tests {
         };
         assert_eq!(code, 504);
         assert_eq!(message, "mechanism disabled");
+    }
+
+    #[test]
+    fn invalid_challenge_is_cancelled_with_the_challenge_error() {
+        let opts = SmtpAuthXoauth2Options::default();
+        let mut auth = SmtpAuthXoauth2::new("alice@example.com", &token(), domain(), opts);
+        let _ = expect_wants_write(&mut auth, None);
+        expect_wants_read(&mut auth);
+
+        let cancel = expect_wants_write(&mut auth, Some(b"334 not!base64\r\n"));
+        assert_eq!(cancel, b"*\r\n");
+        expect_wants_read(&mut auth);
+
+        let err = expect_complete_err(&mut auth, b"501 5.7.0 cancelled\r\n");
+        let SmtpAuthXoauth2Error::Challenge(SmtpAuthChallengeError::Base64) = err else {
+            panic!("expected SmtpAuthXoauth2Error::Challenge, got {err:?}");
+        };
     }
 
     #[test]

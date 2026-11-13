@@ -10,7 +10,9 @@ The `AUTH` extension (RFC 4954) and the SASL mechanisms io-smtp frames over it. 
 
 ## Requirement: One coroutine per framed mechanism
 
-io-smtp SHALL frame ANONYMOUS (RFC 4505), LOGIN, PLAIN (RFC 4616), OAUTHBEARER (RFC 7628), XOAUTH2 and SCRAM-SHA-256 (RFC 7677), each as its own coroutine under the `sasl` module. SCRAM-SHA-256 SHALL sit behind the `scram` feature, which is what pulls the hash and randomness crates; the rest SHALL be unconditional.
+io-smtp SHALL frame ANONYMOUS (RFC 4505), LOGIN, PLAIN (RFC 4616), OAUTHBEARER (RFC 7628), XOAUTH2 and SCRAM-SHA-256 (RFC 7677), each as its own coroutine under the `sasl` module. SCRAM-SHA-256 SHALL sit behind the `scram` feature, which is what pulls the hash crates; the rest SHALL be unconditional.
+
+The `scram` feature SHALL NOT pull `rand`: the coroutine takes the client nonce with the credentials, so the coroutine layer with `scram` builds without std. `rand` SHALL come with the TLS features (`rustls-ring`, `rustls-aws`, `native-tls`), the connect they gate being the only code drawing a nonce, and without its default features beyond `thread_rng`.
 
 io-sasl computes more mechanisms than this crate frames. A session opened with credentials for one io-smtp has no coroutine for SHALL fail with `SmtpSessionOpenError::UnsupportedMechanism`, naming the mechanism, rather than skipping the exchange silently: a caller learns which of its credentials this crate cannot use. A mechanism io-sasl gains under a feature this crate does not enable falls into that same arm, so a build combining the two cannot authenticate by accident.
 
@@ -52,3 +54,14 @@ The text of a SCRAM-SHA-256 success reply SHALL be read as the server-final-mess
 - GIVEN a SCRAM-SHA-256 exchange whose server-final-message came in a 334 challenge
 - WHEN the server replies `235 2.7.0 Accepted`
 - THEN the exchange completes `Ok`, the text never reaching the mechanism
+
+## Requirement: An exchange the client gives up is cancelled
+
+When a 334 challenge cannot be answered, its payload not being base64, the mechanism refusing it, or LOGIN being prompted a third time, every mechanism coroutine SHALL send the `*` line (RFC 4954 4), read one reply, and then fail with the error that made it give up, whatever that reply is and even when the connection ends under it. The server is so left expecting a command, not a response, and the caller may try another mechanism on the same connection.
+
+No `*` SHALL be sent where the server is not waiting: after a rejection, after a transport failure, or after a success reply the mechanism refuses (a server signature that does not verify in a 235, a success before the expected challenge). In that last case the server holds the session authenticated while the client does not trust it: the connection is not fit for further use.
+
+### Scenario: A server-first message SCRAM refuses
+- GIVEN a SCRAM-SHA-256 exchange and a server answering `334 Zm9v`
+- WHEN the mechanism refuses the message
+- THEN the client writes `*`, reads the reply, and fails with the mechanism's error
