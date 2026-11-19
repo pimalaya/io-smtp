@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING**: Changed the io-sasl dependency to 0.3.
 - **BREAKING**: Renamed the `client` cargo feature, the std-blocking client, to `std`.
 
   A consumer enabling it changes `features = ["client"]` to `features = ["std"]`. The TLS features now imply `std`.
