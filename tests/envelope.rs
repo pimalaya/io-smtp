@@ -1,6 +1,8 @@
 //! Tests for the command arguments the caller gives: whatever the
 //! string, a command stays one line. No network connection is made.
 
+#![cfg(feature = "client")]
+
 use io_smtp::{
     rfc4954::auth::{SmtpAuthCommand, SmtpAuthMechanism},
     rfc5321::{

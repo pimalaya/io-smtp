@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added the `server` cargo feature and the `server` module: `server::command::SmtpServerCommand` (command parser), `server::reply::SmtpServerReply` (reply writer, multiline, enhanced status codes) and `server::session::SmtpServerSession`, an I/O-free SMTP submission and LMTP session with PIPELINING, SIZE, 8BITMIME, SMTPUTF8, ENHANCEDSTATUSCODES, DSN, STARTTLS and AUTH PLAIN and LOGIN through the io-sasl server side.
+
+- Added `rfc3461::parameter::xtext_decode`, and `SmtpDsnNotify::is_never` and `SmtpDsnNotify::contains`.
+
+- Added a `server` fuzz target.
+
+### Changed
+
+- **BREAKING**: Renamed the `client` cargo feature, the std-blocking client, to `std`.
+
+  A consumer enabling it changes `features = ["client"]` to `features = ["std"]`. The TLS features now imply `std`.
+
+- **BREAKING**: Gated the client coroutines behind a new `client` cargo feature, on by default.
+
+  `message`, `send`, `session`, `sasl`, `rfc7628`, `rfc7677`, `rfc3207::starttls`, `rfc4954::auth`, `rfc4954::auth_data` and the command modules of `rfc5321` need it; the wire-format types do not. A `default-features = false` consumer using the coroutines adds `features = ["client"]`.
+
+- **BREAKING**: Required io-sasl with its `client` feature for the client side and its `server` feature for the server side.
+
 ## [0.9.0] - 2026-11-13
 
 ### Changed

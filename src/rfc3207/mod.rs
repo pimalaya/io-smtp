@@ -5,4 +5,6 @@
 //! connection to TLS.
 
 pub mod capability;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod starttls;

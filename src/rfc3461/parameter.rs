@@ -107,6 +107,17 @@ impl SmtpDsnNotify {
         Self(self.0 | other.0)
     }
 
+    /// Whether this is `NEVER`.
+    pub const fn is_never(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether every condition of `other` is set, `NEVER` never being
+    /// contained.
+    pub const fn contains(self, other: Self) -> bool {
+        other.0 != 0 && self.0 & other.0 == other.0
+    }
+
     /// Build the `NOTIFY=...` [`SmtpParameter`] for `RCPT TO`.
     pub fn into_parameter(self) -> SmtpParameter<'static> {
         let value = if self.0 == 0 {
@@ -165,6 +176,40 @@ impl SmtpParameter<'static> {
     }
 }
 
+/// Decodes an xtext string (RFC 3461 section 4), as found in the `ENVID`
+/// and `ORCPT` parameters, or `None` when it is not valid xtext or does
+/// not decode to UTF-8.
+pub fn xtext_decode(s: &str) -> Option<String> {
+    let hex = |b: u8| match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    };
+
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                let hi = hex(*bytes.get(i + 1)?)?;
+                let lo = hex(*bytes.get(i + 2)?)?;
+                out.push(hi << 4 | lo);
+                i += 3;
+            }
+            b'=' => return None,
+            b @ b'!'..=b'~' => {
+                out.push(b);
+                i += 1;
+            }
+            _ => return None,
+        }
+    }
+
+    String::from_utf8(out).ok()
+}
+
 /// Appends the xtext encoding of a printable US-ASCII string.
 ///
 /// ```abnf
@@ -201,7 +246,10 @@ fn xtext(s: &str, out: &mut String) -> Result<(), SmtpSyntaxError> {
 mod tests {
     use alloc::string::ToString;
 
-    use crate::rfc5321::{SmtpParameter, SmtpSyntaxError};
+    use crate::{
+        rfc3461::parameter::xtext_decode,
+        rfc5321::{SmtpParameter, SmtpSyntaxError},
+    };
 
     #[test]
     fn envid_is_xtext_encoded() {
@@ -220,6 +268,16 @@ mod tests {
     fn orcpt_is_xtext_encoded() {
         let parameter = SmtpParameter::orcpt_rfc822("a+b@example.org").unwrap();
         assert_eq!(parameter.to_string(), "ORCPT=rfc822;a+2Bb@example.org");
+    }
+
+    #[test]
+    fn xtext_is_decoded() {
+        assert_eq!(xtext_decode("a+2Bb+3Dc+20d").as_deref(), Some("a+b=c d"));
+        assert_eq!(xtext_decode("QQ314159").as_deref(), Some("QQ314159"));
+
+        for s in ["a+2", "a+2b", "a=b", "a b", "+C3+28"] {
+            assert_eq!(xtext_decode(s), None, "{s:?}");
+        }
     }
 
     #[test]

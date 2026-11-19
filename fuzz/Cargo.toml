@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { version = "1", features = ["derive"] }
 io-sasl = { version = "0.2", default-features = false, features = ["scram"] }
-io-smtp = { path = "..", default-features = false, features = ["scram"] }
+io-smtp = { path = "..", default-features = false, features = ["client", "scram", "server"] }
 libfuzzer-sys = "0.4"
 secrecy = "0.10"
 
@@ -21,5 +21,15 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "server"
+path = "fuzz_targets/server.rs"
+test = false
+doc = false
+bench = false
+
 # Detach from the parent package so `cargo fuzz` builds this crate standalone.
 [workspace]
+
+[patch.crates-io]
+io-sasl = { path = "../../io-sasl" }

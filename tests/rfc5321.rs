@@ -3,6 +3,8 @@
 //! All tests pump SMTP coroutines against pre-crafted in-memory
 //! response buffers. No network connection is made.
 
+#![cfg(feature = "client")]
+
 use std::borrow::Cow;
 
 use io_smtp::{

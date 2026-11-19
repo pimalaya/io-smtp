@@ -8,6 +8,10 @@ status: current
 
 The std-blocking client, the only place this crate touches a socket.
 
+## Requirement: Features
+
+The std-blocking client SHALL sit behind the `std` feature, which implies `client`, the feature gating the client coroutines. The TLS features SHALL imply `std`.
+
 ## Requirement: End-to-end connect
 
 With a TLS feature enabled, `SmtpClientStd::connect` SHALL open a whole authenticated session from a URL and an EHLO domain, answering the session coroutine's transport requests with a `pimalaya_stream::stream::Stream`, and SHALL own no protocol decision of its own.

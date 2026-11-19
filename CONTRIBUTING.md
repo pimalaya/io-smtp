@@ -17,13 +17,16 @@ This repository follows [Cairn](https://github.com/pimalaya/cairn): a living spe
 
 ## Feature matrix
 
-On top of the standard layered checks, io-smtp gates the SCRAM-SHA-256 mechanism behind the scram feature (it pulls the hmac, pbkdf2 and sha2 crates), so build both sides of that gate too. The feature pulls no randomness: the coroutine takes the client nonce with the credentials, and `rand` comes with the TLS features, whose `connect` draws a nonce the caller left empty.
+The crate splits by side: the wire-format types build in every shape, `client` (default) gates the client coroutines, `server` the server side, and `std` the std-blocking client on top of `client`. On top of the standard layered checks, io-smtp gates the SCRAM-SHA-256 mechanism behind the scram feature (it pulls the hmac, pbkdf2 and sha2 crates), so build both sides of that gate too. The feature pulls no randomness: the coroutine takes the client nonce with the credentials, and `rand` comes with the TLS features, whose `connect` draws a nonce the caller left empty.
 
 ```sh
-cargo build --no-default-features                    # coroutines only, no std leak
-cargo build --no-default-features --features scram   # coroutines + SCRAM-SHA-256
-cargo build --no-default-features --features client  # light client, no TLS deps
-cargo build --release                                # full client (default TLS + scram)
+cargo build --no-default-features                           # types only
+cargo build --no-default-features --features client         # client coroutines, no std leak
+cargo build --no-default-features --features client,scram   # client coroutines + SCRAM-SHA-256
+cargo build --no-default-features --features server         # server side only, no std leak
+cargo build --no-default-features --features std            # light client, no TLS deps
+cargo build --release                                       # full client (default TLS + scram)
+cargo build --all-features                                  # everything
 ```
 
 ## Provider tests
@@ -32,4 +35,4 @@ The tests folder ships ignored end-to-end tests against real servers: fastmail a
 
 ## Fuzzing
 
-The fuzz folder holds a cargo-fuzz target over the reply parsers and the coroutines reading them; [fuzz/README.md](./fuzz/README.md) has the oracle and the command, run through the `fuzz` devShell of the flake.
+The fuzz folder holds two cargo-fuzz targets, one over the reply parsers and the coroutines reading them, one over the server session; [fuzz/README.md](./fuzz/README.md) has the oracle and the command, run through the `fuzz` devShell of the flake.

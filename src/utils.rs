@@ -4,9 +4,11 @@
 //! the chumsky parser building blocks shared by every wire-format
 //! parser.
 
+#[cfg(feature = "client")]
 use alloc::{format, string::String, vec::Vec};
 
 /// Converts bytes into a ready-to-be-printed form.
+#[cfg(feature = "client")]
 pub fn escape_byte_string(bytes: impl AsRef<[u8]>) -> String {
     let bytes = bytes.as_ref();
 
@@ -38,23 +40,23 @@ pub mod parsers {
     #[cfg(test)]
     use core::str::from_utf8;
 
+    #[cfg(any(feature = "client", test))]
     use alloc::{
         format,
         string::{String, ToString},
         vec::Vec,
     };
 
-    use chumsky::{
-        error::{RichPattern, RichReason},
-        extra,
-        prelude::*,
-    };
+    #[cfg(any(feature = "client", test))]
+    use chumsky::error::{RichPattern, RichReason};
+    use chumsky::{extra, prelude::*};
 
     /// The extra parser context carried by every parser in this
     /// crate: rich byte-level errors.
     pub type Extra<'a> = extra::Err<Rich<'a, u8>>;
 
     /// Format a single byte as a printable character or hex escape.
+    #[cfg(any(feature = "client", test))]
     fn fmt_byte(b: u8) -> String {
         if b.is_ascii_graphic() || b == b' ' {
             format!("'{}'", b as char)
@@ -64,6 +66,7 @@ pub mod parsers {
     }
 
     /// Format a RichPattern for display in error messages.
+    #[cfg(any(feature = "client", test))]
     fn fmt_pattern(p: &RichPattern<'_, u8>) -> String {
         match p {
             RichPattern::Token(t) => fmt_byte(**t),
@@ -80,6 +83,7 @@ pub mod parsers {
     ///
     /// Displays bytes as printable characters where possible, includes byte
     /// positions and label context chains added by `.labelled("...")`.
+    #[cfg(any(feature = "client", test))]
     pub fn format_rich_errors(errs: Vec<Rich<'_, u8>>) -> String {
         errs.iter()
             .map(|e| {

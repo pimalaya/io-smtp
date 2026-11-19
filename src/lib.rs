@@ -4,11 +4,20 @@
 
 //! # io-smtp
 //!
-//! I/O-free SMTP client coroutines: every network exchange is a
-//! resumable state machine emitting read and write requests instead
-//! of performing I/O itself, so the caller owns the socket and pumps
-//! the coroutine (see the client feature for a ready-made
-//! std-blocking pump).
+//! I/O-free SMTP client coroutines and SMTP/LMTP server session:
+//! every network exchange is a resumable state machine emitting read
+//! and write requests instead of performing I/O itself, so the caller
+//! owns the socket and pumps the coroutine (see the std feature for a
+//! ready-made std-blocking client pump).
+//!
+//! ## Features
+//!
+//! The wire-format types (reply codes, enhanced status codes, paths,
+//! addresses, parameters, capabilities) compile in every build. The
+//! `client` feature (default) adds the client coroutines, `server` the
+//! server side ([`server`]), `std` the std-blocking client on top of
+//! `client`, and the TLS features (`rustls-ring`, `rustls-aws`,
+//! `native-tls`) its end-to-end connect.
 //!
 //! ## The coroutine contract
 //!
@@ -55,7 +64,7 @@
 //! the composite whole-message send coroutine, [`session`] the
 //! composite session-opening coroutine, the private utils module the shared
 //! byte-escaping and parser helpers, and [`client`] the optional
-//! std-blocking client (client feature) exposing one method per
+//! std-blocking client (std feature) exposing one method per
 //! coroutine plus, with a TLS feature enabled, an end-to-end connect
 //! covering transport, STARTTLS and SASL.
 //!
@@ -70,22 +79,34 @@
 //! answers them with its own sockets and inherits the ordering. The std
 //! client is a thirty-line pump over it.
 //!
+//! ## Serving
+//!
+//! [`server`] holds the other side: a command parser, a reply writer
+//! and `SmtpServerSession`, one state machine for SMTP submission and
+//! LMTP. It is fed the bytes the caller reads and yields the bytes to
+//! write next to the decisions only the caller can take (credentials,
+//! sender, recipients, message, TLS upgrade), authenticating through
+//! the server side of io-sasl.
+//!
 //! ## Conventions
 //!
 //! The crate is unconditionally no_std; alloc is always required,
-//! std only under the client feature. Public items carry the bare
+//! std only under the std feature. Public items carry the bare
 //! Smtp domain prefix (SMTP is not versioned). Coroutine errors
 //! normalise to the shape "SMTP operation failed: cause", and RFC
 //! wire tokens (mechanism names, capability keywords) keep their
 //! exact spelling.
 
 extern crate alloc;
-#[cfg(feature = "client")]
+#[cfg(feature = "std")]
 extern crate std;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub mod client;
 pub mod coroutine;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod message;
 pub mod rfc1870;
 pub mod rfc3207;
@@ -93,11 +114,24 @@ pub mod rfc3461;
 pub mod rfc3463;
 pub mod rfc4954;
 pub mod rfc5321;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod rfc7628;
-#[cfg(feature = "scram")]
+#[cfg(all(feature = "client", feature = "scram"))]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "client", feature = "scram"))))]
 pub mod rfc7677;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod sasl;
+#[cfg(any(feature = "client", feature = "server"))]
 mod scan;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod send;
+#[cfg(feature = "server")]
+#[cfg_attr(docsrs, doc(cfg(feature = "server")))]
+pub mod server;
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod session;
 pub(crate) mod utils;

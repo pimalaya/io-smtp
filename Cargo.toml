@@ -1,6 +1,6 @@
 [package]
 name = "io-smtp"
-description = "SMTP client library for Rust"
+description = "SMTP client and server library for Rust"
 version = "0.9.0"
 authors = ["Clément DOUIN (soywod) <pimalaya.org@posteo.net>"]
 rust-version = "1.89"
@@ -17,32 +17,36 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["scram", "rustls-ring"]
+default = ["client", "scram", "rustls-ring"]
+client = ["io-sasl/client"]
+server = ["io-sasl/server"]
+std = ["client"]
 scram = ["io-sasl/scram"]
 url = ["dep:url"]
-client = []
-rustls-ring = ["client", "url", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:rand"]
-rustls-aws  = ["client", "url", "pimalaya-stream/rustls-aws", "dep:anyhow", "dep:rand"]
-native-tls  = ["client", "url", "pimalaya-stream/native-tls", "dep:anyhow", "dep:rand"]
+rustls-ring = ["std", "url", "pimalaya-stream/rustls-ring", "dep:anyhow", "dep:rand"]
+rustls-aws  = ["std", "url", "pimalaya-stream/rustls-aws", "dep:anyhow", "dep:rand"]
+native-tls  = ["std", "url", "pimalaya-stream/native-tls", "dep:anyhow", "dep:rand"]
 vendored = ["pimalaya-stream/vendored"]
 
 [[example]]
 name = "std_coroutine"
 path = "examples/std_coroutine.rs"
+required-features = ["client"]
 
 [[example]]
 name = "tokio_coroutine"
 path = "examples/tokio_coroutine.rs"
+required-features = ["client"]
 
 [[example]]
 name = "tokio_session"
 path = "examples/tokio_session.rs"
-required-features = ["client", "url"]
+required-features = ["std", "url"]
 
 [[example]]
 name = "std_client_light"
 path = "examples/std_client_light.rs"
-required-features = ["client"]
+required-features = ["std"]
 
 [[example]]
 name = "std_client_full"
@@ -78,3 +82,6 @@ rand = { version = "0.10", default-features = false, features = ["thread_rng"], 
 secrecy = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 url = { version = "2", default-features = false, optional = true }
+
+[patch.crates-io]
+io-sasl = { path = "../io-sasl" }
