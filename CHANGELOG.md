@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-19
+
 ### Added
 
 - Added the `server` cargo feature and the `server` module: `server::command::SmtpServerCommand` (command parser), `server::reply::SmtpServerReply` (reply writer, multiline, enhanced status codes) and `server::session::SmtpServerSession`, an I/O-free SMTP submission and LMTP session with PIPELINING, SIZE, 8BITMIME, SMTPUTF8, ENHANCEDSTATUSCODES, DSN, STARTTLS and AUTH PLAIN and LOGIN through the io-sasl server side.
@@ -366,7 +368,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added the `vendored` cargo feature, forwarded to pimalaya-stream.
 
-[unreleased]: https://github.com/pimalaya/io-smtp/compare/v0.9.0..HEAD
+[Unreleased]: https://github.com/pimalaya/io-smtp/compare/v0.10.0..HEAD
+[0.10.0]: https://github.com/pimalaya/io-smtp/compare/v0.9.0..v0.10.0
 [0.9.0]: https://github.com/pimalaya/io-smtp/compare/v0.8.0..v0.9.0
 [0.8.0]: https://github.com/pimalaya/io-smtp/compare/v0.7.1..v0.8.0
 [0.7.1]: https://github.com/pimalaya/io-smtp/compare/v0.7.0..v0.7.1
